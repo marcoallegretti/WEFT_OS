@@ -9,7 +9,7 @@ use smithay::{
         winit::{self, WinitEvent},
     },
     output::{Mode as OutputMode, Output, PhysicalProperties, Subpixel},
-    reexports::calloop::{generic::Generic, EventLoop, Interest, Mode, PostAction},
+    reexports::calloop::{EventLoop, Interest, Mode, PostAction, generic::Generic},
     utils::{Rectangle, Transform},
     wayland::socket::ListeningSocketSource,
 };
@@ -20,16 +20,15 @@ use crate::{
 };
 
 pub fn run() -> anyhow::Result<()> {
-    let mut display =
-        smithay::reexports::wayland_server::Display::<WeftCompositorState>::new()?;
+    let mut display = smithay::reexports::wayland_server::Display::<WeftCompositorState>::new()?;
     let display_handle = display.handle();
 
     let mut event_loop: EventLoop<'static, WeftCompositorState> = EventLoop::try_new()?;
     let loop_handle = event_loop.handle();
     let loop_signal = event_loop.get_signal();
 
-    let (mut backend, winit) = winit::init()
-        .map_err(|e| anyhow::anyhow!("winit init failed: {e}"))?;
+    let (mut backend, winit) =
+        winit::init().map_err(|e| anyhow::anyhow!("winit init failed: {e}"))?;
 
     let mode = OutputMode {
         size: backend.window_size(),

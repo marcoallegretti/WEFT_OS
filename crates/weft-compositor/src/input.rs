@@ -1,31 +1,26 @@
 use smithay::{
     backend::input::{
         AbsolutePositionEvent, Axis, AxisSource, ButtonState, Event, GestureHoldBeginEvent,
-        GestureHoldEndEvent, GesturePinchBeginEvent, GesturePinchEndEvent,
-        GesturePinchUpdateEvent, GestureSwipeBeginEvent, GestureSwipeEndEvent,
-        GestureSwipeUpdateEvent, InputBackend, InputEvent, KeyState, KeyboardKeyEvent,
-        PointerAxisEvent, PointerButtonEvent, PointerMotionAbsoluteEvent, PointerMotionEvent,
-        TouchCancelEvent, TouchDownEvent, TouchFrameEvent, TouchMotionEvent, TouchUpEvent,
+        GestureHoldEndEvent, GesturePinchBeginEvent, GesturePinchEndEvent, GesturePinchUpdateEvent,
+        GestureSwipeBeginEvent, GestureSwipeEndEvent, GestureSwipeUpdateEvent, InputBackend,
+        InputEvent, KeyState, KeyboardKeyEvent, PointerAxisEvent, PointerButtonEvent,
+        PointerMotionAbsoluteEvent, PointerMotionEvent, TouchCancelEvent, TouchDownEvent,
+        TouchFrameEvent, TouchMotionEvent, TouchUpEvent,
     },
     input::{
         keyboard::FilterResult,
         pointer::{AxisFrame, ButtonEvent, MotionEvent},
     },
-    utils::{Logical, Point, Serial, SERIAL_COUNTER},
+    utils::{Logical, Point, SERIAL_COUNTER, Serial},
 };
 
 use crate::state::WeftCompositorState;
 
-pub fn process_input_event<B: InputBackend>(
-    state: &mut WeftCompositorState,
-    event: InputEvent<B>,
-) {
+pub fn process_input_event<B: InputBackend>(state: &mut WeftCompositorState, event: InputEvent<B>) {
     match event {
         InputEvent::Keyboard { event } => handle_keyboard(state, event),
         InputEvent::PointerMotion { event } => handle_pointer_motion(state, event),
-        InputEvent::PointerMotionAbsolute { event } => {
-            handle_pointer_motion_absolute(state, event)
-        }
+        InputEvent::PointerMotionAbsolute { event } => handle_pointer_motion_absolute(state, event),
         InputEvent::PointerButton { event } => handle_pointer_button(state, event),
         InputEvent::PointerAxis { event } => handle_pointer_axis(state, event),
         InputEvent::TouchDown { event } => handle_touch_down(state, event),
@@ -47,10 +42,7 @@ pub fn process_input_event<B: InputBackend>(
     }
 }
 
-fn handle_keyboard<B: InputBackend>(
-    state: &mut WeftCompositorState,
-    event: B::KeyboardKeyEvent,
-) {
+fn handle_keyboard<B: InputBackend>(state: &mut WeftCompositorState, event: B::KeyboardKeyEvent) {
     let serial = SERIAL_COUNTER.next_serial();
     let time = event.time_msec();
     let key_state = event.state();
@@ -99,10 +91,7 @@ fn handle_pointer_motion_absolute<B: InputBackend>(
 ) {
     let output = state.space.outputs().next().cloned();
     if let Some(output) = output {
-        let output_geo = state
-            .space
-            .output_geometry(&output)
-            .unwrap_or_default();
+        let output_geo = state.space.output_geometry(&output).unwrap_or_default();
         let pos = event.position_transformed(output_geo.size);
         state.pointer_location = output_geo.loc.to_f64() + pos;
     }
@@ -203,10 +192,7 @@ fn handle_pointer_axis<B: InputBackend>(
     }
 }
 
-fn handle_touch_down<B: InputBackend>(
-    state: &mut WeftCompositorState,
-    event: B::TouchDownEvent,
-) {
+fn handle_touch_down<B: InputBackend>(state: &mut WeftCompositorState, event: B::TouchDownEvent) {
     let serial = SERIAL_COUNTER.next_serial();
     let output = state.space.outputs().next().cloned();
     if let Some(output) = output {
@@ -230,10 +216,7 @@ fn handle_touch_down<B: InputBackend>(
     }
 }
 
-fn handle_touch_up<B: InputBackend>(
-    state: &mut WeftCompositorState,
-    event: B::TouchUpEvent,
-) {
+fn handle_touch_up<B: InputBackend>(state: &mut WeftCompositorState, event: B::TouchUpEvent) {
     let serial = SERIAL_COUNTER.next_serial();
     if let Some(touch) = state.seat.get_touch() {
         touch.up(
@@ -428,15 +411,18 @@ fn handle_gesture_hold_end<B: InputBackend>(
 pub fn surface_under(
     state: &WeftCompositorState,
     point: Point<f64, Logical>,
-) -> Option<(smithay::reexports::wayland_server::protocol::wl_surface::WlSurface, Point<f64, Logical>)> {
-    state
-        .space
-        .element_under(point)
-        .and_then(|(window, loc)| {
-            window
-                .surface_under(point - loc.to_f64(), smithay::desktop::WindowSurfaceType::ALL)
-                .map(|(surface, surface_loc)| (surface, (loc.to_f64() + surface_loc.to_f64())))
-        })
+) -> Option<(
+    smithay::reexports::wayland_server::protocol::wl_surface::WlSurface,
+    Point<f64, Logical>,
+)> {
+    state.space.element_under(point).and_then(|(window, loc)| {
+        window
+            .surface_under(
+                point - loc.to_f64(),
+                smithay::desktop::WindowSurfaceType::ALL,
+            )
+            .map(|(surface, surface_loc)| (surface, (loc.to_f64() + surface_loc.to_f64())))
+    })
 }
 
 fn clamp_pointer_to_output_space(state: &mut WeftCompositorState) {

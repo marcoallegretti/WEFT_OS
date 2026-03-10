@@ -2,33 +2,27 @@ use smithay::{
     backend::{input::TabletToolDescriptor, renderer::utils::on_commit_buffer_handler},
     delegate_compositor, delegate_cursor_shape, delegate_dmabuf, delegate_input_method_manager,
     delegate_layer_shell, delegate_output, delegate_pointer_constraints, delegate_presentation,
-    delegate_seat, delegate_shm, delegate_text_input_manager,
-    delegate_xdg_shell,
-    desktop::{
-        layer_map_for_output, PopupKind, PopupManager, Space, Window, WindowSurfaceType,
-    },
-    input::{
-        keyboard::XkbConfig,
-        pointer::CursorImageStatus,
-        Seat, SeatHandler, SeatState,
-    },
+    delegate_seat, delegate_shm, delegate_text_input_manager, delegate_xdg_shell,
+    desktop::{PopupKind, PopupManager, Space, Window, WindowSurfaceType, layer_map_for_output},
+    input::{Seat, SeatHandler, SeatState, keyboard::XkbConfig, pointer::CursorImageStatus},
     output::Output,
     reexports::{
         calloop::{LoopHandle, LoopSignal},
         wayland_server::{
+            Client, DisplayHandle,
             backend::{ClientData, ClientId, DisconnectReason},
             protocol::{wl_buffer::WlBuffer, wl_output::WlOutput, wl_surface::WlSurface},
-            Client, DisplayHandle,
         },
     },
     utils::{Logical, Point, Rectangle},
     wayland::{
-        compositor::{CompositorClientState, CompositorHandler, CompositorState},
         buffer::BufferHandler,
+        compositor::{CompositorClientState, CompositorHandler, CompositorState},
         cursor_shape::CursorShapeManagerState,
         dmabuf::{DmabufGlobal, DmabufHandler, DmabufState, ImportNotifier},
-        input_method::{InputMethodHandler, InputMethodManagerState, PopupSurface as ImPopupSurface},
-        tablet_manager::TabletSeatHandler,
+        input_method::{
+            InputMethodHandler, InputMethodManagerState, PopupSurface as ImPopupSurface,
+        },
         output::OutputManagerState,
         pointer_constraints::{PointerConstraintsHandler, PointerConstraintsState},
         presentation::{PresentationHandler, PresentationState},
@@ -38,6 +32,7 @@ use smithay::{
             xdg::{PopupSurface, PositionerState, ToplevelSurface, XdgShellHandler, XdgShellState},
         },
         shm::{ShmHandler, ShmState},
+        tablet_manager::TabletSeatHandler,
         text_input::TextInputManagerState,
     },
 };
@@ -100,8 +95,7 @@ impl WeftCompositorState {
         let layer_shell_state = WlrLayerShellState::new::<Self>(&display_handle);
         let shm_state = ShmState::new::<Self>(&display_handle, vec![]);
         let dmabuf_state = DmabufState::new();
-        let output_manager_state =
-            OutputManagerState::new_with_xdg_output::<Self>(&display_handle);
+        let output_manager_state = OutputManagerState::new_with_xdg_output::<Self>(&display_handle);
         // Clock ID 1 = CLOCK_MONOTONIC
         let presentation_state = PresentationState::new::<Self>(&display_handle, 1);
         let text_input_state = TextInputManagerState::new::<Self>(&display_handle);
@@ -223,7 +217,13 @@ impl XdgShellHandler for WeftCompositorState {
         }
     }
 
-    fn grab(&mut self, _surface: PopupSurface, _seat: smithay::reexports::wayland_server::protocol::wl_seat::WlSeat, _serial: smithay::utils::Serial) {}
+    fn grab(
+        &mut self,
+        _surface: PopupSurface,
+        _seat: smithay::reexports::wayland_server::protocol::wl_seat::WlSeat,
+        _serial: smithay::utils::Serial,
+    ) {
+    }
 }
 
 delegate_xdg_shell!(WeftCompositorState);

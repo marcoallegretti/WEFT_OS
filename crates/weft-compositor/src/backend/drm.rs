@@ -13,17 +13,16 @@ pub fn run() -> anyhow::Result<()> {
 
     use smithay::{
         backend::{
-            session::{libseat::LibSeatSession, Session},
+            session::{Session, libseat::LibSeatSession},
             udev::{UdevBackend, UdevEvent},
         },
-        reexports::calloop::{generic::Generic, EventLoop, Interest, Mode, PostAction},
+        reexports::calloop::{EventLoop, Interest, Mode, PostAction, generic::Generic},
         wayland::socket::ListeningSocketSource,
     };
 
     use crate::state::{WeftClientState, WeftCompositorState};
 
-    let mut display =
-        smithay::reexports::wayland_server::Display::<WeftCompositorState>::new()?;
+    let mut display = smithay::reexports::wayland_server::Display::<WeftCompositorState>::new()?;
     let display_handle = display.handle();
 
     let mut event_loop: EventLoop<'static, WeftCompositorState> = EventLoop::try_new()?;
@@ -31,8 +30,8 @@ pub fn run() -> anyhow::Result<()> {
     let loop_signal = event_loop.get_signal();
 
     // Gain DRM device access without root via libseat.
-    let (session, _notifier) = LibSeatSession::new()
-        .map_err(|e| anyhow::anyhow!("libseat session failed: {e}"))?;
+    let (session, _notifier) =
+        LibSeatSession::new().map_err(|e| anyhow::anyhow!("libseat session failed: {e}"))?;
 
     let listening_socket = ListeningSocketSource::new_auto()
         .map_err(|e| anyhow::anyhow!("Wayland socket creation failed: {e}"))?;
@@ -79,12 +78,8 @@ pub fn run() -> anyhow::Result<()> {
         })
         .map_err(|e| anyhow::anyhow!("udev source insertion failed: {e}"))?;
 
-    let mut state = WeftCompositorState::new(
-        display_handle,
-        loop_signal,
-        loop_handle,
-        session.seat(),
-    );
+    let mut state =
+        WeftCompositorState::new(display_handle, loop_signal, loop_handle, session.seat());
 
     tracing::info!("DRM/KMS backend initialised; entering event loop");
     event_loop.run(None, &mut state, |_| {})?;
