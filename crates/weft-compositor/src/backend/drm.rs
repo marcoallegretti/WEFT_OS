@@ -5,7 +5,12 @@ pub fn run() -> anyhow::Result<()> {
 }
 
 #[cfg(target_os = "linux")]
-use std::{collections::HashMap, path::Path, sync::Arc, time::Duration};
+use std::{
+    collections::HashMap,
+    path::Path,
+    sync::Arc,
+    time::{Duration, Instant},
+};
 
 #[cfg(target_os = "linux")]
 use anyhow::Context;
@@ -71,6 +76,7 @@ const SUPPORTED_FORMATS: &[Fourcc] = &[
 const SUPPORTED_FORMATS_8BIT_ONLY: &[Fourcc] = &[Fourcc::Abgr8888, Fourcc::Argb8888];
 
 #[cfg(target_os = "linux")]
+#[allow(dead_code)]
 type WeftMultiRenderer<'a> = MultiRenderer<
     'a,
     'a,
@@ -239,6 +245,7 @@ pub fn run() -> anyhow::Result<()> {
         devices: HashMap::new(),
         keyboards: Vec::new(),
         display_handle,
+        start_time: Instant::now(),
     });
 
     let existing: Vec<(DrmNode, std::path::PathBuf)> = state
@@ -581,63 +588,73 @@ fn render_output(state: &mut WeftCompositorState, node: DrmNode, crtc: crtc::Han
             .unwrap_or(d.primary_gpu)
     };
 
-    let WeftCompositorState {
-        ref mut drm,
-        ref space,
-        ..
-    } = *state;
+    let elapsed = state
+        .drm
+        .as_ref()
+        .map(|d| d.start_time.elapsed())
+        .unwrap_or_default();
 
-    let drm_data = match drm.as_mut() {
-        Some(d) => d,
-        None => return,
-    };
+    {
+        let WeftCompositorState {
+            ref mut drm,
+            ref space,
+            ..
+        } = *state;
 
-    let WeftDrmData {
-        ref mut gpu_manager,
-        ref mut devices,
-        ..
-    } = *drm_data;
+        let drm_data = match drm.as_mut() {
+            Some(d) => d,
+            None => return,
+        };
 
-    let device = match devices.get_mut(&node) {
-        Some(d) => d,
-        None => return,
-    };
-    let surface = match device.surfaces.get_mut(&crtc) {
-        Some(s) => s,
-        None => return,
-    };
+        let WeftDrmData {
+            ref mut gpu_manager,
+            ref mut devices,
+            ..
+        } = *drm_data;
 
-    let mut renderer = match gpu_manager.single_renderer(&render_node) {
-        Ok(r) => r,
-        Err(e) => {
-            tracing::warn!(?e, "renderer unavailable");
-            return;
-        }
-    };
+        let device = match devices.get_mut(&node) {
+            Some(d) => d,
+            None => return,
+        };
+        let surface = match device.surfaces.get_mut(&crtc) {
+            Some(s) => s,
+            None => return,
+        };
 
-    // Wave 2: clear-colour-only frame to establish the VBlank pipeline.
-    // Surface compositing is added in Wave 3.
-    let elements: &[WaylandSurfaceRenderElement<WeftMultiRenderer<'_>>] = &[];
-    match surface.drm_output.render_frame(
-        &mut renderer,
-        elements,
-        [0.08_f32, 0.08, 0.08, 1.0],
-        FrameFlags::DEFAULT,
-    ) {
-        Ok(result) if !result.is_empty => {
-            if let Err(e) = surface.drm_output.queue_frame(None) {
-                tracing::warn!(?e, "queue_frame failed");
+        let mut renderer = match gpu_manager.single_renderer(&render_node) {
+            Ok(r) => r,
+            Err(e) => {
+                tracing::warn!(?e, "renderer unavailable");
+                return;
             }
+        };
+
+        let elements = space
+            .render_elements_for_output(&mut renderer, &output, 1.0)
+            .unwrap_or_default();
+
+        match surface.drm_output.render_frame(
+            &mut renderer,
+            &elements,
+            [0.08_f32, 0.08, 0.08, 1.0],
+            FrameFlags::DEFAULT,
+        ) {
+            Ok(result) if !result.is_empty => {
+                if let Err(e) = surface.drm_output.queue_frame(None) {
+                    tracing::warn!(?e, "queue_frame failed");
+                }
+            }
+            Ok(_) => {}
+            Err(e) => tracing::warn!(?e, "render_frame failed"),
         }
-        Ok(_) => {}
-        Err(e) => tracing::warn!(?e, "render_frame failed"),
     }
 
-    space.elements().for_each(|window| {
-        window.send_frame(&output, Duration::ZERO, Some(Duration::ZERO), |_, _| {
+    state.space.elements().for_each(|window| {
+        window.send_frame(&output, elapsed, Some(Duration::from_millis(16)), |_, _| {
             Some(output.clone())
         });
     });
-
+    state.space.refresh();
+    state.popups.cleanup();
     let _ = state.display_handle.flush_clients();
 }

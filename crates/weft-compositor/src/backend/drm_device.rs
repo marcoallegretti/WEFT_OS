@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::{collections::HashMap, time::Instant};
 
 use smithay::{
     backend::{
@@ -55,4 +55,5 @@ pub struct WeftDrmData {
     pub devices: HashMap<DrmNode, WeftDrmDevice>,
     pub keyboards: Vec<smithay::reexports::input::Device>,
     pub display_handle: DisplayHandle,
+    pub start_time: Instant,
 }
