@@ -47,6 +47,8 @@ jobs:
             libxkbcommon-dev \
             libegl-dev \
             libgles2-mesa-dev \
+            libgbm-dev \
+            libdrm-dev \
             libinput-dev \
             libseat-dev \
             libudev-dev \
