@@ -5,66 +5,68 @@ pub fn run() -> anyhow::Result<()> {
 }
 
 // Linux DRM/KMS backend.
+// GPU enumeration and rendering are deferred; this skeleton establishes the
+// session, socket, and event loop that the full implementation will extend.
 #[cfg(target_os = "linux")]
 pub fn run() -> anyhow::Result<()> {
-    use std::time::Duration;
+    use std::sync::Arc;
 
     use smithay::{
         backend::{
-            allocator::gbm::{GbmAllocator, GbmBufferFlags, GbmDevice},
-            drm::{DrmDevice, DrmDeviceFd, DrmNode, NodeType},
-            egl::EGLDevice,
-            libinput::{LibinputInputBackend, LibinputSessionInterface},
-            renderer::{
-                damage::OutputDamageTracker,
-                gles::GlesRenderer,
-                multigpu::{gbm::GbmGlesBackend, GpuManager, MultiRenderer},
-            },
-            session::{
-                libseat::{LibSeatSession, LibSeatSessionNotifier},
-                Session,
-            },
+            session::{libseat::LibSeatSession, Session},
             udev::{UdevBackend, UdevEvent},
         },
-        desktop::{space::space_render_elements, Space, Window},
-        output::{Mode as OutputMode, Output, PhysicalProperties, Subpixel},
-        reexports::{
-            calloop::{
-                timer::{TimeoutAction, Timer},
-                EventLoop, Interest, Mode, PostAction,
-            },
-            wayland_server::Display,
-        },
-        utils::Transform,
+        reexports::calloop::{generic::Generic, EventLoop, Interest, Mode, PostAction},
+        wayland::socket::ListeningSocketSource,
     };
 
-    use crate::{input, state::WeftCompositorState};
+    use crate::state::{WeftClientState, WeftCompositorState};
 
-    let mut display: Display<WeftCompositorState> = Display::new()?;
+    let mut display =
+        smithay::reexports::wayland_server::Display::<WeftCompositorState>::new()?;
     let display_handle = display.handle();
 
     let mut event_loop: EventLoop<'static, WeftCompositorState> = EventLoop::try_new()?;
     let loop_handle = event_loop.handle();
     let loop_signal = event_loop.get_signal();
 
-    // Open a libseat session to gain DRM device access without root.
-    let (session, notifier) = LibSeatSession::new()
+    // Gain DRM device access without root via libseat.
+    let (session, _notifier) = LibSeatSession::new()
         .map_err(|e| anyhow::anyhow!("libseat session failed: {e}"))?;
 
-    // Discover GPU nodes via udev.
+    let listening_socket = ListeningSocketSource::new_auto()
+        .map_err(|e| anyhow::anyhow!("Wayland socket creation failed: {e}"))?;
+    let socket_name = listening_socket.socket_name().to_os_string();
+    std::env::set_var("WAYLAND_DISPLAY", &socket_name);
+    tracing::info!(?socket_name, "Wayland compositor socket open");
+
+    loop_handle
+        .insert_source(listening_socket, |client_stream, _, state| {
+            state
+                .display_handle
+                .insert_client(client_stream, Arc::new(WeftClientState::default()))
+                .unwrap();
+        })
+        .map_err(|e| anyhow::anyhow!("socket source insertion failed: {e}"))?;
+
+    loop_handle
+        .insert_source(
+            Generic::new(display, Interest::READ, Mode::Level),
+            |_, display, state| {
+                // Safety: the display is owned by this Generic source and is never
+                // dropped while the event loop runs.
+                unsafe {
+                    display.get_mut().dispatch_clients(state).unwrap();
+                }
+                Ok(PostAction::Continue)
+            },
+        )
+        .map_err(|e| anyhow::anyhow!("display source insertion failed: {e}"))?;
+
+    // Enumerate GPU nodes via udev; hotplug events arrive through calloop.
     let udev_backend = UdevBackend::new(session.seat())?;
-
-    let mut state = WeftCompositorState::new(
-        display_handle,
-        loop_signal.clone(),
-        loop_handle.clone(),
-        session.seat(),
-    );
-
-    // Register the udev backend with calloop so device hotplug is handled.
-    loop_handle.insert_source(udev_backend, {
-        let signal = loop_signal.clone();
-        move |event, _, _state| match event {
+    loop_handle
+        .insert_source(udev_backend, move |event, _, _state| match event {
             UdevEvent::Added { device_id, path } => {
                 tracing::info!(?device_id, ?path, "GPU device added");
             }
@@ -73,22 +75,19 @@ pub fn run() -> anyhow::Result<()> {
             }
             UdevEvent::Removed { device_id } => {
                 tracing::info!(?device_id, "GPU device removed");
-                signal.stop();
             }
-        }
-    })?;
+        })
+        .map_err(|e| anyhow::anyhow!("udev source insertion failed: {e}"))?;
+
+    let mut state = WeftCompositorState::new(
+        display_handle,
+        loop_signal,
+        loop_handle,
+        session.seat(),
+    );
 
     tracing::info!("DRM/KMS backend initialised; entering event loop");
-
-    loop {
-        display.dispatch_clients(&mut state)?;
-        display.flush_clients()?;
-        event_loop.dispatch(Some(Duration::from_millis(16)), &mut state)?;
-
-        if loop_signal.is_stopped() {
-            break;
-        }
-    }
+    event_loop.run(None, &mut state, |_| {})?;
 
     Ok(())
 }

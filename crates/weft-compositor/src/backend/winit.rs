@@ -1,4 +1,4 @@
-use std::time::Duration;
+use std::{sync::Arc, time::Duration};
 
 use smithay::{
     backend::{
@@ -9,11 +9,15 @@ use smithay::{
         winit::{self, WinitEvent},
     },
     output::{Mode as OutputMode, Output, PhysicalProperties, Subpixel},
-    reexports::calloop::EventLoop,
+    reexports::calloop::{generic::Generic, EventLoop, Interest, Mode, PostAction},
     utils::{Rectangle, Transform},
+    wayland::socket::ListeningSocketSource,
 };
 
-use crate::{input, state::WeftCompositorState};
+use crate::{
+    input,
+    state::{WeftClientState, WeftCompositorState},
+};
 
 pub fn run() -> anyhow::Result<()> {
     let mut display =
@@ -49,12 +53,37 @@ pub fn run() -> anyhow::Result<()> {
     );
     output.set_preferred(mode);
 
-    // Open the Wayland socket so clients can connect.
-    let socket_name = display
-        .add_socket_auto()
+    // Create the listening socket; each connecting client is inserted with
+    // default per-client data so CompositorHandler::client_compositor_state works.
+    let listening_socket = ListeningSocketSource::new_auto()
         .map_err(|e| anyhow::anyhow!("Wayland socket creation failed: {e}"))?;
+    let socket_name = listening_socket.socket_name().to_os_string();
     std::env::set_var("WAYLAND_DISPLAY", &socket_name);
     tracing::info!(?socket_name, "Wayland compositor socket open");
+
+    loop_handle
+        .insert_source(listening_socket, |client_stream, _, state| {
+            state
+                .display_handle
+                .insert_client(client_stream, Arc::new(WeftClientState::default()))
+                .unwrap();
+        })
+        .map_err(|e| anyhow::anyhow!("socket source insertion failed: {e}"))?;
+
+    // Register the display fd so calloop dispatches Wayland client messages when readable.
+    loop_handle
+        .insert_source(
+            Generic::new(display, Interest::READ, Mode::Level),
+            |_, display, state| {
+                // Safety: the display is owned by this Generic source and is never dropped
+                // while the event loop runs.
+                unsafe {
+                    display.get_mut().dispatch_clients(state).unwrap();
+                }
+                Ok(PostAction::Continue)
+            },
+        )
+        .map_err(|e| anyhow::anyhow!("display source insertion failed: {e}"))?;
 
     let mut state = WeftCompositorState::new(
         display_handle,
@@ -67,8 +96,8 @@ pub fn run() -> anyhow::Result<()> {
     let mut damage_tracker = OutputDamageTracker::from_output(&output);
     let start_time = std::time::Instant::now();
 
-    // WinitEventLoop implements calloop's EventSource; insert it so Winit events
-    // arrive through the same dispatch loop as all other compositor sources.
+    // WinitEventLoop implements calloop's EventSource; Winit events arrive
+    // through the same dispatch loop as all other compositor sources.
     loop_handle
         .insert_source(winit, move |event, _, state| match event {
             WinitEvent::Resized { size, .. } => {
@@ -123,7 +152,7 @@ pub fn run() -> anyhow::Result<()> {
                 state.popups.cleanup();
                 let _ = state.display_handle.flush_clients();
 
-                // Request the next redraw to drive continuous rendering.
+                // Request next redraw to drive continuous rendering.
                 backend.window().request_redraw();
             }
             WinitEvent::CloseRequested => {
@@ -134,13 +163,7 @@ pub fn run() -> anyhow::Result<()> {
         })
         .map_err(|e| anyhow::anyhow!("winit source insertion failed: {e}"))?;
 
-    // The idle callback dispatches pending Wayland client requests after each
-    // calloop iteration so protocol handlers in state receive them promptly.
-    event_loop.run(None, &mut state, move |state| {
-        if let Err(e) = display.dispatch_clients(state) {
-            tracing::error!("Wayland client dispatch failed: {e}");
-        }
-    })?;
+    event_loop.run(None, &mut state, |_| {})?;
 
     Ok(())
 }

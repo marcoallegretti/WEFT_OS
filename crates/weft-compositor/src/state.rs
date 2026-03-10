@@ -31,12 +31,13 @@ use smithay::{
         output::OutputManagerState,
         pointer_constraints::{PointerConstraintsHandler, PointerConstraintsState},
         presentation::{PresentationHandler, PresentationState},
+        seat::WaylandFocus,
         shell::{
             wlr_layer::{Layer, LayerSurface, WlrLayerShellHandler, WlrLayerShellState},
             xdg::{PopupSurface, PositionerState, ToplevelSurface, XdgShellHandler, XdgShellState},
         },
         shm::{ShmHandler, ShmState},
-        text_input::{TextInputHandler, TextInputManagerState},
+        text_input::TextInputManagerState,
     },
 };
 
@@ -310,14 +311,7 @@ impl PresentationHandler for WeftCompositorState {
 
 delegate_presentation!(WeftCompositorState);
 
-// --- TextInputHandler ---
-
-impl TextInputHandler for WeftCompositorState {
-    fn text_input_state(&mut self) -> &mut TextInputManagerState {
-        &mut self.text_input_state
-    }
-}
-
+// TextInputManagerState has no handler trait; delegate macro only requires SeatHandler.
 delegate_text_input_manager!(WeftCompositorState);
 
 // --- InputMethodHandler ---
@@ -350,6 +344,14 @@ impl PointerConstraintsHandler for WeftCompositorState {
         &mut self,
         _surface: &WlSurface,
         _pointer: &smithay::input::pointer::PointerHandle<Self>,
+    ) {
+    }
+
+    fn cursor_position_hint(
+        &mut self,
+        _surface: &WlSurface,
+        _pointer: &smithay::input::pointer::PointerHandle<Self>,
+        _location: smithay::utils::Point<f64, Logical>,
     ) {
     }
 }

@@ -8,10 +8,9 @@ use smithay::{
         TouchCancelEvent, TouchDownEvent, TouchFrameEvent, TouchMotionEvent, TouchUpEvent,
     },
     input::{
-        keyboard::{FilterResult, KeysymHandle, ModifiersState},
-        pointer::{AxisFrame, ButtonEvent, MotionEvent, RelativeMotionEvent},
+        keyboard::FilterResult,
+        pointer::{AxisFrame, ButtonEvent, MotionEvent},
     },
-    reexports::wayland_server::protocol::wl_pointer,
     utils::{Logical, Point, Serial, SERIAL_COUNTER},
 };
 
