@@ -33,13 +33,18 @@ use smithay::{
         input::InputEvent,
         libinput::{LibinputInputBackend, LibinputSessionInterface},
         renderer::{
-            element::surface::WaylandSurfaceRenderElement,
+            element::{
+                Kind,
+                surface::{WaylandSurfaceRenderElement, render_elements_from_surface_tree},
+            },
             gles::GlesRenderer,
             multigpu::{GpuManager, MultiRenderer, gbm::GbmGlesBackend},
         },
         session::{Event as SessionEvent, Session, libseat::LibSeatSession},
         udev::{UdevBackend, UdevEvent, all_gpus, primary_gpu},
     },
+    desktop::space::SpaceRenderElements,
+    input::pointer::{CursorImageStatus, CursorImageSurfaceData},
     output::{Mode as WlMode, Output, PhysicalProperties, Subpixel},
     reexports::{
         calloop::{EventLoop, Interest, Mode, PostAction, generic::Generic},
@@ -48,8 +53,8 @@ use smithay::{
         rustix::fs::OFlags,
         wayland_server::Display,
     },
-    utils::{DeviceFd, Transform},
-    wayland::socket::ListeningSocketSource,
+    utils::{DeviceFd, Scale, Transform},
+    wayland::{compositor::with_states, socket::ListeningSocketSource},
 };
 
 #[cfg(target_os = "linux")]
@@ -594,6 +599,10 @@ fn render_output(state: &mut WeftCompositorState, node: DrmNode, crtc: crtc::Han
         .map(|d| d.start_time.elapsed())
         .unwrap_or_default();
 
+    let output_geo = state.space.output_geometry(&output).unwrap_or_default();
+    let pointer_location = state.pointer_location;
+    let cursor_status = state.cursor_image_status.clone();
+
     {
         let WeftCompositorState {
             ref mut drm,
@@ -629,9 +638,36 @@ fn render_output(state: &mut WeftCompositorState, node: DrmNode, crtc: crtc::Han
             }
         };
 
-        let elements = space
-            .render_elements_for_output(&mut renderer, &output, 1.0)
-            .unwrap_or_default();
+        let output_scale = output.current_scale().fractional_scale();
+
+        let mut elements: Vec<SpaceRenderElements<_, WaylandSurfaceRenderElement<_>>> =
+            if let CursorImageStatus::Surface(ref cursor_surface) = cursor_status {
+                let hotspot = with_states(cursor_surface, |states| {
+                    states
+                        .data_map
+                        .get::<CursorImageSurfaceData>()
+                        .and_then(|d| d.lock().ok().map(|g| g.hotspot))
+                        .unwrap_or_default()
+                });
+                let cursor_pos = (pointer_location - output_geo.loc.to_f64() - hotspot.to_f64())
+                    .to_physical_precise_round(output_scale);
+                render_elements_from_surface_tree(
+                    &mut renderer,
+                    cursor_surface,
+                    cursor_pos,
+                    Scale::from(output_scale),
+                    1.0,
+                    Kind::Cursor,
+                )
+            } else {
+                Vec::new()
+            };
+
+        elements.extend(
+            space
+                .render_elements_for_output(&mut renderer, &output, 1.0)
+                .unwrap_or_default(),
+        );
 
         match surface.drm_output.render_frame(
             &mut renderer,
