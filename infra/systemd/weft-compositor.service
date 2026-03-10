@@ -1,0 +1,15 @@
+[Unit]
+Description=WEFT OS Wayland Compositor
+Documentation=https://github.com/weft-os/weft
+After=systemd-logind.service
+
+[Service]
+Type=notify
+ExecStart=/packages/system/weft-compositor/active/bin/weft-compositor
+Restart=on-failure
+RestartSec=1
+# The socket path is posted to the environment by the compositor itself.
+# Downstream services (servo-shell.service) should declare After=weft-compositor.service.
+
+[Install]
+WantedBy=graphical.target

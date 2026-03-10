@@ -7,7 +7,8 @@ on:
   pull_request:
 
 jobs:
-  rust:
+  # Crates that must compile on every supported host platform.
+  cross-platform:
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -23,7 +24,34 @@ jobs:
           components: rustfmt, clippy
       - name: cargo fmt
         run: cargo fmt --all --check
-      - name: cargo clippy
-        run: cargo clippy --workspace --all-targets -- -D warnings
-      - name: cargo test
-        run: cargo test --workspace
+      - name: cargo clippy (cross-platform crates)
+        run: cargo clippy --workspace --exclude weft-compositor --all-targets -- -D warnings
+      - name: cargo test (cross-platform crates)
+        run: cargo test --workspace --exclude weft-compositor
+
+  # Wayland compositor and other Linux-only system crates.
+  # These require libwayland-server and other Linux kernel interfaces.
+  linux-only:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.93.0
+          components: rustfmt, clippy
+      - name: install Linux system dependencies
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y --no-install-recommends \
+            libwayland-dev \
+            libxkbcommon-dev \
+            libegl-dev \
+            libgles2-mesa-dev \
+            libinput-dev \
+            libseat-dev \
+            libudev-dev \
+            pkg-config
+      - name: cargo clippy (weft-compositor)
+        run: cargo clippy -p weft-compositor --all-targets -- -D warnings
+      - name: cargo test (weft-compositor)
+        run: cargo test -p weft-compositor

@@ -1,0 +1,41 @@
+[package]
+name = "weft-compositor"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish = false
+
+[lints]
+workspace = true
+
+[[bin]]
+name = "weft-compositor"
+path = "src/main.rs"
+
+# Features available on all build platforms.
+[dependencies]
+smithay = { version = "0.7", default-features = false, features = [
+    "backend_egl",
+    "backend_winit",
+    "renderer_gl",
+    "wayland_frontend",
+    "desktop",
+] }
+calloop = { version = "0.14", features = ["executor"] }
+calloop-wayland-source = "0.4"
+wayland-server = "0.31"
+wayland-protocols = { version = "0.32", features = ["server", "unstable"] }
+wayland-protocols-wlr = { version = "0.3", features = ["server"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+anyhow = "1"
+
+# DRM/KMS and hardware input depend on Linux kernel interfaces; compile only on Linux.
+[target.'cfg(target_os = "linux")'.dependencies]
+smithay = { version = "0.7", default-features = false, features = [
+    "backend_drm",
+    "backend_gbm",
+    "backend_libinput",
+    "backend_udev",
+    "backend_session_libseat",
+] }
