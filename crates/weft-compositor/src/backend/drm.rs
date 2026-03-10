@@ -496,7 +496,7 @@ fn connector_connected(
         crtc,
         mode,
         &[connector.handle()],
-        &output,
+        output.clone(),
         planes,
         &mut renderer,
         &DrmOutputRenderElements::default(),
