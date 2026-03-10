@@ -6,7 +6,10 @@ use smithay::{
     delegate_compositor, delegate_cursor_shape, delegate_dmabuf, delegate_input_method_manager,
     delegate_layer_shell, delegate_output, delegate_pointer_constraints, delegate_presentation,
     delegate_seat, delegate_shm, delegate_text_input_manager, delegate_xdg_shell,
-    desktop::{PopupKind, PopupManager, Space, Window, WindowSurfaceType, layer_map_for_output},
+    desktop::{
+        LayerSurface as DesktopLayerSurface, PopupKind, PopupManager, Space, Window,
+        WindowSurfaceType, layer_map_for_output,
+    },
     input::{Seat, SeatHandler, SeatState, keyboard::XkbConfig, pointer::CursorImageStatus},
     output::Output,
     reexports::{
@@ -51,6 +54,7 @@ impl ClientData for WeftClientState {
     fn disconnected(&self, _client_id: ClientId, _reason: DisconnectReason) {}
 }
 
+#[allow(dead_code)]
 pub struct WeftCompositorState {
     pub display_handle: DisplayHandle,
     pub loop_signal: LoopSignal,
@@ -225,6 +229,19 @@ impl XdgShellHandler for WeftCompositorState {
         }
     }
 
+    fn reposition_request(
+        &mut self,
+        surface: PopupSurface,
+        positioner: PositionerState,
+        token: u32,
+    ) {
+        surface.with_pending_state(|state| {
+            state.geometry = positioner.get_geometry();
+            state.positioner = positioner;
+        });
+        surface.send_repositioned(token);
+    }
+
     fn grab(
         &mut self,
         _surface: PopupSurface,
@@ -248,13 +265,12 @@ impl WlrLayerShellHandler for WeftCompositorState {
         surface: LayerSurface,
         _output: Option<WlOutput>,
         _layer: Layer,
-        _namespace: String,
+        namespace: String,
     ) {
-        // Map to the first available output. Proper output matching is deferred to
-        // the shell protocol wave where the compositor receives explicit placement requests.
+        let desktop_surface = DesktopLayerSurface::new(surface, namespace);
         if let Some(output) = self.space.outputs().next().cloned() {
             layer_map_for_output(&output)
-                .map_layer(&surface)
+                .map_layer(&desktop_surface)
                 .expect("layer surface must not already be mapped");
             layer_map_for_output(&output).arrange();
         }

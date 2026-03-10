@@ -4,13 +4,13 @@ use smithay::{
     backend::{
         allocator::gbm::GbmAllocator,
         drm::{
+            DrmDeviceFd, DrmNode,
             exporter::gbm::GbmFramebufferExporter,
             output::{DrmOutput, DrmOutputManager},
-            DrmDeviceFd, DrmNode,
         },
         renderer::{
             gles::GlesRenderer,
-            multigpu::{gbm::GbmGlesBackend, GpuManager},
+            multigpu::{GpuManager, gbm::GbmGlesBackend},
         },
         session::libseat::LibSeatSession,
     },
@@ -19,27 +19,20 @@ use smithay::{
     reexports::{
         calloop::RegistrationToken,
         drm::control::crtc,
-        wayland_server::{backend::GlobalId, DisplayHandle},
+        wayland_server::{DisplayHandle, backend::GlobalId},
     },
 };
 use smithay_drm_extras::drm_scanner::DrmScanner;
 
 pub type WeftAllocator = GbmAllocator<DrmDeviceFd>;
 pub type WeftExporter = GbmFramebufferExporter<DrmDeviceFd>;
-pub type WeftDrmOutput = DrmOutput<
-    WeftAllocator,
-    WeftExporter,
-    Option<OutputPresentationFeedback>,
-    DrmDeviceFd,
->;
-pub type WeftDrmOutputManager = DrmOutputManager<
-    WeftAllocator,
-    WeftExporter,
-    Option<OutputPresentationFeedback>,
-    DrmDeviceFd,
->;
+pub type WeftDrmOutput =
+    DrmOutput<WeftAllocator, WeftExporter, Option<OutputPresentationFeedback>, DrmDeviceFd>;
+pub type WeftDrmOutputManager =
+    DrmOutputManager<WeftAllocator, WeftExporter, Option<OutputPresentationFeedback>, DrmDeviceFd>;
 pub type WeftGpuManager = GpuManager<GbmGlesBackend<GlesRenderer, DrmDeviceFd>>;
 
+#[allow(dead_code)]
 pub struct WeftOutputSurface {
     pub output: Output,
     pub drm_output: WeftDrmOutput,

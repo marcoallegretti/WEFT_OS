@@ -1,4 +1,4 @@
-﻿// Non-Linux: DRM/KMS backend is unavailable; callers must use --winit.
+// Non-Linux: DRM/KMS backend is unavailable; callers must use --winit.
 #[cfg(not(target_os = "linux"))]
 pub fn run() -> anyhow::Result<()> {
     anyhow::bail!("DRM/KMS backend requires Linux; pass --winit for development on other platforms")
@@ -14,15 +14,15 @@ use anyhow::Context;
 use smithay::{
     backend::{
         allocator::{
+            Fourcc, Modifier,
             format::FormatSet,
             gbm::{GbmAllocator, GbmBufferFlags, GbmDevice},
-            Fourcc, Modifier,
         },
         drm::{
+            DrmDevice, DrmDeviceFd, DrmEvent, DrmNode, NodeType,
             compositor::FrameFlags,
             exporter::gbm::GbmFramebufferExporter,
             output::{DrmOutputManager, DrmOutputRenderElements},
-            DrmDevice, DrmDeviceFd, DrmEvent, DrmNode, NodeType,
         },
         egl::{EGLDevice, EGLDisplay},
         input::InputEvent,
@@ -30,15 +30,15 @@ use smithay::{
         renderer::{
             element::surface::WaylandSurfaceRenderElement,
             gles::GlesRenderer,
-            multigpu::{gbm::GbmGlesBackend, GpuManager, MultiRenderer},
+            multigpu::{GpuManager, MultiRenderer, gbm::GbmGlesBackend},
         },
-        session::{libseat::LibSeatSession, Event as SessionEvent, Session},
-        udev::{all_gpus, primary_gpu, UdevBackend, UdevEvent},
+        session::{Event as SessionEvent, Session, libseat::LibSeatSession},
+        udev::{UdevBackend, UdevEvent, all_gpus, primary_gpu},
     },
     output::{Mode as WlMode, Output, PhysicalProperties, Subpixel},
     reexports::{
         calloop::{EventLoop, Interest, Mode, PostAction, generic::Generic},
-        drm::control::{connector, crtc, ModeTypeFlags},
+        drm::control::{ModeTypeFlags, connector, crtc},
         input::{DeviceCapability, Libinput},
         rustix::fs::OFlags,
         wayland_server::Display,
@@ -83,7 +83,7 @@ pub fn run() -> anyhow::Result<()> {
     let mut event_loop: EventLoop<'static, WeftCompositorState> = EventLoop::try_new()?;
     let loop_handle = event_loop.handle();
 
-    let mut display = Display::<WeftCompositorState>::new()?;
+    let display = Display::<WeftCompositorState>::new()?;
     let display_handle = display.handle();
 
     let (session, session_notifier) =
@@ -98,7 +98,12 @@ pub fn run() -> anyhow::Result<()> {
         primary_gpu(&seat_name)
             .ok()
             .flatten()
-            .and_then(|p| DrmNode::from_path(p).ok()?.node_with_type(NodeType::Render)?.ok())
+            .and_then(|p| {
+                DrmNode::from_path(p)
+                    .ok()?
+                    .node_with_type(NodeType::Render)?
+                    .ok()
+            })
             .or_else(|| {
                 all_gpus(&seat_name)
                     .unwrap_or_default()
@@ -115,7 +120,7 @@ pub fn run() -> anyhow::Result<()> {
     let listening_socket =
         ListeningSocketSource::new_auto().context("failed to create Wayland socket")?;
     let socket_name = listening_socket.socket_name().to_os_string();
-    std::env::set_var("WAYLAND_DISPLAY", &socket_name);
+    unsafe { std::env::set_var("WAYLAND_DISPLAY", &socket_name) };
     tracing::info!(?socket_name, "Wayland socket open");
 
     loop_handle
@@ -140,13 +145,10 @@ pub fn run() -> anyhow::Result<()> {
         )
         .map_err(|e| anyhow::anyhow!("display source: {e}"))?;
 
-    let udev_backend =
-        UdevBackend::new(&seat_name).context("failed to create udev backend")?;
+    let udev_backend = UdevBackend::new(&seat_name).context("failed to create udev backend")?;
 
     let mut libinput_ctx =
-        Libinput::new_with_udev::<LibinputSessionInterface<LibSeatSession>>(
-            session.clone().into(),
-        );
+        Libinput::new_with_udev::<LibinputSessionInterface<LibSeatSession>>(session.clone().into());
     libinput_ctx
         .udev_assign_seat(&seat_name)
         .map_err(|_| anyhow::anyhow!("libinput seat assignment failed"))?;
@@ -156,14 +158,14 @@ pub fn run() -> anyhow::Result<()> {
         .insert_source(
             libinput_backend,
             move |mut event, _, state: &mut WeftCompositorState| {
-                if let InputEvent::DeviceAdded { device } = &mut event {
-                    if device.has_capability(DeviceCapability::Keyboard) {
-                        if let Some(led) = state.seat.get_keyboard().map(|k| k.led_state()) {
-                            device.led_update(led.into());
-                        }
-                        if let Some(drm) = state.drm.as_mut() {
-                            drm.keyboards.push(device.clone());
-                        }
+                if let InputEvent::DeviceAdded { device } = &mut event
+                    && device.has_capability(DeviceCapability::Keyboard)
+                {
+                    if let Some(led) = state.seat.get_keyboard().map(|k| k.led_state()) {
+                        device.led_update(led.into());
+                    }
+                    if let Some(drm) = state.drm.as_mut() {
+                        drm.keyboards.push(device.clone());
                     }
                 }
                 input::process_input_event(state, event);
@@ -227,12 +229,8 @@ pub fn run() -> anyhow::Result<()> {
         )
         .map_err(|e| anyhow::anyhow!("udev source: {e}"))?;
 
-    let mut state = WeftCompositorState::new(
-        display_handle.clone(),
-        loop_signal,
-        loop_handle,
-        seat_name,
-    );
+    let mut state =
+        WeftCompositorState::new(display_handle.clone(), loop_signal, loop_handle, seat_name);
 
     state.drm = Some(WeftDrmData {
         session,
@@ -269,11 +267,7 @@ pub fn run() -> anyhow::Result<()> {
 }
 
 #[cfg(target_os = "linux")]
-fn device_added(
-    state: &mut WeftCompositorState,
-    node: DrmNode,
-    path: &Path,
-) -> anyhow::Result<()> {
+fn device_added(state: &mut WeftCompositorState, node: DrmNode, path: &Path) -> anyhow::Result<()> {
     let drm_data = state.drm.as_mut().context("DRM data not initialised")?;
 
     let fd = drm_data
@@ -285,16 +279,14 @@ fn device_added(
         .context("failed to open DRM device")?;
 
     let fd = DrmDeviceFd::new(DeviceFd::from(fd));
-    let (drm, notifier) =
-        DrmDevice::new(fd.clone(), true).context("DrmDevice::new failed")?;
+    let (drm, notifier) = DrmDevice::new(fd.clone(), true).context("DrmDevice::new failed")?;
     let gbm = GbmDevice::new(fd).context("GbmDevice::new failed")?;
 
     let render_node = (|| -> anyhow::Result<DrmNode> {
         // Safety: EGLDisplay requires the GBM device to outlive it; gbm lives in WeftDrmDevice.
         let egl_display =
             unsafe { EGLDisplay::new(gbm.clone()).context("EGLDisplay::new failed")? };
-        let egl_device =
-            EGLDevice::device_for_display(&egl_display).context("no EGL device")?;
+        let egl_device = EGLDevice::device_for_display(&egl_display).context("no EGL device")?;
         if egl_device.is_software() {
             anyhow::bail!("software renderer");
         }
@@ -323,7 +315,7 @@ fn device_added(
         GbmBufferFlags::RENDERING | GbmBufferFlags::SCANOUT,
     );
 
-    let exporter = GbmFramebufferExporter::new(gbm.clone(), render_node.into());
+    let exporter = GbmFramebufferExporter::new(gbm.clone(), render_node);
 
     let color_formats = if std::env::var("WEFT_DISABLE_10BIT").is_ok() {
         SUPPORTED_FORMATS_8BIT_ONLY
@@ -391,9 +383,16 @@ fn device_changed(state: &mut WeftCompositorState, node: DrmNode) {
         None => return,
     };
 
-    let events: Vec<DrmScanEvent> = device
+    let events: Vec<DrmScanEvent> = match device
         .drm_scanner
-        .scan_connectors(device.drm_output_manager.device());
+        .scan_connectors(device.drm_output_manager.device())
+    {
+        Ok(r) => r.into_iter().collect(),
+        Err(e) => {
+            tracing::warn!(?e, "connector scan failed");
+            return;
+        }
+    };
 
     for event in events {
         match event {
@@ -492,15 +491,17 @@ fn connector_connected(
         }
     };
 
-    let drm_output = match device.drm_output_manager.initialize_output(
-        crtc,
-        mode,
-        &[connector.handle()],
-        output.clone(),
-        planes,
-        &mut renderer,
-        &DrmOutputRenderElements::default(),
-    ) {
+    let drm_output = match device
+        .drm_output_manager
+        .initialize_output::<_, WaylandSurfaceRenderElement<_>>(
+            crtc,
+            mode,
+            &[connector.handle()],
+            &output,
+            planes,
+            &mut renderer,
+            &DrmOutputRenderElements::default(),
+        ) {
         Ok(o) => o,
         Err(e) => {
             tracing::warn!(?e, ?name, "initialize_output failed");
@@ -534,10 +535,10 @@ fn connector_disconnected(
         Some(d) => d,
         None => return,
     };
-    if let Some(device) = drm_data.devices.get_mut(&node) {
-        if let Some(surface) = device.surfaces.remove(&crtc) {
-            state.space.unmap_output(&surface.output);
-        }
+    if let Some(device) = drm_data.devices.get_mut(&node)
+        && let Some(surface) = device.surfaces.remove(&crtc)
+    {
+        state.space.unmap_output(&surface.output);
     }
 }
 
@@ -633,12 +634,9 @@ fn render_output(state: &mut WeftCompositorState, node: DrmNode, crtc: crtc::Han
     }
 
     space.elements().for_each(|window| {
-        window.send_frame(
-            &output,
-            Duration::ZERO,
-            Some(Duration::ZERO),
-            |_, _| Some(output.clone()),
-        );
+        window.send_frame(&output, Duration::ZERO, Some(Duration::ZERO), |_, _| {
+            Some(output.clone())
+        });
     });
 
     let _ = state.display_handle.flush_clients();

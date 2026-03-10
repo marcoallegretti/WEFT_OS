@@ -1,41 +1,41 @@
 use smithay::{
     backend::input::{
-        AbsolutePositionEvent, Axis, AxisSource, ButtonState, Event, GestureHoldBeginEvent,
-        GestureHoldEndEvent, GesturePinchBeginEvent, GesturePinchEndEvent, GesturePinchUpdateEvent,
-        GestureSwipeBeginEvent, GestureSwipeEndEvent, GestureSwipeUpdateEvent, InputBackend,
-        InputEvent, KeyState, KeyboardKeyEvent, PointerAxisEvent, PointerButtonEvent,
-        PointerMotionAbsoluteEvent, PointerMotionEvent, TouchCancelEvent, TouchDownEvent,
-        TouchFrameEvent, TouchMotionEvent, TouchUpEvent,
+        AbsolutePositionEvent, Axis, AxisSource, ButtonState, Event, GestureBeginEvent,
+        GestureEndEvent, GesturePinchUpdateEvent, GestureSwipeUpdateEvent, InputBackend,
+        InputEvent, KeyboardKeyEvent, PointerAxisEvent, PointerButtonEvent, PointerMotionEvent,
+        TouchEvent,
     },
     input::{
         keyboard::FilterResult,
         pointer::{AxisFrame, ButtonEvent, MotionEvent},
     },
-    utils::{Logical, Point, SERIAL_COUNTER, Serial},
+    utils::{Logical, Point, SERIAL_COUNTER},
 };
 
 use crate::state::WeftCompositorState;
 
 pub fn process_input_event<B: InputBackend>(state: &mut WeftCompositorState, event: InputEvent<B>) {
     match event {
-        InputEvent::Keyboard { event } => handle_keyboard(state, event),
-        InputEvent::PointerMotion { event } => handle_pointer_motion(state, event),
-        InputEvent::PointerMotionAbsolute { event } => handle_pointer_motion_absolute(state, event),
-        InputEvent::PointerButton { event } => handle_pointer_button(state, event),
-        InputEvent::PointerAxis { event } => handle_pointer_axis(state, event),
-        InputEvent::TouchDown { event } => handle_touch_down(state, event),
-        InputEvent::TouchUp { event } => handle_touch_up(state, event),
-        InputEvent::TouchMotion { event } => handle_touch_motion(state, event),
-        InputEvent::TouchFrame { event } => handle_touch_frame(state, event),
-        InputEvent::TouchCancel { event } => handle_touch_cancel(state, event),
-        InputEvent::GestureSwipeBegin { event } => handle_gesture_swipe_begin(state, event),
-        InputEvent::GestureSwipeUpdate { event } => handle_gesture_swipe_update(state, event),
-        InputEvent::GestureSwipeEnd { event } => handle_gesture_swipe_end(state, event),
-        InputEvent::GesturePinchBegin { event } => handle_gesture_pinch_begin(state, event),
-        InputEvent::GesturePinchUpdate { event } => handle_gesture_pinch_update(state, event),
-        InputEvent::GesturePinchEnd { event } => handle_gesture_pinch_end(state, event),
-        InputEvent::GestureHoldBegin { event } => handle_gesture_hold_begin(state, event),
-        InputEvent::GestureHoldEnd { event } => handle_gesture_hold_end(state, event),
+        InputEvent::Keyboard { event } => handle_keyboard::<B>(state, event),
+        InputEvent::PointerMotion { event } => handle_pointer_motion::<B>(state, event),
+        InputEvent::PointerMotionAbsolute { event } => {
+            handle_pointer_motion_absolute::<B>(state, event)
+        }
+        InputEvent::PointerButton { event } => handle_pointer_button::<B>(state, event),
+        InputEvent::PointerAxis { event } => handle_pointer_axis::<B>(state, event),
+        InputEvent::TouchDown { event } => handle_touch_down::<B>(state, event),
+        InputEvent::TouchUp { event } => handle_touch_up::<B>(state, event),
+        InputEvent::TouchMotion { event } => handle_touch_motion::<B>(state, event),
+        InputEvent::TouchFrame { event } => handle_touch_frame::<B>(state, event),
+        InputEvent::TouchCancel { event } => handle_touch_cancel::<B>(state, event),
+        InputEvent::GestureSwipeBegin { event } => handle_gesture_swipe_begin::<B>(state, event),
+        InputEvent::GestureSwipeUpdate { event } => handle_gesture_swipe_update::<B>(state, event),
+        InputEvent::GestureSwipeEnd { event } => handle_gesture_swipe_end::<B>(state, event),
+        InputEvent::GesturePinchBegin { event } => handle_gesture_pinch_begin::<B>(state, event),
+        InputEvent::GesturePinchUpdate { event } => handle_gesture_pinch_update::<B>(state, event),
+        InputEvent::GesturePinchEnd { event } => handle_gesture_pinch_end::<B>(state, event),
+        InputEvent::GestureHoldBegin { event } => handle_gesture_hold_begin::<B>(state, event),
+        InputEvent::GestureHoldEnd { event } => handle_gesture_hold_end::<B>(state, event),
         // Device added/removed events are handled at the backend level.
         InputEvent::DeviceAdded { .. } | InputEvent::DeviceRemoved { .. } => {}
         _ => {}
