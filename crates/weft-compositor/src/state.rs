@@ -25,7 +25,7 @@ use smithay::{
         },
         output::OutputManagerState,
         pointer_constraints::{PointerConstraintsHandler, PointerConstraintsState},
-        presentation::{PresentationHandler, PresentationState},
+        presentation::PresentationState,
         seat::WaylandFocus,
         shell::{
             wlr_layer::{Layer, LayerSurface, WlrLayerShellHandler, WlrLayerShellState},
@@ -308,14 +308,7 @@ delegate_dmabuf!(WeftCompositorState);
 impl smithay::wayland::output::OutputHandler for WeftCompositorState {}
 delegate_output!(WeftCompositorState);
 
-// --- PresentationHandler ---
-
-impl PresentationHandler for WeftCompositorState {
-    fn presentation_state(&mut self) -> &mut PresentationState {
-        &mut self.presentation_state
-    }
-}
-
+// PresentationState has no handler trait; delegate macro only requires Dispatch bounds.
 delegate_presentation!(WeftCompositorState);
 
 // TextInputManagerState has no handler trait; delegate macro only requires SeatHandler.
