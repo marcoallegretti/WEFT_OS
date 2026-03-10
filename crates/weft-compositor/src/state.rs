@@ -158,7 +158,7 @@ impl CompositorHandler for WeftCompositorState {
         if let Some(window) = self
             .space
             .elements()
-            .find(|w| w.wl_surface().as_ref() == Some(surface))
+            .find(|w| w.wl_surface().as_deref() == Some(surface))
             .cloned()
         {
             window.on_commit();
@@ -325,7 +325,7 @@ impl InputMethodHandler for WeftCompositorState {
         self.space
             .elements()
             .find_map(|w: &Window| {
-                if w.wl_surface().as_ref() == Some(parent_surface) {
+                if w.wl_surface().as_deref() == Some(parent_surface) {
                     Some(w.geometry())
                 } else {
                     None
