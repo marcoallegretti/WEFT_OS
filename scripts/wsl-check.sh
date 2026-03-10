@@ -31,13 +31,13 @@ export PKG_CONFIG_PATH="$FAKE_PC_DIR:/usr/lib64/pkgconfig:/usr/share/pkgconfig"
 cd "$PROJECT"
 
 echo ""
-echo "==> cargo check -p weft-compositor"
-cargo check -p weft-compositor 2>&1
+echo "==> cargo check --workspace"
+cargo check --workspace 2>&1
 echo ""
-echo "==> cargo clippy -p weft-compositor -- -D warnings"
-cargo clippy -p weft-compositor -- -D warnings 2>&1
+echo "==> cargo clippy --workspace -- -D warnings"
+cargo clippy --workspace -- -D warnings 2>&1
 echo ""
-echo "==> cargo fmt --check -p weft-compositor"
-cargo fmt --check -p weft-compositor 2>&1
+echo "==> cargo fmt --check --all"
+cargo fmt --check --all 2>&1
 echo ""
 echo "ALL DONE"

@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/weft-build-meta", "crates/weft-compositor"]
+members = ["crates/weft-build-meta", "crates/weft-compositor", "crates/weft-servo-shell"]
 resolver = "2"
 
 [workspace.package]

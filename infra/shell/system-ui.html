@@ -1,0 +1,167 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>WEFT Desktop</title>
+  <style>
+    :root {
+      color-scheme: dark;
+      --surface-bg: rgba(255, 255, 255, 0.07);
+      --surface-border: rgba(255, 255, 255, 0.12);
+      --taskbar-height: 48px;
+      --text-primary: rgba(255, 255, 255, 0.92);
+      --text-secondary: rgba(255, 255, 255, 0.55);
+      --accent: #5b8af5;
+    }
+
+    *, *::before, *::after {
+      box-sizing: border-box;
+    }
+
+    body {
+      margin: 0;
+      overflow: hidden;
+      background: #0f1117;
+      font-family: system-ui, -apple-system, sans-serif;
+      color: var(--text-primary);
+      height: 100dvh;
+      width: 100dvw;
+    }
+
+    weft-desktop {
+      display: grid;
+      grid-template-rows: 1fr var(--taskbar-height);
+      height: 100dvh;
+      width: 100dvw;
+      contain: layout;
+    }
+
+    weft-wallpaper {
+      display: block;
+      grid-row: 1;
+      background: linear-gradient(
+        145deg,
+        #0f1117 0%,
+        #161b2e 40%,
+        #0d2040 70%,
+        #0a1a30 100%
+      );
+    }
+
+    weft-taskbar {
+      display: flex;
+      align-items: center;
+      grid-row: 2;
+      height: var(--taskbar-height);
+      padding: 0 12px;
+      gap: 8px;
+      background: var(--surface-bg);
+      border-top: 1px solid var(--surface-border);
+      backdrop-filter: blur(20px);
+      -webkit-backdrop-filter: blur(20px);
+    }
+
+    weft-taskbar-launcher {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      width: 36px;
+      height: 36px;
+      border-radius: 8px;
+      cursor: pointer;
+      background: transparent;
+      transition: background 0.15s;
+    }
+
+    weft-taskbar-launcher:hover {
+      background: var(--surface-border);
+    }
+
+    weft-taskbar-clock {
+      margin-left: auto;
+      font-size: 13px;
+      color: var(--text-secondary);
+      font-variant-numeric: tabular-nums;
+    }
+
+    weft-launcher {
+      display: none;
+      position: fixed;
+      inset: 0;
+      bottom: var(--taskbar-height);
+      background: rgba(10, 12, 20, 0.85);
+      backdrop-filter: blur(32px);
+      -webkit-backdrop-filter: blur(32px);
+      z-index: 100;
+    }
+
+    weft-launcher:not([hidden]) {
+      display: block;
+    }
+
+    weft-notification-center {
+      position: fixed;
+      top: 8px;
+      right: 8px;
+      width: 360px;
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+      z-index: 200;
+      pointer-events: none;
+    }
+
+    weft-window {
+      display: none;
+    }
+  </style>
+</head>
+<body>
+  <weft-desktop>
+    <weft-wallpaper></weft-wallpaper>
+    <weft-taskbar>
+      <weft-taskbar-launcher id="launcher-btn" title="Apps">
+        <svg width="18" height="18" viewBox="0 0 18 18" fill="none"
+             xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
+          <rect x="1" y="1" width="6" height="6" rx="1.5"
+                fill="rgba(255,255,255,0.7)" />
+          <rect x="11" y="1" width="6" height="6" rx="1.5"
+                fill="rgba(255,255,255,0.7)" />
+          <rect x="1" y="11" width="6" height="6" rx="1.5"
+                fill="rgba(255,255,255,0.7)" />
+          <rect x="11" y="11" width="6" height="6" rx="1.5"
+                fill="rgba(255,255,255,0.7)" />
+        </svg>
+      </weft-taskbar-launcher>
+      <weft-taskbar-clock id="clock"></weft-taskbar-clock>
+    </weft-taskbar>
+  </weft-desktop>
+
+  <weft-launcher hidden id="launcher"></weft-launcher>
+  <weft-notification-center id="notifications"></weft-notification-center>
+
+  <script>
+    (function () {
+      var clockEl = document.getElementById('clock');
+      function updateClock() {
+        clockEl.textContent = new Date().toLocaleTimeString([], {
+          hour: '2-digit',
+          minute: '2-digit',
+        });
+      }
+      updateClock();
+      setInterval(updateClock, 10000);
+
+      document.getElementById('launcher-btn').addEventListener('click', function () {
+        var launcher = document.getElementById('launcher');
+        if (launcher.hasAttribute('hidden')) {
+          launcher.removeAttribute('hidden');
+        } else {
+          launcher.setAttribute('hidden', '');
+        }
+      });
+    }());
+  </script>
+</body>
+</html>

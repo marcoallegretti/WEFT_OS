@@ -1,0 +1,17 @@
+[Unit]
+Description=WEFT OS Servo Shell
+Documentation=https://github.com/weft-os/weft
+Requires=weft-compositor.service
+After=weft-compositor.service
+
+[Service]
+Type=simple
+ExecStart=/packages/system/servo-shell/active/bin/weft-servo-shell
+Restart=on-failure
+RestartSec=2
+# WAYLAND_DISPLAY is exported by weft-compositor after sd_notify(READY=1).
+# Downstream services that need the shell ready must declare
+# After=servo-shell.service and a suitable readiness mechanism.
+
+[Install]
+WantedBy=graphical.target
