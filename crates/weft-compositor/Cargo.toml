@@ -5,9 +5,6 @@ edition.workspace = true
 rust-version.workspace = true
 publish = false
 
-[lints]
-workspace = true
-
 [[bin]]
 name = "weft-compositor"
 path = "src/main.rs"
@@ -33,4 +30,8 @@ smithay = { version = "0.7", default-features = false, features = [
     "backend_libinput",
     "backend_udev",
     "backend_session_libseat",
+    "renderer_multi",
+    "use_system_lib",
 ] }
+smithay-drm-extras = "0.1"
+sd-notify = "0.4"

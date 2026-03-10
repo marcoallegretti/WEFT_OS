@@ -1,3 +1,6 @@
+#[cfg(target_os = "linux")]
+use crate::backend::drm_device::WeftDrmData;
+
 use smithay::{
     backend::{input::TabletToolDescriptor, renderer::utils::on_commit_buffer_handler},
     delegate_compositor, delegate_cursor_shape, delegate_dmabuf, delegate_input_method_manager,
@@ -81,6 +84,9 @@ pub struct WeftCompositorState {
 
     // Set to false when the compositor should exit the event loop.
     pub running: bool,
+
+    #[cfg(target_os = "linux")]
+    pub drm: Option<WeftDrmData>,
 }
 
 impl WeftCompositorState {
@@ -134,6 +140,8 @@ impl WeftCompositorState {
             cursor_image_status: CursorImageStatus::Hidden,
             dmabuf_global: None,
             running: true,
+            #[cfg(target_os = "linux")]
+            drm: None,
         }
     }
 }
@@ -291,12 +299,24 @@ impl DmabufHandler for WeftCompositorState {
     fn dmabuf_imported(
         &mut self,
         _global: &DmabufGlobal,
-        _dmabuf: smithay::backend::allocator::dmabuf::Dmabuf,
+        dmabuf: smithay::backend::allocator::dmabuf::Dmabuf,
         notifier: ImportNotifier,
     ) {
-        // DMA-BUF import requires the renderer, which lives in the backend run function.
-        // The backend is responsible for creating the global only when it can service imports.
-        // If we reach here without a backend handler wired up, reject.
+        #[cfg(target_os = "linux")]
+        if let Some(drm) = self.drm.as_mut() {
+            use smithay::backend::renderer::ImportDma;
+            let node = drm.primary_gpu;
+            if drm
+                .gpu_manager
+                .single_renderer(&node)
+                .ok()
+                .and_then(|mut r| r.import_dmabuf(&dmabuf, None).ok())
+                .is_some()
+            {
+                let _ = notifier.successful::<Self>();
+                return;
+            }
+        }
         drop(notifier);
     }
 }
