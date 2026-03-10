@@ -17,13 +17,14 @@ use smithay::{
         calloop::{LoopHandle, LoopSignal},
         wayland_server::{
             backend::{ClientData, ClientId, DisconnectReason},
-            protocol::{wl_output::WlOutput, wl_surface::WlSurface},
+            protocol::{wl_buffer::WlBuffer, wl_output::WlOutput, wl_surface::WlSurface},
             Client, DisplayHandle,
         },
     },
     utils::{Logical, Point, Rectangle},
     wayland::{
         compositor::{CompositorClientState, CompositorHandler, CompositorState},
+        buffer::BufferHandler,
         cursor_shape::CursorShapeManagerState,
         dmabuf::{DmabufGlobal, DmabufHandler, DmabufState, ImportNotifier},
         input_method::{InputMethodHandler, InputMethodManagerState, PopupSurface as ImPopupSurface},
@@ -273,6 +274,12 @@ impl SeatHandler for WeftCompositorState {
 }
 
 delegate_seat!(WeftCompositorState);
+
+// --- BufferHandler (required supertrait for DmabufHandler) ---
+
+impl BufferHandler for WeftCompositorState {
+    fn buffer_destroyed(&mut self, _buffer: &WlBuffer) {}
+}
 
 // --- DmabufHandler ---
 
