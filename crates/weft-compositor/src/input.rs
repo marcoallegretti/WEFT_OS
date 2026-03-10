@@ -127,7 +127,7 @@ fn handle_pointer_button<B: InputBackend>(
         let pointer_location = state.pointer_location;
         if let Some((surface, _loc)) = surface_under(state, pointer_location) {
             if let Some(keyboard) = state.seat.get_keyboard() {
-                keyboard.set_focus(state, Some(surface.clone()), serial);
+                keyboard.set_focus(state, Some(surface), serial);
             }
         } else if let Some(keyboard) = state.seat.get_keyboard() {
             keyboard.set_focus(state, None, serial);
