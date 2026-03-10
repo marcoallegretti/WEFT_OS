@@ -22,10 +22,6 @@ smithay = { version = "0.7", default-features = false, features = [
     "desktop",
 ] }
 calloop = { version = "0.14", features = ["executor"] }
-calloop-wayland-source = "0.4"
-wayland-server = "0.31"
-wayland-protocols = { version = "0.32", features = ["server", "unstable"] }
-wayland-protocols-wlr = { version = "0.3", features = ["server"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 anyhow = "1"

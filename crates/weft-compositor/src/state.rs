@@ -1,8 +1,9 @@
 use smithay::{
-    backend::renderer::utils::on_commit_buffer_handler,
+    backend::{input::TabletToolDescriptor, renderer::utils::on_commit_buffer_handler},
     delegate_compositor, delegate_cursor_shape, delegate_dmabuf, delegate_input_method_manager,
     delegate_layer_shell, delegate_output, delegate_pointer_constraints, delegate_presentation,
-    delegate_seat, delegate_shm, delegate_text_input_manager, delegate_xdg_shell,
+    delegate_seat, delegate_shm, delegate_text_input_manager,
+    delegate_xdg_shell,
     desktop::{
         layer_map_for_output, PopupKind, PopupManager, Space, Window, WindowSurfaceType,
     },
@@ -23,13 +24,13 @@ use smithay::{
     utils::{Logical, Point, Rectangle},
     wayland::{
         compositor::{CompositorClientState, CompositorHandler, CompositorState},
-        cursor_shape::{CursorShapeHandler, CursorShapeManagerState},
+        cursor_shape::CursorShapeManagerState,
         dmabuf::{DmabufGlobal, DmabufHandler, DmabufState, ImportNotifier},
-        input_method::{InputMethodHandler, InputMethodManagerState},
+        input_method::{InputMethodHandler, InputMethodManagerState, PopupSurface as ImPopupSurface},
+        tablet_manager::TabletSeatHandler,
         output::OutputManagerState,
         pointer_constraints::{PointerConstraintsHandler, PointerConstraintsState},
         presentation::{PresentationHandler, PresentationState},
-        seat::WaylandFocus,
         shell::{
             wlr_layer::{Layer, LayerSurface, WlrLayerShellHandler, WlrLayerShellState},
             xdg::{PopupSurface, PositionerState, ToplevelSurface, XdgShellHandler, XdgShellState},
@@ -322,9 +323,9 @@ delegate_text_input_manager!(WeftCompositorState);
 // --- InputMethodHandler ---
 
 impl InputMethodHandler for WeftCompositorState {
-    fn new_popup(&mut self, _surface: PopupSurface) {}
-    fn popup_repositioned(&mut self, _surface: PopupSurface) {}
-    fn popup_done(&mut self, _surface: PopupSurface) {}
+    fn new_popup(&mut self, _surface: ImPopupSurface) {}
+    fn dismiss_popup(&mut self, _surface: ImPopupSurface) {}
+    fn popup_repositioned(&mut self, _surface: ImPopupSurface) {}
 
     fn parent_geometry(&self, parent_surface: &WlSurface) -> Rectangle<i32, Logical> {
         self.space
@@ -355,12 +356,13 @@ impl PointerConstraintsHandler for WeftCompositorState {
 
 delegate_pointer_constraints!(WeftCompositorState);
 
-// --- CursorShapeHandler ---
+// --- TabletSeatHandler (required by delegate_cursor_shape!) ---
 
-impl CursorShapeHandler for WeftCompositorState {
-    fn cursor_shape_state(&mut self) -> &mut CursorShapeManagerState {
-        &mut self.cursor_shape_state
+impl TabletSeatHandler for WeftCompositorState {
+    fn tablet_tool_image(&mut self, _tool: &TabletToolDescriptor, image: CursorImageStatus) {
+        self.cursor_image_status = image;
     }
 }
 
+// CursorShapeManagerState has no handler trait; it calls SeatHandler::cursor_image directly.
 delegate_cursor_shape!(WeftCompositorState);
