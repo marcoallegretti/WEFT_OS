@@ -11,6 +11,7 @@ path = "src/main.rs"
 [dependencies]
 anyhow = "1.0"
 sd-notify = "0.4"
+toml = "0.8"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "io-util", "signal", "sync", "process", "time"] }
 serde = { version = "1", features = ["derive"] }
 rmp-serde = "1"

@@ -9,7 +9,7 @@ mod ipc;
 mod runtime;
 mod ws;
 
-use ipc::{AppStateKind, Request, Response, SessionInfo};
+use ipc::{AppInfo, AppStateKind, Request, Response, SessionInfo};
 
 pub(crate) type Registry = Arc<Mutex<SessionRegistry>>;
 
@@ -254,7 +254,66 @@ pub(crate) async fn dispatch(req: Request, registry: &Registry) -> Response {
             let state = registry.lock().await.state(session_id);
             Response::AppState { session_id, state }
         }
+        Request::QueryInstalledApps => {
+            let apps = scan_installed_apps();
+            Response::InstalledApps { apps }
+        }
     }
+}
+
+fn app_store_roots() -> Vec<std::path::PathBuf> {
+    if let Ok(explicit) = std::env::var("WEFT_APP_STORE") {
+        return vec![std::path::PathBuf::from(explicit)];
+    }
+    let mut roots = Vec::new();
+    if let Ok(home) = std::env::var("HOME") {
+        roots.push(
+            std::path::PathBuf::from(home)
+                .join(".local")
+                .join("share")
+                .join("weft")
+                .join("apps"),
+        );
+    }
+    roots.push(std::path::PathBuf::from("/usr/share/weft/apps"));
+    roots
+}
+
+#[derive(serde::Deserialize)]
+struct WappPackage {
+    id: String,
+    name: String,
+}
+
+#[derive(serde::Deserialize)]
+struct WappManifest {
+    package: WappPackage,
+}
+
+fn scan_installed_apps() -> Vec<AppInfo> {
+    let mut seen = std::collections::HashSet::new();
+    let mut apps = Vec::new();
+    for root in app_store_roots() {
+        let Ok(entries) = std::fs::read_dir(&root) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let manifest_path = entry.path().join("wapp.toml");
+            let Ok(contents) = std::fs::read_to_string(&manifest_path) else {
+                continue;
+            };
+            let Ok(m) = toml::from_str::<WappManifest>(&contents) else {
+                continue;
+            };
+            if seen.insert(m.package.id.clone()) {
+                apps.push(AppInfo {
+                    app_id: m.package.id,
+                    name: m.package.name,
+                });
+            }
+        }
+    }
+    apps
 }
 
 fn appd_socket_path() -> anyhow::Result<PathBuf> {
@@ -430,6 +489,36 @@ mod tests {
     fn registry_state_not_found_for_unknown() {
         let reg = SessionRegistry::default();
         assert!(matches!(reg.state(42), AppStateKind::NotFound));
+    }
+
+    #[test]
+    fn scan_installed_apps_finds_valid_packages() {
+        use std::fs;
+        let store = std::env::temp_dir().join(format!("weft_appd_scan_{}", std::process::id()));
+        let app_dir = store.join("com.example.scanner");
+        fs::create_dir_all(&app_dir).unwrap();
+        fs::write(
+            app_dir.join("wapp.toml"),
+            "[package]\nid = \"com.example.scanner\"\nname = \"Scanner\"\nversion = \"1.0.0\"\n\
+             [runtime]\nmodule = \"app.wasm\"\n[ui]\nentry = \"ui/index.html\"\n",
+        )
+        .unwrap();
+
+        let prior = std::env::var("WEFT_APP_STORE").ok();
+        unsafe { std::env::set_var("WEFT_APP_STORE", &store) };
+
+        let apps = scan_installed_apps();
+        assert_eq!(apps.len(), 1);
+        assert_eq!(apps[0].app_id, "com.example.scanner");
+        assert_eq!(apps[0].name, "Scanner");
+
+        unsafe {
+            match prior {
+                Some(v) => std::env::set_var("WEFT_APP_STORE", v),
+                None => std::env::remove_var("WEFT_APP_STORE"),
+            }
+        }
+        let _ = fs::remove_dir_all(&store);
     }
 
     #[cfg(unix)]

@@ -94,10 +94,43 @@
       backdrop-filter: blur(32px);
       -webkit-backdrop-filter: blur(32px);
       z-index: 100;
+      padding: 24px;
+      overflow-y: auto;
     }
 
     weft-launcher:not([hidden]) {
       display: block;
+    }
+
+    weft-app-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(96px, 1fr));
+      gap: 16px;
+      max-width: 640px;
+      margin: 0 auto;
+    }
+
+    weft-app-icon {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 6px;
+      padding: 12px 8px;
+      border-radius: 12px;
+      cursor: pointer;
+      color: var(--text-primary);
+      font-size: 12px;
+      text-align: center;
+      word-break: break-word;
+      transition: background 0.15s;
+    }
+
+    weft-app-icon:hover {
+      background: var(--surface-border);
+    }
+
+    weft-app-icon svg {
+      flex-shrink: 0;
     }
 
     weft-notification-center {
@@ -138,7 +171,9 @@
     </weft-taskbar>
   </weft-desktop>
 
-  <weft-launcher hidden id="launcher"></weft-launcher>
+  <weft-launcher hidden id="launcher">
+    <weft-app-grid id="app-grid"></weft-app-grid>
+  </weft-launcher>
   <weft-notification-center id="notifications"></weft-notification-center>
 
   <script>
@@ -177,6 +212,7 @@
         ws.addEventListener('open', function () {
           wsReconnectDelay = 1000;
           ws.send(JSON.stringify({ type: 'QUERY_RUNNING' }));
+          ws.send(JSON.stringify({ type: 'QUERY_INSTALLED_APPS' }));
         });
 
         ws.addEventListener('message', function (ev) {
@@ -201,7 +237,9 @@
       }
 
       function handleAppdMessage(msg) {
-        if (msg.type === 'APP_READY') {
+        if (msg.type === 'INSTALLED_APPS') {
+          renderLauncher(msg.apps || []);
+        } else if (msg.type === 'APP_READY') {
           var label = msg.app_id ? msg.app_id.split('.').pop() : String(msg.session_id);
           showNotification(label + ' is ready');
         } else if (msg.type === 'APP_STATE') {
@@ -215,6 +253,38 @@
         } else if (msg.type === 'LAUNCH_ACK') {
           ensureTaskbarEntry(msg.session_id, msg.app_id || null);
         }
+      }
+
+      function renderLauncher(apps) {
+        var grid = document.getElementById('app-grid');
+        grid.innerHTML = '';
+        if (apps.length === 0) {
+          var empty = document.createElement('p');
+          empty.textContent = 'No apps installed';
+          empty.style.cssText = 'color:var(--text-secondary);font-size:13px;';
+          grid.appendChild(empty);
+          return;
+        }
+        apps.forEach(function (app) {
+          var icon = document.createElement('weft-app-icon');
+          icon.dataset.appId = app.app_id;
+          icon.title = app.app_id;
+          icon.innerHTML =
+            '<svg width="40" height="40" viewBox="0 0 40 40" fill="none"' +
+            ' xmlns="http://www.w3.org/2000/svg" aria-hidden="true">' +
+            '<rect width="40" height="40" rx="10" fill="rgba(91,138,245,0.25)"/>' +
+            '<text x="20" y="27" text-anchor="middle" font-size="18" fill="rgba(255,255,255,0.8)">' +
+            (app.name ? app.name.charAt(0).toUpperCase() : '?') +
+            '</text></svg>' +
+            '<span>' + (app.name || app.app_id) + '</span>';
+          icon.addEventListener('click', function () {
+            if (ws && ws.readyState === WebSocket.OPEN) {
+              ws.send(JSON.stringify({ type: 'LAUNCH_APP', app_id: app.app_id, surface_id: 0 }));
+            }
+            document.getElementById('launcher').setAttribute('hidden', '');
+          });
+          grid.appendChild(icon);
+        });
       }
 
       function ensureTaskbarEntry(sessionId, appId) {

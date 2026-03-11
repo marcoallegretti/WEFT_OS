@@ -8,12 +8,19 @@ pub enum Request {
     TerminateApp { session_id: u64 },
     QueryRunning,
     QueryAppState { session_id: u64 },
+    QueryInstalledApps,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SessionInfo {
     pub session_id: u64,
     pub app_id: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AppInfo {
+    pub app_id: String,
+    pub name: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -33,6 +40,9 @@ pub enum Response {
     AppState {
         session_id: u64,
         state: AppStateKind,
+    },
+    InstalledApps {
+        apps: Vec<AppInfo>,
     },
     Error {
         code: u32,
