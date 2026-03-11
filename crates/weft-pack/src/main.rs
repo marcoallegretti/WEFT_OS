@@ -55,13 +55,48 @@ fn main() -> anyhow::Result<()> {
         Some("list") => {
             list_installed();
         }
+        Some("generate-key") => {
+            let out = args.get(2).map(String::as_str).unwrap_or(".");
+            generate_key(Path::new(out))?;
+        }
+        Some("sign") => {
+            let dir = args
+                .get(2)
+                .context("usage: weft-pack sign <dir> --key <keyfile>")?;
+            let key = args
+                .windows(2)
+                .find(|w| w[0] == "--key")
+                .map(|w| &w[1])
+                .context("missing --key <keyfile>")?;
+            sign_package(Path::new(dir), Path::new(key))?;
+        }
+        Some("verify") => {
+            let dir = args
+                .get(2)
+                .context("usage: weft-pack verify <dir> --key <pubkeyfile>")?;
+            let key = args
+                .windows(2)
+                .find(|w| w[0] == "--key")
+                .map(|w| &w[1])
+                .context("missing --key <pubkeyfile>")?;
+            let ok = verify_package(Path::new(dir), Path::new(key))?;
+            if ok {
+                println!("OK");
+            } else {
+                eprintln!("INVALID signature");
+                std::process::exit(1);
+            }
+        }
         _ => {
             eprintln!("usage:");
-            eprintln!("  weft-pack check     <dir>     validate a package directory");
-            eprintln!("  weft-pack info      <dir>     print package metadata");
-            eprintln!("  weft-pack install   <dir>     install package to app store");
-            eprintln!("  weft-pack uninstall <app_id>  remove installed package");
-            eprintln!("  weft-pack list                list installed packages");
+            eprintln!("  weft-pack check        <dir>             validate a package directory");
+            eprintln!("  weft-pack info         <dir>             print package metadata");
+            eprintln!("  weft-pack install      <dir>             install package to app store");
+            eprintln!("  weft-pack uninstall    <app_id>          remove installed package");
+            eprintln!("  weft-pack list                           list installed packages");
+            eprintln!("  weft-pack generate-key [<outdir>]        generate Ed25519 keypair");
+            eprintln!("  weft-pack sign         <dir> --key <key> sign package with private key");
+            eprintln!("  weft-pack verify       <dir> --key <pub> verify package signature");
             std::process::exit(1);
         }
     }
@@ -303,6 +338,110 @@ fn copy_dir(src: &Path, dst: &Path) -> anyhow::Result<()> {
     Ok(())
 }
 
+fn collect_bundle_files(
+    base: &Path,
+    dir: &Path,
+    entries: &mut Vec<(String, [u8; 32])>,
+) -> anyhow::Result<()> {
+    use sha2::{Digest, Sha256};
+    for entry in std::fs::read_dir(dir).with_context(|| format!("read dir {}", dir.display()))? {
+        let entry = entry?;
+        let path = entry.path();
+        let rel = path
+            .strip_prefix(base)
+            .context("strip prefix")?
+            .to_string_lossy()
+            .into_owned();
+        if rel == "signature.sig" {
+            continue;
+        }
+        if path.is_dir() {
+            collect_bundle_files(base, &path, entries)?;
+        } else {
+            let contents =
+                std::fs::read(&path).with_context(|| format!("read {}", path.display()))?;
+            let hash: [u8; 32] = Sha256::digest(&contents).into();
+            entries.push((rel, hash));
+        }
+    }
+    Ok(())
+}
+
+fn canonical_bundle_hash(dir: &Path) -> anyhow::Result<[u8; 32]> {
+    use sha2::{Digest, Sha256};
+    let mut entries: Vec<(String, [u8; 32])> = Vec::new();
+    collect_bundle_files(dir, dir, &mut entries)?;
+    entries.sort_by(|a, b| a.0.cmp(&b.0));
+    let mut canonical = String::new();
+    for (path, hash) in &entries {
+        canonical.push_str(&format!("{path}\t{}\n", hex::encode(hash)));
+    }
+    Ok(Sha256::digest(canonical.as_bytes()).into())
+}
+
+fn generate_key(output_dir: &Path) -> anyhow::Result<()> {
+    use ed25519_dalek::SigningKey;
+    use rand::rngs::OsRng;
+    let key_path = output_dir.join("weft-sign.key");
+    let pub_path = output_dir.join("weft-sign.pub");
+    if key_path.exists() || pub_path.exists() {
+        anyhow::bail!(
+            "key files already exist in {}; remove them first",
+            output_dir.display()
+        );
+    }
+    let signing_key = SigningKey::generate(&mut OsRng);
+    let verifying_key = signing_key.verifying_key();
+    std::fs::create_dir_all(output_dir)
+        .with_context(|| format!("create {}", output_dir.display()))?;
+    std::fs::write(&key_path, hex::encode(signing_key.to_bytes()))
+        .with_context(|| format!("write {}", key_path.display()))?;
+    std::fs::write(&pub_path, hex::encode(verifying_key.to_bytes()))
+        .with_context(|| format!("write {}", pub_path.display()))?;
+    println!("private key: {}", key_path.display());
+    println!("public key:  {}", pub_path.display());
+    Ok(())
+}
+
+fn sign_package(dir: &Path, key_file: &Path) -> anyhow::Result<()> {
+    use ed25519_dalek::{Signer, SigningKey};
+    let key_hex = std::fs::read_to_string(key_file)
+        .with_context(|| format!("read {}", key_file.display()))?;
+    let key_bytes: [u8; 32] = hex::decode(key_hex.trim())
+        .context("decode signing key: expected 64 hex chars")?
+        .try_into()
+        .map_err(|_| anyhow::anyhow!("signing key must be 32 bytes"))?;
+    let signing_key = SigningKey::from_bytes(&key_bytes);
+    let hash = canonical_bundle_hash(dir)?;
+    let signature = signing_key.sign(&hash);
+    let sig_path = dir.join("signature.sig");
+    std::fs::write(&sig_path, hex::encode(signature.to_bytes()))
+        .with_context(|| format!("write {}", sig_path.display()))?;
+    println!("signed: {}", sig_path.display());
+    Ok(())
+}
+
+fn verify_package(dir: &Path, pub_key_file: &Path) -> anyhow::Result<bool> {
+    use ed25519_dalek::{Signature, Verifier, VerifyingKey};
+    let pub_hex = std::fs::read_to_string(pub_key_file)
+        .with_context(|| format!("read {}", pub_key_file.display()))?;
+    let pub_bytes: [u8; 32] = hex::decode(pub_hex.trim())
+        .context("decode public key: expected 64 hex chars")?
+        .try_into()
+        .map_err(|_| anyhow::anyhow!("public key must be 32 bytes"))?;
+    let verifying_key = VerifyingKey::from_bytes(&pub_bytes).context("invalid public key bytes")?;
+    let sig_path = dir.join("signature.sig");
+    let sig_hex = std::fs::read_to_string(&sig_path)
+        .with_context(|| format!("read {}", sig_path.display()))?;
+    let sig_bytes: [u8; 64] = hex::decode(sig_hex.trim())
+        .context("decode signature: expected 128 hex chars")?
+        .try_into()
+        .map_err(|_| anyhow::anyhow!("signature must be 64 bytes"))?;
+    let signature = Signature::from_bytes(&sig_bytes);
+    let hash = canonical_bundle_hash(dir)?;
+    Ok(verifying_key.verify(&hash, &signature).is_ok())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -537,6 +676,66 @@ entry = "ui/index.html"
         let result = check_package(&tmp);
         assert!(result.is_err());
         let _ = fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn sign_and_verify_roundtrip() {
+        use std::fs;
+        let id = format!("sign_verify_{}", std::process::id());
+        let dir = std::env::temp_dir().join(&id);
+        let key_dir = std::env::temp_dir().join(format!("{id}_keys"));
+        let ui = dir.join("ui");
+        let _ = fs::create_dir_all(&ui);
+        fs::write(dir.join("app.wasm"), b"\0asm\x01\0\0\0").unwrap();
+        fs::write(ui.join("index.html"), b"<!DOCTYPE html>").unwrap();
+        fs::write(
+            dir.join("wapp.toml"),
+            "[package]\nid = \"com.example.signed\"\nname = \"S\"\nversion = \"1.0.0\"\n\n\
+             [runtime]\nmodule = \"app.wasm\"\n\n[ui]\nentry = \"ui/index.html\"\n",
+        )
+        .unwrap();
+
+        generate_key(&key_dir).unwrap();
+        let key_file = key_dir.join("weft-sign.key");
+        let pub_file = key_dir.join("weft-sign.pub");
+
+        sign_package(&dir, &key_file).unwrap();
+        assert!(dir.join("signature.sig").exists());
+
+        let ok = verify_package(&dir, &pub_file).unwrap();
+        assert!(ok, "signature should verify");
+
+        let _ = fs::remove_dir_all(&dir);
+        let _ = fs::remove_dir_all(&key_dir);
+    }
+
+    #[test]
+    fn verify_rejects_tampered_bundle() {
+        use std::fs;
+        let id = format!("tamper_{}", std::process::id());
+        let dir = std::env::temp_dir().join(&id);
+        let key_dir = std::env::temp_dir().join(format!("{id}_keys"));
+        let ui = dir.join("ui");
+        let _ = fs::create_dir_all(&ui);
+        fs::write(dir.join("app.wasm"), b"\0asm\x01\0\0\0").unwrap();
+        fs::write(ui.join("index.html"), b"<!DOCTYPE html>").unwrap();
+        fs::write(
+            dir.join("wapp.toml"),
+            "[package]\nid = \"com.example.tamper\"\nname = \"T\"\nversion = \"1.0.0\"\n\n\
+             [runtime]\nmodule = \"app.wasm\"\n\n[ui]\nentry = \"ui/index.html\"\n",
+        )
+        .unwrap();
+
+        generate_key(&key_dir).unwrap();
+        sign_package(&dir, &key_dir.join("weft-sign.key")).unwrap();
+
+        fs::write(dir.join("app.wasm"), b"\0asm\x01\0\0\x01").unwrap();
+
+        let ok = verify_package(&dir, &key_dir.join("weft-sign.pub")).unwrap();
+        assert!(!ok, "tampered bundle should not verify");
+
+        let _ = fs::remove_dir_all(&dir);
+        let _ = fs::remove_dir_all(&key_dir);
     }
 
     #[test]
