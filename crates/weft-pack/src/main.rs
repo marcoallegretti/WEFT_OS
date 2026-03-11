@@ -43,10 +43,15 @@ fn main() -> anyhow::Result<()> {
             let manifest = load_manifest(Path::new(dir))?;
             print_info(&manifest);
         }
+        Some("install") => {
+            let dir = args.get(2).context("usage: weft-pack install <dir>")?;
+            install_package(Path::new(dir))?;
+        }
         _ => {
             eprintln!("usage:");
-            eprintln!("  weft-pack check <dir>   validate a package directory");
-            eprintln!("  weft-pack info  <dir>   print package metadata");
+            eprintln!("  weft-pack check   <dir>   validate a package directory");
+            eprintln!("  weft-pack info    <dir>   print package metadata");
+            eprintln!("  weft-pack install <dir>   install package to app store");
             std::process::exit(1);
         }
     }
@@ -140,22 +145,57 @@ fn is_valid_app_id(id: &str) -> bool {
     })
 }
 
-fn _resolve_store_roots() -> Vec<PathBuf> {
+fn resolve_install_root() -> anyhow::Result<PathBuf> {
     if let Ok(explicit) = std::env::var("WEFT_APP_STORE") {
-        return vec![PathBuf::from(explicit)];
+        return Ok(PathBuf::from(explicit));
     }
-    let mut roots = Vec::new();
     if let Ok(home) = std::env::var("HOME") {
-        roots.push(
-            PathBuf::from(home)
-                .join(".local")
-                .join("share")
-                .join("weft")
-                .join("apps"),
+        return Ok(PathBuf::from(home)
+            .join(".local")
+            .join("share")
+            .join("weft")
+            .join("apps"));
+    }
+    anyhow::bail!("cannot determine install root: HOME and WEFT_APP_STORE are both unset")
+}
+
+fn install_package(dir: &Path) -> anyhow::Result<()> {
+    check_package(dir)?;
+    let manifest = load_manifest(dir)?;
+    let app_id = &manifest.package.id;
+
+    let store_root = resolve_install_root()?;
+    let dest = store_root.join(app_id);
+
+    if dest.exists() {
+        anyhow::bail!(
+            "package '{}' is already installed at {}; remove it first",
+            app_id,
+            dest.display()
         );
     }
-    roots.push(PathBuf::from("/usr/share/weft/apps"));
-    roots
+
+    copy_dir(dir, &dest)
+        .with_context(|| format!("copy {} -> {}", dir.display(), dest.display()))?;
+
+    println!("installed {} -> {}", app_id, dest.display());
+    Ok(())
+}
+
+fn copy_dir(src: &Path, dst: &Path) -> anyhow::Result<()> {
+    std::fs::create_dir_all(dst)?;
+    for entry in std::fs::read_dir(src)? {
+        let entry = entry?;
+        let src_path = entry.path();
+        let dst_path = dst.join(entry.file_name());
+        if src_path.is_dir() {
+            copy_dir(&src_path, &dst_path)?;
+        } else {
+            std::fs::copy(&src_path, &dst_path)
+                .with_context(|| format!("copy {}", src_path.display()))?;
+        }
+    }
+    Ok(())
 }
 
 #[cfg(test)]

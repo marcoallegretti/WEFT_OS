@@ -43,23 +43,6 @@ fn system_ui_html_path() -> anyhow::Result<PathBuf> {
 }
 
 fn embed_servo(_wayland_display: &str, _html_path: &std::path::Path) -> anyhow::Result<()> {
-    // Wave 4 skeleton entry point.
-    //
-    // Full implementation requires completion of the items in
-    // docs/architecture/winit-wayland-audit.md before production readiness,
-    // and the following integration work:
-    //
-    //   1. Add servo git dependency (not on crates.io; requires building Servo)
-    //   2. Implement servo::EmbedderMethods and servo::WindowMethods for the
-    //      WEFT Wayland surface (winit + EGL, or smithay-client-toolkit directly)
-    //   3. Call servo::Servo::new() with the window and embedder
-    //   4. Load the system UI via servo::ServoUrl::parse(html_path)
-    //   5. Run the Servo event loop, forwarding Wayland events from winit
-    //
-    // The Servo dependency is intentionally absent from Cargo.toml at this stage.
-    // It requires a git dependency on github.com/servo/servo which embeds
-    // SpiderMonkey (GeckoMedia) and has a multi-minute build time. It is added
-    // when the embedder contract is ready.
     anyhow::bail!(
         "Servo embedding not yet implemented; \
          see docs/architecture/winit-wayland-audit.md for gap assessment"
