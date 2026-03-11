@@ -104,6 +104,9 @@ pub(crate) async fn supervise(
         }
     };
 
+    let (mount_orch, store_override) =
+        crate::mount::MountOrchestrator::mount_if_needed(app_id, session_id);
+
     let mut cmd = if systemd_cgroup_available() {
         let mut c = tokio::process::Command::new("systemd-run");
         c.args([
@@ -131,6 +134,10 @@ pub(crate) async fn supervise(
 
     if let Some(ref sock) = ipc_socket_path {
         cmd.arg("--ipc-socket").arg(sock);
+    }
+
+    if let Some(ref root) = store_override {
+        cmd.env("WEFT_APP_STORE", root);
     }
 
     for (host, guest) in resolve_preopens(app_id) {
@@ -227,6 +234,8 @@ pub(crate) async fn supervise(
             .send(AppdToCompositor::AppSurfaceDestroyed { session_id })
             .await;
     }
+
+    mount_orch.umount();
 
     {
         let mut reg = registry.lock().await;

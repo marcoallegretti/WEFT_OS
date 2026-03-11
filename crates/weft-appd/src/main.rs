@@ -7,6 +7,7 @@ use tokio::sync::Mutex;
 
 mod compositor_client;
 mod ipc;
+mod mount;
 mod runtime;
 mod ws;
 
