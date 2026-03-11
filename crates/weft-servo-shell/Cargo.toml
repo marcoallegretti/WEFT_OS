@@ -8,6 +8,12 @@ rust-version.workspace = true
 name = "weft-servo-shell"
 path = "src/main.rs"
 
+[features]
+# Enable actual Servo rendering. Requires manually adding the deps listed in
+# SERVO_PIN.md to this file before building; they are not included here to
+# avoid pulling the Servo monorepo (~1 GB) into every `cargo check` cycle.
+servo-embed = []
+
 [dependencies]
 anyhow = "1.0"
 tracing = "0.1"

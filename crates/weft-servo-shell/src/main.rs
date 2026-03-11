@@ -2,6 +2,8 @@ use std::path::PathBuf;
 
 use anyhow::Context;
 
+#[cfg(feature = "servo-embed")]
+mod embedder;
 mod protocols;
 
 fn main() -> anyhow::Result<()> {
@@ -66,11 +68,19 @@ fn appd_ws_port() -> u16 {
 
 fn embed_servo(
     _wayland_display: &str,
-    _html_path: &std::path::Path,
-    _ws_port: u16,
+    html_path: &std::path::Path,
+    ws_port: u16,
 ) -> anyhow::Result<()> {
-    anyhow::bail!(
-        "Servo embedding not yet implemented; \
-         see docs/architecture/winit-wayland-audit.md for gap assessment"
-    )
+    #[cfg(feature = "servo-embed")]
+    return embedder::run(html_path, ws_port);
+
+    #[cfg(not(feature = "servo-embed"))]
+    {
+        tracing::warn!(
+            path = %html_path.display(),
+            ws_port,
+            "servo-embed feature not enabled; build with --features servo-embed to activate"
+        );
+        anyhow::bail!("servo-embed feature required")
+    }
 }
