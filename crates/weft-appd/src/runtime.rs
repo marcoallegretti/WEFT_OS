@@ -1,8 +1,10 @@
 use std::time::Duration;
 
 use tokio::io::{AsyncBufReadExt, BufReader};
+use weft_ipc_types::AppdToCompositor;
 
 use crate::Registry;
+use crate::compositor_client::CompositorSender;
 use crate::ipc::{AppStateKind, Response};
 
 const READY_TIMEOUT: Duration = Duration::from_secs(30);
@@ -12,6 +14,7 @@ pub(crate) async fn supervise(
     app_id: &str,
     registry: Registry,
     abort_rx: tokio::sync::oneshot::Receiver<()>,
+    compositor_tx: Option<CompositorSender>,
 ) -> anyhow::Result<()> {
     let mut abort_rx = abort_rx;
     let bin = match std::env::var("WEFT_RUNTIME_BIN") {
@@ -42,6 +45,17 @@ pub(crate) async fn supervise(
             return Ok(());
         }
     };
+
+    if let Some(tx) = &compositor_tx {
+        let pid = child.id().unwrap_or(0);
+        let _ = tx
+            .send(AppdToCompositor::AppSurfaceCreated {
+                app_id: app_id.to_owned(),
+                session_id,
+                pid,
+            })
+            .await;
+    }
 
     let stdout = child.stdout.take().expect("stdout piped");
     let stderr = child.stderr.take().expect("stderr piped");
@@ -101,6 +115,12 @@ pub(crate) async fn supervise(
             tracing::info!(session_id, %app_id, "abort received; sending SIGTERM");
             let _ = child.kill().await;
         }
+    }
+
+    if let Some(tx) = &compositor_tx {
+        let _ = tx
+            .send(AppdToCompositor::AppSurfaceDestroyed { session_id })
+            .await;
     }
 
     {

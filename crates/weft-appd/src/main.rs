@@ -5,6 +5,7 @@ use anyhow::Context;
 use tokio::io::AsyncWriteExt;
 use tokio::sync::Mutex;
 
+mod compositor_client;
 mod ipc;
 mod runtime;
 mod ws;
@@ -23,6 +24,7 @@ struct SessionRegistry {
     sessions: std::collections::HashMap<u64, SessionEntry>,
     broadcast: tokio::sync::broadcast::Sender<Response>,
     abort_senders: std::collections::HashMap<u64, tokio::sync::oneshot::Sender<()>>,
+    compositor_tx: Option<compositor_client::CompositorSender>,
 }
 
 impl Default for SessionRegistry {
@@ -33,6 +35,7 @@ impl Default for SessionRegistry {
             sessions: std::collections::HashMap::new(),
             broadcast,
             abort_senders: std::collections::HashMap::new(),
+            compositor_tx: None,
         }
     }
 }
@@ -125,6 +128,11 @@ async fn run() -> anyhow::Result<()> {
     tracing::info!(path = %socket_path.display(), "IPC socket listening");
 
     let registry: Registry = Arc::new(Mutex::new(SessionRegistry::default()));
+
+    if let Some(path) = compositor_client::socket_path() {
+        let tx = compositor_client::spawn(path);
+        registry.lock().await.compositor_tx = Some(tx);
+    }
 
     let ws_port = ws_port();
     let ws_addr: std::net::SocketAddr = format!("127.0.0.1:{ws_port}").parse()?;
@@ -231,10 +239,13 @@ pub(crate) async fn dispatch(req: Request, registry: &Registry) -> Response {
             let session_id = registry.lock().await.launch(&app_id);
             tracing::info!(session_id, %app_id, "launched");
             let abort_rx = registry.lock().await.register_abort(session_id);
+            let compositor_tx = registry.lock().await.compositor_tx.clone();
             let reg = Arc::clone(registry);
             let aid = app_id.clone();
             tokio::spawn(async move {
-                if let Err(e) = runtime::supervise(session_id, &aid, reg, abort_rx).await {
+                if let Err(e) =
+                    runtime::supervise(session_id, &aid, reg, abort_rx, compositor_tx).await
+                {
                     tracing::warn!(session_id, error = %e, "runtime supervisor error");
                 }
             });
@@ -647,9 +658,15 @@ mod tests {
         let session_id = registry.lock().await.launch("test.app");
         let abort_rx = registry.lock().await.register_abort(session_id);
 
-        runtime::supervise(session_id, "test.app", Arc::clone(&registry), abort_rx)
-            .await
-            .unwrap();
+        runtime::supervise(
+            session_id,
+            "test.app",
+            Arc::clone(&registry),
+            abort_rx,
+            None,
+        )
+        .await
+        .unwrap();
 
         assert!(matches!(
             registry.lock().await.state(session_id),
@@ -703,6 +720,7 @@ mod tests {
             "test.abort.startup",
             Arc::clone(&registry),
             abort_rx,
+            None,
         )
         .await
         .unwrap();
@@ -748,6 +766,7 @@ mod tests {
             "test.spawn.fail",
             Arc::clone(&registry),
             abort_rx,
+            None,
         )
         .await
         .unwrap();
