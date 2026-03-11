@@ -232,6 +232,9 @@ async fn save_session(app_ids: Vec<String>) {
     let Some(path) = session_file_path() else {
         return;
     };
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
     if let Ok(json) = serde_json::to_string(&app_ids) {
         let _ = std::fs::write(&path, json);
     }
@@ -839,6 +842,71 @@ mod tests {
             match prior {
                 Some(v) => std::env::set_var("WEFT_RUNTIME_BIN", v),
                 None => std::env::remove_var("WEFT_RUNTIME_BIN"),
+            }
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn session_save_load_roundtrip() {
+        let tmp = std::env::temp_dir().join(format!("weft_session_test_{}", std::process::id()));
+        std::fs::create_dir_all(&tmp).unwrap();
+        let prior = std::env::var("XDG_RUNTIME_DIR").ok();
+        unsafe { std::env::set_var("XDG_RUNTIME_DIR", &tmp) };
+
+        let app_ids = vec!["com.example.foo".to_string(), "com.example.bar".to_string()];
+        save_session(app_ids.clone()).await;
+
+        let loaded = load_session();
+        assert!(loaded.is_some());
+        let mut loaded = loaded.unwrap();
+        loaded.sort();
+        let mut expected = app_ids.clone();
+        expected.sort();
+        assert_eq!(loaded, expected);
+
+        assert!(load_session().is_none());
+
+        let _ = std::fs::remove_dir_all(&tmp);
+        unsafe {
+            match prior {
+                Some(v) => std::env::set_var("XDG_RUNTIME_DIR", v),
+                None => std::env::remove_var("XDG_RUNTIME_DIR"),
+            }
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn session_save_empty_load_returns_empty_vec() {
+        let tmp = std::env::temp_dir().join(format!("weft_session_empty_{}", std::process::id()));
+        std::fs::create_dir_all(&tmp).unwrap();
+        let prior = std::env::var("XDG_RUNTIME_DIR").ok();
+        unsafe { std::env::set_var("XDG_RUNTIME_DIR", &tmp) };
+
+        save_session(vec![]).await;
+        let loaded = load_session();
+        assert!(matches!(loaded, Some(v) if v.is_empty()));
+
+        let _ = std::fs::remove_dir_all(&tmp);
+        unsafe {
+            match prior {
+                Some(v) => std::env::set_var("XDG_RUNTIME_DIR", v),
+                None => std::env::remove_var("XDG_RUNTIME_DIR"),
+            }
+        }
+    }
+
+    #[test]
+    fn load_session_no_file_returns_none() {
+        let tmp = std::env::temp_dir().join(format!("weft_session_missing_{}", std::process::id()));
+        let prior = std::env::var("XDG_RUNTIME_DIR").ok();
+        unsafe { std::env::set_var("XDG_RUNTIME_DIR", &tmp) };
+
+        assert!(load_session().is_none());
+
+        unsafe {
+            match prior {
+                Some(v) => std::env::set_var("XDG_RUNTIME_DIR", v),
+                None => std::env::remove_var("XDG_RUNTIME_DIR"),
             }
         }
     }
