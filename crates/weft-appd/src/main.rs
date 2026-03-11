@@ -93,6 +93,10 @@ impl SessionRegistry {
     pub(crate) fn broadcast(&self) -> &tokio::sync::broadcast::Sender<Response> {
         &self.broadcast
     }
+
+    pub(crate) fn shutdown_all(&mut self) {
+        self.abort_senders.clear();
+    }
 }
 
 #[tokio::main]
@@ -175,6 +179,8 @@ async fn run() -> anyhow::Result<()> {
         }
     }
 
+    registry.lock().await.shutdown_all();
+    tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;
     let _ = std::fs::remove_file(&socket_path);
     Ok(())
 }
