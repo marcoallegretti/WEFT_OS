@@ -13,6 +13,7 @@ pub(crate) async fn supervise(
     registry: Registry,
     abort_rx: tokio::sync::oneshot::Receiver<()>,
 ) -> anyhow::Result<()> {
+    let mut abort_rx = abort_rx;
     let bin = match std::env::var("WEFT_RUNTIME_BIN") {
         Ok(b) => b,
         Err(_) => {
@@ -45,10 +46,13 @@ pub(crate) async fn supervise(
     let stdout = child.stdout.take().expect("stdout piped");
     let stderr = child.stderr.take().expect("stderr piped");
 
-    let ready_result = tokio::time::timeout(READY_TIMEOUT, wait_for_ready(stdout)).await;
+    let ready_result = tokio::select! {
+        r = tokio::time::timeout(READY_TIMEOUT, wait_for_ready(stdout)) => Some(r),
+        _ = &mut abort_rx => None,
+    };
 
     match ready_result {
-        Ok(Ok(remaining_stdout)) => {
+        Some(Ok(Ok(remaining_stdout))) => {
             registry
                 .lock()
                 .await
@@ -60,11 +64,22 @@ pub(crate) async fn supervise(
             tracing::info!(session_id, %app_id, "app ready");
             tokio::spawn(drain_stdout(remaining_stdout, session_id));
         }
-        Ok(Err(e)) => {
+        Some(Ok(Err(e))) => {
             tracing::warn!(session_id, %app_id, error = %e, "stdout read error before READY");
         }
-        Err(_elapsed) => {
+        Some(Err(_elapsed)) => {
             tracing::warn!(session_id, %app_id, "READY timeout after 30s; killing process");
+            let _ = child.kill().await;
+            let mut reg = registry.lock().await;
+            reg.set_state(session_id, AppStateKind::Stopped);
+            let _ = reg.broadcast().send(Response::AppState {
+                session_id,
+                state: AppStateKind::Stopped,
+            });
+            return Ok(());
+        }
+        None => {
+            tracing::info!(session_id, %app_id, "abort during startup; killing process");
             let _ = child.kill().await;
             let mut reg = registry.lock().await;
             reg.set_state(session_id, AppStateKind::Stopped);

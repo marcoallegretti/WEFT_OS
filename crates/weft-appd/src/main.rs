@@ -601,6 +601,55 @@ mod tests {
 
     #[cfg(unix)]
     #[tokio::test(flavor = "current_thread")]
+    async fn supervisor_abort_during_startup_broadcasts_stopped() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let script =
+            std::env::temp_dir().join(format!("weft_test_sleep_{}.sh", std::process::id()));
+        std::fs::write(&script, "#!/bin/sh\nsleep 60\n").unwrap();
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        let prior = std::env::var("WEFT_RUNTIME_BIN").ok();
+        unsafe { std::env::set_var("WEFT_RUNTIME_BIN", &script) };
+
+        let registry: Registry = Arc::new(Mutex::new(SessionRegistry::default()));
+        let mut rx = registry.lock().await.subscribe();
+        let session_id = registry.lock().await.launch("test.abort.startup");
+        let abort_rx = registry.lock().await.register_abort(session_id);
+
+        registry.lock().await.terminate(session_id);
+
+        runtime::supervise(
+            session_id,
+            "test.abort.startup",
+            Arc::clone(&registry),
+            abort_rx,
+        )
+        .await
+        .unwrap();
+
+        assert!(matches!(
+            registry.lock().await.state(session_id),
+            AppStateKind::NotFound
+        ));
+
+        let broadcast = rx.try_recv();
+        assert!(matches!(
+            broadcast,
+            Ok(Response::AppState { session_id: sid, state: AppStateKind::Stopped }) if sid == session_id
+        ));
+
+        let _ = std::fs::remove_file(&script);
+        unsafe {
+            match prior {
+                Some(v) => std::env::set_var("WEFT_RUNTIME_BIN", v),
+                None => std::env::remove_var("WEFT_RUNTIME_BIN"),
+            }
+        }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test(flavor = "current_thread")]
     async fn supervisor_spawn_failure_broadcasts_stopped() {
         let prior = std::env::var("WEFT_RUNTIME_BIN").ok();
         unsafe {
