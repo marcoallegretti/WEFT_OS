@@ -77,8 +77,18 @@ compositor is not yet wired (`RenderingCtx::Egl` blit body is a no-op).
   mouse events forwarded via `webview.notify_input_event`; key mapping in `keyutils.rs`.
 - **GAP-2**: EGL `WindowRenderingContext` path scaffolded (`WEFT_EGL_RENDERING=1`);
   DMA-BUF export to the Wayland compositor (linux-dmabuf-unstable-v1) not yet wired.
-- **GAP-3**: WebGPU adapter on Mesa may fail CTS
-- **GAP-4**: CSS `backdrop-filter` and CSS Grid have partial coverage
+- **GAP-3**: WebGPU adapter on Mesa may fail CTS — validation task, requires Mesa GPU hardware.
+- **GAP-4**: ~~CSS Grid~~ **Grid resolved** (Taffy-backed, fully wired). CSS `backdrop-filter` is
+  unimplemented (servo/servo issue [#41567](https://github.com/servo/servo/issues/41567)).
+  Implementation requires two changes:
+  1. Enable `backdrop-filter` parsing in `servo/stylo` — the property is disabled at the current
+     stylo pin (`dca3934`); requires a `marcoallegretti/stylo` fork with a `servo-weft` branch,
+     then patch the stylo dep in this fork's `Cargo.toml` via `[patch."https://github.com/servo/stylo"]`.
+  2. Wire the display list in `servo/servo` (this fork): add `backdrop-filter` to
+     `establishes_stacking_context` and `establishes_containing_block_for_all_descendants` in
+     `components/layout/style_ext.rs`, then call `push_backdrop_filter` in
+     `components/layout/display_list/mod.rs`.
+- **GAP-5**: Per-app process isolation — requires Servo multi-process (constellation) architecture.
 
 ## Update policy
 
@@ -94,3 +104,27 @@ To rebase onto a new upstream commit:
 5. Confirm the compositor and shell tests still pass.
 
 To submit patches upstream: open a PR from `servo-weft` (or a topic branch) to `servo/servo`.
+
+## Stylo fork
+
+The Stylo CSS engine is a separate repo (`servo/stylo`) pinned at rev `dca3934667dae76c49bb579b268c5eb142d09c6a`
+in `Cargo.toml`. To patch it for WEFT-specific changes (e.g. enabling `backdrop-filter`):
+
+1. Fork `servo/stylo` to `marcoallegretti/stylo`, create branch `servo-weft`.
+2. Make changes on that branch.
+3. Add to this fork's `Cargo.toml` workspace `[patch]` section:
+
+```toml
+[patch."https://github.com/servo/stylo"]
+stylo = { git = "https://github.com/marcoallegretti/stylo", branch = "servo-weft" }
+stylo_atoms = { git = "https://github.com/marcoallegretti/stylo", branch = "servo-weft" }
+stylo_dom = { git = "https://github.com/marcoallegretti/stylo", branch = "servo-weft" }
+stylo_malloc_size_of = { git = "https://github.com/marcoallegretti/stylo", branch = "servo-weft" }
+stylo_static_prefs = { git = "https://github.com/marcoallegretti/stylo", branch = "servo-weft" }
+stylo_traits = { git = "https://github.com/marcoallegretti/stylo", branch = "servo-weft" }
+selectors = { git = "https://github.com/marcoallegretti/stylo", branch = "servo-weft" }
+servo_arc = { git = "https://github.com/marcoallegretti/stylo", branch = "servo-weft" }
+```
+
+4. Run `cargo update` to resolve the new stylo deps.
+5. Commit both the `Cargo.toml` and `Cargo.lock` changes to `servo-weft`.
