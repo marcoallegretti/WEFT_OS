@@ -134,6 +134,13 @@ pub(crate) async fn supervise(
         Ok(b) => b,
         Err(_) => {
             tracing::debug!(session_id, %app_id, "WEFT_RUNTIME_BIN not set; skipping process spawn");
+            let mut reg = registry.lock().await;
+            reg.set_state(session_id, AppStateKind::Stopped);
+            reg.remove_abort_sender(session_id);
+            let _ = reg.broadcast().send(Response::AppState {
+                session_id,
+                state: AppStateKind::Stopped,
+            });
             return Ok(());
         }
     };
