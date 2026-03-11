@@ -2,12 +2,13 @@
 
 ## Current pin
 
-| Field   | Value                                                                    |
-|---------|--------------------------------------------------------------------------|
-| Source  | <https://github.com/servo/servo>                                         |
-| Rev     | `c242860f0ef4e7c6e60dfea29310167898e6eb38` (main, 2026-03-11)            |
-| Crate   | `servo` (package name as of 2026-03-11; previously `libservo`)           |
-| Feature | `servo-embed` (optional; off by default)                                 |
+| Field   | Value                                                                              |
+|---------|------------------------------------------------------------------------------------|
+| Source  | <https://github.com/marcoallegretti/servo> (fork of servo/servo)                  |
+| Branch  | `servo-weft`                                                                       |
+| Rev     | `04ca254f843ed650d3e5b14e5693ad51a60cc84b` (servo-weft tip, 2026-03-11)           |
+| Crate   | `servo` (package name as of 2026-03-11; previously `libservo`)                    |
+| Feature | `servo-embed` (optional; off by default)                                           |
 
 ## Adding the Cargo dependencies
 
@@ -21,8 +22,8 @@ feature line to declare `dep:servo`, `dep:winit`, and `dep:softbuffer`:
 servo-embed = ["dep:servo", "dep:winit", "dep:softbuffer"]
 
 [dependencies.servo]
-git = "https://github.com/servo/servo"
-rev = "c242860f0ef4e7c6e60dfea29310167898e6eb38"
+git = "https://github.com/marcoallegretti/servo"
+branch = "servo-weft"
 optional = true
 default-features = false
 
@@ -81,9 +82,15 @@ compositor is not yet wired (`RenderingCtx::Egl` blit body is a no-op).
 
 ## Update policy
 
-Pin is reviewed monthly. To update:
+The `servo-weft` branch is the working branch for WEFT-specific Servo patches.
+Upstream servo/servo changes are merged into it periodically.
 
-1. Check the [Servo release page](https://github.com/servo/servo/releases) for new tags.
-2. Update `tag` in `Cargo.toml` and run `cargo update -p servo`.
-3. Confirm the compositor and shell tests still pass.
-4. Update this file with the new tag and any new or resolved gaps.
+To rebase onto a new upstream commit:
+
+1. In the `marcoallegretti/servo` repo: `git fetch upstream && git rebase upstream/main` on `servo-weft`.
+2. Force-push `servo-weft`.
+3. Update `Rev` in this file to the new tip SHA.
+4. Run `cargo update -p servo` in the WEFT OS workspace.
+5. Confirm the compositor and shell tests still pass.
+
+To submit patches upstream: open a PR from `servo-weft` (or a topic branch) to `servo/servo`.
