@@ -146,6 +146,10 @@ fn run_module(
         ctx_builder.env("WEFT_IPC_SOCKET", socket_path);
     }
 
+    if let Ok(portal_socket) = std::env::var("WEFT_FILE_PORTAL_SOCKET") {
+        ctx_builder.env("WEFT_FILE_PORTAL_SOCKET", &portal_socket);
+    }
+
     for (host_path, guest_path) in preopen {
         let dir = Dir::open_ambient_dir(host_path, ambient_authority())
             .with_context(|| format!("open preopen dir {host_path}"))?;
