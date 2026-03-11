@@ -197,6 +197,18 @@
         }
       });
 
+      document.addEventListener('keydown', function (e) {
+        if (e.key === 'Escape') {
+          document.getElementById('launcher').setAttribute('hidden', '');
+        }
+      });
+
+      document.getElementById('launcher').addEventListener('click', function (e) {
+        if (e.target === this) {
+          this.setAttribute('hidden', '');
+        }
+      });
+
       var APPD_WS_PORT = window.WEFT_APPD_WS_PORT || 7410;
       var ws = null;
       var wsReconnectDelay = 1000;
