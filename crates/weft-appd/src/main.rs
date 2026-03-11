@@ -161,6 +161,110 @@ mod tests {
     use super::*;
     use ipc::AppStateKind;
 
+    fn make_registry() -> Registry {
+        Arc::new(Mutex::new(SessionRegistry::default()))
+    }
+
+    #[tokio::test]
+    async fn dispatch_launch_returns_ack() {
+        let reg = make_registry();
+        let resp = dispatch(
+            Request::LaunchApp {
+                app_id: "com.test.app".into(),
+                surface_id: 0,
+            },
+            &reg,
+        )
+        .await;
+        match resp {
+            Response::LaunchAck { session_id } => assert!(session_id > 0),
+            _ => panic!("expected LaunchAck"),
+        }
+    }
+
+    #[tokio::test]
+    async fn dispatch_terminate_known_returns_stopped() {
+        let reg = make_registry();
+        let ack = dispatch(
+            Request::LaunchApp {
+                app_id: "app".into(),
+                surface_id: 0,
+            },
+            &reg,
+        )
+        .await;
+        let session_id = match ack {
+            Response::LaunchAck { session_id } => session_id,
+            _ => panic!("expected LaunchAck"),
+        };
+        let resp = dispatch(Request::TerminateApp { session_id }, &reg).await;
+        assert!(matches!(
+            resp,
+            Response::AppState {
+                state: AppStateKind::Stopped,
+                ..
+            }
+        ));
+    }
+
+    #[tokio::test]
+    async fn dispatch_terminate_unknown_returns_error() {
+        let reg = make_registry();
+        let resp = dispatch(Request::TerminateApp { session_id: 999 }, &reg).await;
+        assert!(matches!(resp, Response::Error { .. }));
+    }
+
+    #[tokio::test]
+    async fn dispatch_query_running_lists_active_sessions() {
+        let reg = make_registry();
+        dispatch(
+            Request::LaunchApp {
+                app_id: "a".into(),
+                surface_id: 0,
+            },
+            &reg,
+        )
+        .await;
+        dispatch(
+            Request::LaunchApp {
+                app_id: "b".into(),
+                surface_id: 0,
+            },
+            &reg,
+        )
+        .await;
+        let resp = dispatch(Request::QueryRunning, &reg).await;
+        match resp {
+            Response::RunningApps { session_ids } => assert_eq!(session_ids.len(), 2),
+            _ => panic!("expected RunningApps"),
+        }
+    }
+
+    #[tokio::test]
+    async fn dispatch_query_app_state_returns_starting() {
+        let reg = make_registry();
+        let ack = dispatch(
+            Request::LaunchApp {
+                app_id: "app".into(),
+                surface_id: 0,
+            },
+            &reg,
+        )
+        .await;
+        let session_id = match ack {
+            Response::LaunchAck { session_id } => session_id,
+            _ => panic!(),
+        };
+        let resp = dispatch(Request::QueryAppState { session_id }, &reg).await;
+        assert!(matches!(
+            resp,
+            Response::AppState {
+                state: AppStateKind::Starting,
+                ..
+            }
+        ));
+    }
+
     #[test]
     fn registry_launch_increments_id() {
         let mut reg = SessionRegistry::default();
