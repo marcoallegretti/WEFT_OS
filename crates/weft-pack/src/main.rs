@@ -51,12 +51,16 @@ fn main() -> anyhow::Result<()> {
             let app_id = args.get(2).context("usage: weft-pack uninstall <app_id>")?;
             uninstall_package(app_id)?;
         }
+        Some("list") => {
+            list_installed();
+        }
         _ => {
             eprintln!("usage:");
             eprintln!("  weft-pack check     <dir>     validate a package directory");
             eprintln!("  weft-pack info      <dir>     print package metadata");
             eprintln!("  weft-pack install   <dir>     install package to app store");
             eprintln!("  weft-pack uninstall <app_id>  remove installed package");
+            eprintln!("  weft-pack list                list installed packages");
             std::process::exit(1);
         }
     }
@@ -226,6 +230,55 @@ fn uninstall_package_from(app_id: &str, store_root: &Path) -> anyhow::Result<()>
     std::fs::remove_dir_all(&target).with_context(|| format!("remove {}", target.display()))?;
     println!("uninstalled {}", app_id);
     Ok(())
+}
+
+fn list_installed_roots() -> Vec<PathBuf> {
+    if let Ok(explicit) = std::env::var("WEFT_APP_STORE") {
+        return vec![PathBuf::from(explicit)];
+    }
+    let mut roots = Vec::new();
+    if let Ok(home) = std::env::var("HOME") {
+        roots.push(
+            PathBuf::from(home)
+                .join(".local")
+                .join("share")
+                .join("weft")
+                .join("apps"),
+        );
+    }
+    roots.push(PathBuf::from("/usr/share/weft/apps"));
+    roots
+}
+
+fn list_installed() {
+    let mut seen = std::collections::HashSet::new();
+    let mut count = 0usize;
+    for root in list_installed_roots() {
+        let Ok(entries) = std::fs::read_dir(&root) else {
+            continue;
+        };
+        let mut pkgs: Vec<(String, String, String)> = Vec::new();
+        for entry in entries.flatten() {
+            let manifest_path = entry.path().join("wapp.toml");
+            let Ok(contents) = std::fs::read_to_string(&manifest_path) else {
+                continue;
+            };
+            let Ok(m) = toml::from_str::<Manifest>(&contents) else {
+                continue;
+            };
+            if seen.insert(m.package.id.clone()) {
+                pkgs.push((m.package.id, m.package.name, m.package.version));
+            }
+        }
+        pkgs.sort_by(|a, b| a.0.cmp(&b.0));
+        for (id, name, version) in pkgs {
+            println!("{id}  {name}  {version}");
+            count += 1;
+        }
+    }
+    if count == 0 {
+        println!("no packages installed");
+    }
 }
 
 fn copy_dir(src: &Path, dst: &Path) -> anyhow::Result<()> {
