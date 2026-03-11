@@ -202,7 +202,8 @@
 
       function handleAppdMessage(msg) {
         if (msg.type === 'APP_READY') {
-          showNotification('App ready (session ' + msg.session_id + ')');
+          var label = msg.app_id ? msg.app_id.split('.').pop() : String(msg.session_id);
+          showNotification(label + ' is ready');
         } else if (msg.type === 'APP_STATE') {
           if (msg.state === 'stopped') {
             removeTaskbarEntry(msg.session_id);
