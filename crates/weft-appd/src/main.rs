@@ -302,6 +302,10 @@ pub(crate) async fn dispatch(req: Request, registry: &Registry) -> Response {
                     tracing::warn!(session_id, error = %e, "runtime supervisor error");
                 }
             });
+            let _ = registry.lock().await.broadcast().send(Response::LaunchAck {
+                session_id,
+                app_id: app_id.clone(),
+            });
             Response::LaunchAck { session_id, app_id }
         }
         Request::TerminateApp { session_id } => {
