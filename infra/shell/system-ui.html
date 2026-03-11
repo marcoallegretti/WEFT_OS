@@ -133,6 +133,39 @@
       flex-shrink: 0;
     }
 
+    weft-taskbar-app {
+      display: inline-flex;
+      align-items: center;
+      gap: 4px;
+      font-size: 12px;
+      color: var(--text-secondary);
+      padding: 0 4px 0 6px;
+      cursor: pointer;
+      border-radius: 6px;
+      transition: background 0.15s;
+    }
+
+    weft-taskbar-app:hover {
+      background: var(--surface-border);
+    }
+
+    weft-taskbar-app .task-close {
+      opacity: 0;
+      font-size: 11px;
+      line-height: 1;
+      padding: 1px 3px;
+      border-radius: 3px;
+      transition: opacity 0.1s, background 0.1s;
+    }
+
+    weft-taskbar-app:hover .task-close {
+      opacity: 1;
+    }
+
+    weft-taskbar-app .task-close:hover {
+      background: rgba(255,80,80,0.3);
+    }
+
     weft-notification-center {
       position: fixed;
       top: 8px;
@@ -307,9 +340,21 @@
         el.id = id;
         el.dataset.sessionId = sessionId;
         if (appId) { el.dataset.appId = appId; }
-        el.textContent = '● ' + label;
-        el.style.cssText = 'font-size:12px;color:var(--text-secondary);padding:0 6px;cursor:pointer;';
         el.title = appId ? appId + ' (session ' + sessionId + ')' : 'Session ' + sessionId;
+        var span = document.createElement('span');
+        span.textContent = '● ' + label;
+        var close = document.createElement('span');
+        close.className = 'task-close';
+        close.textContent = '×';
+        close.title = 'Terminate';
+        close.addEventListener('click', function (e) {
+          e.stopPropagation();
+          if (ws && ws.readyState === WebSocket.OPEN) {
+            ws.send(JSON.stringify({ type: 'TERMINATE_APP', session_id: sessionId }));
+          }
+        });
+        el.appendChild(span);
+        el.appendChild(close);
         var taskbar = document.querySelector('weft-taskbar');
         var clock = document.getElementById('clock');
         taskbar.insertBefore(el, clock);
