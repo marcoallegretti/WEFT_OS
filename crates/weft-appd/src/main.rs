@@ -17,6 +17,7 @@ struct SessionRegistry {
     next_id: u64,
     sessions: std::collections::HashMap<u64, AppStateKind>,
     broadcast: tokio::sync::broadcast::Sender<Response>,
+    abort_senders: std::collections::HashMap<u64, tokio::sync::oneshot::Sender<()>>,
 }
 
 impl Default for SessionRegistry {
@@ -26,6 +27,7 @@ impl Default for SessionRegistry {
             next_id: 0,
             sessions: std::collections::HashMap::new(),
             broadcast,
+            abort_senders: std::collections::HashMap::new(),
         }
     }
 }
@@ -39,7 +41,15 @@ impl SessionRegistry {
     }
 
     fn terminate(&mut self, session_id: u64) -> bool {
-        self.sessions.remove(&session_id).is_some()
+        let found = self.sessions.remove(&session_id).is_some();
+        self.abort_senders.remove(&session_id);
+        found
+    }
+
+    pub(crate) fn register_abort(&mut self, session_id: u64) -> tokio::sync::oneshot::Receiver<()> {
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        self.abort_senders.insert(session_id, tx);
+        rx
     }
 
     fn running_ids(&self) -> Vec<u64> {
@@ -180,10 +190,11 @@ pub(crate) async fn dispatch(req: Request, registry: &Registry) -> Response {
         } => {
             let session_id = registry.lock().await.launch(&app_id);
             tracing::info!(session_id, %app_id, "launched");
+            let abort_rx = registry.lock().await.register_abort(session_id);
             let reg = Arc::clone(registry);
             let aid = app_id.clone();
             tokio::spawn(async move {
-                if let Err(e) = runtime::supervise(session_id, &aid, reg).await {
+                if let Err(e) = runtime::supervise(session_id, &aid, reg, abort_rx).await {
                     tracing::warn!(session_id, error = %e, "runtime supervisor error");
                 }
             });
@@ -391,8 +402,9 @@ mod tests {
         let registry: Registry = Arc::new(Mutex::new(SessionRegistry::default()));
         let mut rx = registry.lock().await.subscribe();
         let session_id = registry.lock().await.launch("test.app");
+        let abort_rx = registry.lock().await.register_abort(session_id);
 
-        runtime::supervise(session_id, "test.app", Arc::clone(&registry))
+        runtime::supervise(session_id, "test.app", Arc::clone(&registry), abort_rx)
             .await
             .unwrap();
 

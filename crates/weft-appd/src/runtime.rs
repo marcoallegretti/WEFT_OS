@@ -12,6 +12,7 @@ pub(crate) async fn supervise(
     session_id: u64,
     app_id: &str,
     registry: Registry,
+    abort_rx: tokio::sync::oneshot::Receiver<()>,
 ) -> anyhow::Result<()> {
     let bin = match std::env::var("WEFT_RUNTIME_BIN") {
         Ok(b) => b,
@@ -64,8 +65,16 @@ pub(crate) async fn supervise(
 
     tokio::spawn(drain_stderr(stderr, session_id));
 
-    let status = child.wait().await?;
-    tracing::info!(session_id, %app_id, exit_status = ?status, "process exited");
+    tokio::select! {
+        status = child.wait() => {
+            tracing::info!(session_id, %app_id, exit_status = ?status, "process exited");
+        }
+        _ = abort_rx => {
+            tracing::info!(session_id, %app_id, "abort received; sending SIGTERM");
+            let _ = child.kill().await;
+        }
+    }
+
     registry
         .lock()
         .await
