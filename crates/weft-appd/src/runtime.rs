@@ -55,10 +55,12 @@ pub(crate) async fn supervise(
         Err(_elapsed) => {
             tracing::warn!(session_id, %app_id, "READY timeout after 30s; killing process");
             let _ = child.kill().await;
-            registry
-                .lock()
-                .await
-                .set_state(session_id, AppStateKind::Stopped);
+            let mut reg = registry.lock().await;
+            reg.set_state(session_id, AppStateKind::Stopped);
+            let _ = reg.broadcast().send(Response::AppState {
+                session_id,
+                state: AppStateKind::Stopped,
+            });
             return Ok(());
         }
     }
