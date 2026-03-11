@@ -11,6 +11,8 @@ path = "src/main.rs"
 [dependencies]
 anyhow = "1.0"
 sd-notify = "0.4"
-tokio = { version = "1", features = ["rt", "macros", "signal"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "io-util", "signal", "sync"] }
+serde = { version = "1", features = ["derive"] }
+rmp-serde = "1"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
