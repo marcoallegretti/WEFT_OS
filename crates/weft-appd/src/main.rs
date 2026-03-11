@@ -481,6 +481,7 @@ mod tests {
     #[tokio::test]
     async fn dispatch_launch_returns_ack() {
         let reg = make_registry();
+        let mut rx = reg.lock().await.subscribe();
         let resp = dispatch(
             Request::LaunchApp {
                 app_id: "com.test.app".into(),
@@ -499,6 +500,10 @@ mod tests {
             }
             _ => panic!("expected LaunchAck"),
         }
+        assert!(
+            matches!(rx.try_recv(), Ok(Response::LaunchAck { .. })),
+            "LaunchAck must also be broadcast"
+        );
     }
 
     #[tokio::test]
