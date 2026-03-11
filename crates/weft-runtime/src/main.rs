@@ -127,4 +127,56 @@ mod tests {
         assert_eq!(roots, vec![PathBuf::from("/custom/store")]);
         unsafe { std::env::remove_var("WEFT_APP_STORE") };
     }
+
+    #[test]
+    fn resolve_package_finds_installed_package() {
+        use std::fs;
+        let store =
+            std::env::temp_dir().join(format!("weft_runtime_resolve_{}", std::process::id()));
+        let pkg_dir = store.join("com.example.resolve");
+        fs::create_dir_all(&pkg_dir).unwrap();
+        fs::write(
+            pkg_dir.join("wapp.toml"),
+            "[package]\nid=\"com.example.resolve\"\n",
+        )
+        .unwrap();
+
+        let prior = std::env::var("WEFT_APP_STORE").ok();
+        unsafe { std::env::set_var("WEFT_APP_STORE", &store) };
+
+        let result = resolve_package("com.example.resolve");
+
+        unsafe {
+            match prior {
+                Some(v) => std::env::set_var("WEFT_APP_STORE", v),
+                None => std::env::remove_var("WEFT_APP_STORE"),
+            }
+        }
+        let _ = fs::remove_dir_all(&store);
+
+        assert!(result.is_ok());
+        assert!(result.unwrap().ends_with("com.example.resolve"));
+    }
+
+    #[test]
+    fn resolve_package_errors_on_unknown_id() {
+        let store =
+            std::env::temp_dir().join(format!("weft_runtime_resolve_empty_{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&store);
+
+        let prior = std::env::var("WEFT_APP_STORE").ok();
+        unsafe { std::env::set_var("WEFT_APP_STORE", &store) };
+
+        let result = resolve_package("com.does.not.exist");
+
+        unsafe {
+            match prior {
+                Some(v) => std::env::set_var("WEFT_APP_STORE", v),
+                None => std::env::remove_var("WEFT_APP_STORE"),
+            }
+        }
+        let _ = std::fs::remove_dir_all(&store);
+
+        assert!(result.is_err());
+    }
 }
