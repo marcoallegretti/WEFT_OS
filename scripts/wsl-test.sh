@@ -36,7 +36,7 @@ cargo test -p weft-runtime -- --test-threads=1 2>&1
 
 echo ""
 echo "==> cargo test -p weft-pack"
-cargo test -p weft-pack 2>&1
+cargo test -p weft-pack -- --test-threads=1 2>&1
 
 echo ""
 echo "ALL DONE"

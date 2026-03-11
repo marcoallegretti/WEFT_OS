@@ -477,4 +477,35 @@ entry = "ui/index.html"
         assert!(result.is_err());
         let _ = fs::remove_dir_all(&tmp);
     }
+
+    #[test]
+    fn list_installed_roots_uses_weft_app_store_when_set() {
+        let prior = std::env::var("WEFT_APP_STORE").ok();
+        unsafe { std::env::set_var("WEFT_APP_STORE", "/custom/store") };
+        let roots = list_installed_roots();
+        unsafe {
+            match prior {
+                Some(v) => std::env::set_var("WEFT_APP_STORE", v),
+                None => std::env::remove_var("WEFT_APP_STORE"),
+            }
+        }
+        assert_eq!(roots, vec![PathBuf::from("/custom/store")]);
+    }
+
+    #[test]
+    fn list_installed_roots_includes_system_path() {
+        let prior = std::env::var("WEFT_APP_STORE").ok();
+        unsafe { std::env::remove_var("WEFT_APP_STORE") };
+        let roots = list_installed_roots();
+        unsafe {
+            if let Some(v) = prior {
+                std::env::set_var("WEFT_APP_STORE", v);
+            }
+        }
+        assert!(
+            roots
+                .iter()
+                .any(|p| p == &PathBuf::from("/usr/share/weft/apps"))
+        );
+    }
 }
