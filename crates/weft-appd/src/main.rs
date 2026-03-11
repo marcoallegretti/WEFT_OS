@@ -66,6 +66,7 @@ impl SessionRegistry {
     fn running_sessions(&self) -> Vec<SessionInfo> {
         self.sessions
             .iter()
+            .filter(|(_, e)| !matches!(e.state, AppStateKind::Stopped))
             .map(|(&session_id, e)| SessionInfo {
                 session_id,
                 app_id: e.app_id.clone(),
@@ -460,6 +461,17 @@ mod tests {
         let reg = make_registry();
         let resp = dispatch(Request::TerminateApp { session_id: 999 }, &reg).await;
         assert!(matches!(resp, Response::Error { .. }));
+    }
+
+    #[tokio::test]
+    async fn running_sessions_excludes_stopped() {
+        let reg = make_registry();
+        let session_id = reg.lock().await.launch("com.test.app");
+        reg.lock()
+            .await
+            .set_state(session_id, AppStateKind::Stopped);
+        let sessions = reg.lock().await.running_sessions();
+        assert!(sessions.is_empty());
     }
 
     #[tokio::test]
