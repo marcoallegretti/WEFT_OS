@@ -132,9 +132,18 @@ async fn run() -> anyhow::Result<()> {
 
     let _ = sd_notify::notify(false, &[sd_notify::NotifyState::Ready]);
 
-    let mut shutdown = std::pin::pin!(tokio::signal::ctrl_c());
+    #[cfg(unix)]
+    let mut sigterm = {
+        use tokio::signal::unix::{SignalKind, signal};
+        signal(SignalKind::terminate()).context("SIGTERM handler")?
+    };
 
     loop {
+        #[cfg(unix)]
+        let term = sigterm.recv();
+        #[cfg(not(unix))]
+        let term = std::future::pending::<Option<()>>();
+
         tokio::select! {
             result = listener.accept() => {
                 let (stream, _) = result.context("accept")?;
@@ -155,8 +164,12 @@ async fn run() -> anyhow::Result<()> {
                     }
                 });
             }
-            _ = &mut shutdown => {
-                tracing::info!("shutting down");
+            _ = tokio::signal::ctrl_c() => {
+                tracing::info!("SIGINT received; shutting down");
+                break;
+            }
+            _ = term => {
+                tracing::info!("SIGTERM received; shutting down");
                 break;
             }
         }
