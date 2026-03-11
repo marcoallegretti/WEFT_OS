@@ -3,6 +3,8 @@ use std::path::PathBuf;
 use anyhow::Context;
 
 #[cfg(feature = "servo-embed")]
+mod appd_ws;
+#[cfg(feature = "servo-embed")]
 mod embedder;
 #[cfg(feature = "servo-embed")]
 mod keyutils;

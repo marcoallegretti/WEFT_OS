@@ -4072,8 +4072,10 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "bitflags 2.11.0",
+ "serde_json",
  "tracing",
  "tracing-subscriber",
+ "tungstenite",
  "wayland-backend",
  "wayland-client",
  "wayland-scanner",

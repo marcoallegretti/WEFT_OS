@@ -1,7 +1,9 @@
 #![cfg(feature = "servo-embed")]
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
+use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
 
 use servo::{
@@ -72,6 +74,10 @@ struct App {
     window: Option<Arc<Window>>,
     servo: Option<servo::Servo>,
     webview: Option<servo::WebView>,
+    rendering_context: Option<Rc<servo::SoftwareRenderingContext>>,
+    app_webviews: HashMap<u64, servo::WebView>,
+    active_session: Option<u64>,
+    app_rx: mpsc::Receiver<crate::appd_ws::AppdCmd>,
     redraw_requested: Arc<std::sync::atomic::AtomicBool>,
     waker: WeftEventLoopWaker,
     shutting_down: bool,
@@ -80,19 +86,62 @@ struct App {
 }
 
 impl App {
-    fn new(url: ServoUrl, waker: WeftEventLoopWaker, ws_port: u16) -> Self {
+    fn new(
+        url: ServoUrl,
+        waker: WeftEventLoopWaker,
+        ws_port: u16,
+        app_rx: mpsc::Receiver<crate::appd_ws::AppdCmd>,
+    ) -> Self {
         Self {
             url,
             ws_port,
             window: None,
             servo: None,
             webview: None,
+            rendering_context: None,
+            app_webviews: HashMap::new(),
+            active_session: None,
+            app_rx,
             redraw_requested: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             waker,
             shutting_down: false,
             modifiers: ModifiersState::default(),
             cursor_pos: servo::euclid::default::Point2D::zero(),
         }
+    }
+
+    fn active_webview(&self) -> Option<&servo::WebView> {
+        self.active_session
+            .and_then(|sid| self.app_webviews.get(&sid))
+            .or(self.webview.as_ref())
+    }
+
+    fn create_app_webview(&mut self, session_id: u64, app_id: &str) {
+        let (Some(servo), Some(rc)) = (&self.servo, &self.rendering_context) else {
+            return;
+        };
+        let url_str = format!("weft-app://{app_id}/index.html");
+        let raw = match ServoUrl::parse(&url_str) {
+            Ok(u) => u,
+            Err(_) => return,
+        };
+        let url = resolve_weft_app_url(&raw).unwrap_or(raw);
+        let ucm = Rc::new(UserContentManager::new(servo));
+        let bridge_js = format!(
+            r#"(function(){{var ws=new WebSocket('ws://127.0.0.1:{p}');var sid={sid};var q=[];var r=false;ws.onopen=function(){{r=true;q.forEach(function(m){{ws.send(JSON.stringify(m))}});q.length=0}};window.weftSessionId=sid;window.weftIpc={{send:function(m){{if(r)ws.send(JSON.stringify(m));else q.push(m)}},onmessage:null}};ws.onmessage=function(e){{if(window.weftIpc.onmessage)window.weftIpc.onmessage(JSON.parse(e.data))}}}})()"#,
+            p = self.ws_port,
+            sid = session_id,
+        );
+        ucm.add_script(Rc::new(UserScript::new(bridge_js, None)));
+        let wv = WebViewBuilder::new(servo, Rc::clone(rc))
+            .delegate(Rc::new(WeftWebViewDelegate {
+                redraw_requested: Arc::clone(&self.redraw_requested),
+            }))
+            .user_content_manager(ucm)
+            .url(url)
+            .build();
+        self.app_webviews.insert(session_id, wv);
+        self.active_session = Some(session_id);
     }
 
     fn blit_to_window(window: &Arc<Window>, rendering_context: &servo::SoftwareRenderingContext) {
@@ -163,6 +212,7 @@ impl ApplicationHandler<ServoWake> for App {
 
         self.servo = Some(servo);
         self.webview = Some(webview);
+        self.rendering_context = Some(rendering_context);
     }
 
     fn user_event(&mut self, _event_loop: &ActiveEventLoop, _event: ServoWake) {
@@ -175,6 +225,19 @@ impl ApplicationHandler<ServoWake> for App {
         if self.shutting_down {
             event_loop.exit();
             return;
+        }
+        while let Ok(cmd) = self.app_rx.try_recv() {
+            match cmd {
+                crate::appd_ws::AppdCmd::Launch { session_id, app_id } => {
+                    self.create_app_webview(session_id, &app_id);
+                }
+                crate::appd_ws::AppdCmd::Stop { session_id } => {
+                    self.app_webviews.remove(&session_id);
+                    if self.active_session == Some(session_id) {
+                        self.active_session = None;
+                    }
+                }
+            }
         }
         if let Some(servo) = &self.servo {
             servo.spin_event_loop();
@@ -198,7 +261,7 @@ impl ApplicationHandler<ServoWake> for App {
         match event {
             WindowEvent::RedrawRequested => {
                 if let (Some(window), Some(servo)) = (&self.window, &self.servo) {
-                    if let Some(wv) = &self.webview {
+                    if let Some(wv) = self.active_webview() {
                         let rc = wv.rendering_context();
                         Self::blit_to_window(window, rc);
                     }
@@ -206,15 +269,19 @@ impl ApplicationHandler<ServoWake> for App {
                 }
             }
             WindowEvent::Resized(new_size) => {
+                let sz = servo::euclid::Size2D::new(new_size.width, new_size.height);
                 if let Some(wv) = &self.webview {
-                    wv.resize(servo::euclid::Size2D::new(new_size.width, new_size.height));
+                    wv.resize(sz);
+                }
+                for wv in self.app_webviews.values() {
+                    wv.resize(sz);
                 }
             }
             WindowEvent::ModifiersChanged(mods) => {
                 self.modifiers = mods.state();
             }
             WindowEvent::KeyboardInput { event, .. } => {
-                if let Some(wv) = &self.webview {
+                if let Some(wv) = self.active_webview() {
                     let ev = super::keyutils::keyboard_event_from_winit(&event, self.modifiers);
                     let _ = wv.notify_input_event(InputEvent::Keyboard(ev));
                 }
@@ -222,7 +289,7 @@ impl ApplicationHandler<ServoWake> for App {
             WindowEvent::CursorMoved { position, .. } => {
                 let pt = servo::euclid::default::Point2D::new(position.x as f32, position.y as f32);
                 self.cursor_pos = pt;
-                if let Some(wv) = &self.webview {
+                if let Some(wv) = self.active_webview() {
                     let _ = wv.notify_input_event(InputEvent::MouseMove(MouseMoveEvent::new(pt)));
                 }
             }
@@ -237,7 +304,7 @@ impl ApplicationHandler<ServoWake> for App {
                     ElementState::Pressed => MouseButtonAction::Click,
                     ElementState::Released => MouseButtonAction::Up,
                 };
-                if let Some(wv) = &self.webview {
+                if let Some(wv) = self.active_webview() {
                     let _ = wv.notify_input_event(InputEvent::MouseButton(MouseButtonEvent::new(
                         action,
                         btn,
@@ -305,7 +372,11 @@ pub fn run(html_path: &Path, ws_port: u16) -> anyhow::Result<()> {
         proxy: Arc::new(Mutex::new(event_loop.create_proxy())),
     };
 
-    let mut app = App::new(url, waker, ws_port);
+    let (app_tx, app_rx) = mpsc::sync_channel::<crate::appd_ws::AppdCmd>(64);
+    let waker_for_thread = waker.clone();
+    crate::appd_ws::spawn_appd_listener(ws_port, app_tx, Box::new(move || waker_for_thread.wake()));
+
+    let mut app = App::new(url, waker, ws_port, app_rx);
     event_loop
         .run_app(&mut app)
         .map_err(|e| anyhow::anyhow!("event loop run: {e}"))
