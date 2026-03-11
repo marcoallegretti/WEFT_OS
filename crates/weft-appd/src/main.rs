@@ -570,6 +570,12 @@ mod tests {
             Ok(Response::AppReady { session_id: sid, .. }) if sid == session_id
         ));
 
+        let stopped = rx.try_recv();
+        assert!(matches!(
+            stopped,
+            Ok(Response::AppState { session_id: sid, state: AppStateKind::Stopped }) if sid == session_id
+        ));
+
         let _ = std::fs::remove_file(&script);
         // SAFETY: single-threaded test; restoring env to prior state.
         unsafe {
