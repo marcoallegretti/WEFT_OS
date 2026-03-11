@@ -543,6 +543,30 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn session_stops_when_runtime_bin_absent() {
+        unsafe { std::env::remove_var("WEFT_RUNTIME_BIN") };
+        let reg = make_registry();
+        let ack = dispatch(
+            Request::LaunchApp {
+                app_id: "com.test.nobinary".into(),
+                surface_id: 0,
+            },
+            &reg,
+        )
+        .await;
+        let session_id = match ack {
+            Response::LaunchAck { session_id, .. } => session_id,
+            _ => panic!("expected LaunchAck"),
+        };
+        tokio::task::yield_now().await;
+        let state = reg.lock().await.state(session_id);
+        assert!(
+            matches!(state, AppStateKind::Stopped),
+            "session should be Stopped when WEFT_RUNTIME_BIN is absent"
+        );
+    }
+
+    #[tokio::test]
     async fn running_sessions_excludes_stopped() {
         let reg = make_registry();
         let session_id = reg.lock().await.launch("com.test.app");
