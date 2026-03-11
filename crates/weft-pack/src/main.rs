@@ -47,11 +47,16 @@ fn main() -> anyhow::Result<()> {
             let dir = args.get(2).context("usage: weft-pack install <dir>")?;
             install_package(Path::new(dir))?;
         }
+        Some("uninstall") => {
+            let app_id = args.get(2).context("usage: weft-pack uninstall <app_id>")?;
+            uninstall_package(app_id)?;
+        }
         _ => {
             eprintln!("usage:");
-            eprintln!("  weft-pack check   <dir>   validate a package directory");
-            eprintln!("  weft-pack info    <dir>   print package metadata");
-            eprintln!("  weft-pack install <dir>   install package to app store");
+            eprintln!("  weft-pack check     <dir>     validate a package directory");
+            eprintln!("  weft-pack info      <dir>     print package metadata");
+            eprintln!("  weft-pack install   <dir>     install package to app store");
+            eprintln!("  weft-pack uninstall <app_id>  remove installed package");
             std::process::exit(1);
         }
     }
@@ -160,13 +165,15 @@ fn resolve_install_root() -> anyhow::Result<PathBuf> {
 }
 
 fn install_package(dir: &Path) -> anyhow::Result<()> {
+    let root = resolve_install_root()?;
+    install_package_to(dir, &root)
+}
+
+fn install_package_to(dir: &Path, store_root: &Path) -> anyhow::Result<()> {
     check_package(dir)?;
     let manifest = load_manifest(dir)?;
     let app_id = &manifest.package.id;
-
-    let store_root = resolve_install_root()?;
     let dest = store_root.join(app_id);
-
     if dest.exists() {
         anyhow::bail!(
             "package '{}' is already installed at {}; remove it first",
@@ -174,11 +181,31 @@ fn install_package(dir: &Path) -> anyhow::Result<()> {
             dest.display()
         );
     }
-
     copy_dir(dir, &dest)
         .with_context(|| format!("copy {} -> {}", dir.display(), dest.display()))?;
-
     println!("installed {} -> {}", app_id, dest.display());
+    Ok(())
+}
+
+fn uninstall_package(app_id: &str) -> anyhow::Result<()> {
+    let root = resolve_install_root()?;
+    uninstall_package_from(app_id, &root)
+}
+
+fn uninstall_package_from(app_id: &str, store_root: &Path) -> anyhow::Result<()> {
+    if !is_valid_app_id(app_id) {
+        anyhow::bail!("'{}' is not a valid app ID", app_id);
+    }
+    let target = store_root.join(app_id);
+    if !target.exists() {
+        anyhow::bail!(
+            "package '{}' is not installed at {}",
+            app_id,
+            target.display()
+        );
+    }
+    std::fs::remove_dir_all(&target).with_context(|| format!("remove {}", target.display()))?;
+    println!("uninstalled {}", app_id);
     Ok(())
 }
 
@@ -258,6 +285,64 @@ entry = "ui/index.html"
         assert_eq!(result.unwrap(), "OK");
 
         let _ = fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn install_package_copies_to_store() {
+        use std::fs;
+        let id = format!("weft.pack.install{}", std::process::id());
+        let src = std::env::temp_dir().join(format!("weft_pack_install_src_{}", id));
+        let store = std::env::temp_dir().join(format!("weft_pack_install_store_{}", id));
+        let ui_dir = src.join("ui");
+        let _ = fs::create_dir_all(&ui_dir);
+        fs::write(src.join("app.wasm"), b"\0asm").unwrap();
+        fs::write(ui_dir.join("index.html"), b"<!DOCTYPE html>").unwrap();
+        let app_id = format!("com.example.t{}", std::process::id());
+        fs::write(
+            src.join("wapp.toml"),
+            format!(
+                "[package]\nid = \"{app_id}\"\nname = \"Test\"\nversion = \"1.0.0\"\n\n\
+                 [runtime]\nmodule = \"app.wasm\"\n\n[ui]\nentry = \"ui/index.html\"\n"
+            ),
+        )
+        .unwrap();
+        let result = install_package_to(&src, &store);
+        assert!(result.is_ok(), "{result:?}");
+        assert!(store.join(&app_id).join("app.wasm").exists());
+        assert!(store.join(&app_id).join("wapp.toml").exists());
+        assert!(store.join(&app_id).join("ui").join("index.html").exists());
+        assert!(install_package_to(&src, &store).is_err());
+        let _ = fs::remove_dir_all(&src);
+        let _ = fs::remove_dir_all(&store);
+    }
+
+    #[test]
+    fn uninstall_package_removes_directory() {
+        use std::fs;
+        let id = format!("weft.pack.uninstall{}", std::process::id());
+        let src = std::env::temp_dir().join(format!("weft_pack_uninstall_src_{}", id));
+        let store = std::env::temp_dir().join(format!("weft_pack_uninstall_store_{}", id));
+        let ui_dir = src.join("ui");
+        let _ = fs::create_dir_all(&ui_dir);
+        fs::write(src.join("app.wasm"), b"\0asm").unwrap();
+        fs::write(ui_dir.join("index.html"), b"").unwrap();
+        let app_id = format!("com.example.u{}", std::process::id());
+        fs::write(
+            src.join("wapp.toml"),
+            format!(
+                "[package]\nid = \"{app_id}\"\nname = \"U\"\nversion = \"1.0.0\"\n\n\
+                 [runtime]\nmodule = \"app.wasm\"\n\n[ui]\nentry = \"ui/index.html\"\n"
+            ),
+        )
+        .unwrap();
+        install_package_to(&src, &store).unwrap();
+        assert!(store.join(&app_id).exists());
+        let result = uninstall_package_from(&app_id, &store);
+        assert!(result.is_ok(), "{result:?}");
+        assert!(!store.join(&app_id).exists());
+        assert!(uninstall_package_from(&app_id, &store).is_err());
+        let _ = fs::remove_dir_all(&src);
+        let _ = fs::remove_dir_all(&store);
     }
 
     #[test]
