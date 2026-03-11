@@ -87,6 +87,32 @@ fn resolve_preopens(app_id: &str) -> Vec<(String, String)> {
     preopens
 }
 
+fn portal_socket_path(session_id: u64) -> Option<PathBuf> {
+    let runtime_dir = std::env::var("XDG_RUNTIME_DIR").ok()?;
+    let dir = PathBuf::from(runtime_dir).join("weft");
+    std::fs::create_dir_all(&dir).ok()?;
+    Some(dir.join(format!("portal-{session_id}.sock")))
+}
+
+fn spawn_file_portal(
+    session_id: u64,
+    allowed_paths: &[(String, String)],
+) -> Option<(PathBuf, tokio::process::Child)> {
+    let bin = std::env::var("WEFT_FILE_PORTAL_BIN").ok()?;
+    let socket = portal_socket_path(session_id)?;
+    let mut cmd = tokio::process::Command::new(&bin);
+    cmd.arg(&socket)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null());
+    for (host, _) in allowed_paths {
+        cmd.arg("--allow").arg(host);
+    }
+    let child = cmd.spawn().ok()?;
+    tracing::info!(session_id, socket = %socket.display(), "file portal spawned");
+    Some((socket, child))
+}
+
 pub(crate) async fn supervise(
     session_id: u64,
     app_id: &str,
@@ -106,6 +132,9 @@ pub(crate) async fn supervise(
 
     let (mount_orch, store_override) =
         crate::mount::MountOrchestrator::mount_if_needed(app_id, session_id);
+
+    let preopens = resolve_preopens(app_id);
+    let portal = spawn_file_portal(session_id, &preopens);
 
     let mut cmd = if systemd_cgroup_available() {
         let mut c = tokio::process::Command::new("systemd-run");
@@ -140,7 +169,11 @@ pub(crate) async fn supervise(
         cmd.env("WEFT_APP_STORE", root);
     }
 
-    for (host, guest) in resolve_preopens(app_id) {
+    if let Some((ref sock, _)) = portal {
+        cmd.env("WEFT_FILE_PORTAL_SOCKET", sock);
+    }
+
+    for (host, guest) in &preopens {
         cmd.arg("--preopen").arg(format!("{host}::{guest}"));
     }
 
@@ -236,6 +269,12 @@ pub(crate) async fn supervise(
     }
 
     mount_orch.umount();
+
+    if let Some((ref sock, mut portal_child)) = portal {
+        let _ = portal_child.kill().await;
+        let _ = portal_child.wait().await;
+        let _ = std::fs::remove_file(sock);
+    }
 
     {
         let mut reg = registry.lock().await;
