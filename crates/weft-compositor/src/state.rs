@@ -454,6 +454,7 @@ impl Dispatch<ZweftShellManagerV1, ()> for WeftCompositorState {
                 app_id,
                 title,
                 role,
+                surface,
                 x,
                 y,
                 width,
@@ -465,6 +466,7 @@ impl Dispatch<ZweftShellManagerV1, ()> for WeftCompositorState {
                         app_id,
                         title,
                         role,
+                        surface,
                         closed: std::sync::atomic::AtomicBool::new(false),
                     },
                 );

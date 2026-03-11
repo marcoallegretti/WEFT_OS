@@ -68,19 +68,21 @@
       </description>
       <arg name="id"     type="new_id" interface="zweft_shell_window_v1"
            summary="new window object"/>
-      <arg name="app_id" type="string"
+      <arg name="app_id"  type="string"
            summary="application identifier, reverse-DNS format"/>
-      <arg name="title"  type="string"
+      <arg name="title"   type="string"
            summary="initial window title"/>
-      <arg name="role"   type="string"
+      <arg name="role"    type="string"
            summary="window role hint (normal, dialog, panel, overlay)"/>
-      <arg name="x"      type="int"
+      <arg name="surface" type="object" interface="wl_surface" allow-null="true"
+           summary="wl_surface backing this window slot; null for shell-owned windows"/>
+      <arg name="x"       type="int"
            summary="requested x position in compositor logical coordinates"/>
-      <arg name="y"      type="int"
+      <arg name="y"       type="int"
            summary="requested y position in compositor logical coordinates"/>
-      <arg name="width"  type="int"
+      <arg name="width"   type="int"
            summary="requested width in compositor logical coordinates"/>
-      <arg name="height" type="int"
+      <arg name="height"  type="int"
            summary="requested height in compositor logical coordinates"/>
     </request>
 

@@ -28,6 +28,7 @@ pub struct WeftShellWindowData {
     pub app_id: String,
     pub title: String,
     pub role: String,
+    pub surface: Option<wayland_server::protocol::wl_surface::WlSurface>,
     pub closed: std::sync::atomic::AtomicBool,
 }
 
@@ -55,6 +56,7 @@ mod tests {
             app_id: "com.example.test".into(),
             title: "Test Window".into(),
             role: "normal".into(),
+            surface: None,
             closed: std::sync::atomic::AtomicBool::new(false),
         };
         assert_eq!(d.app_id, "com.example.test");
@@ -69,6 +71,7 @@ mod tests {
             app_id: String::new(),
             title: String::new(),
             role: String::new(),
+            surface: None,
             closed: std::sync::atomic::AtomicBool::new(false),
         };
         assert!(!d.closed.load(Ordering::Relaxed));
