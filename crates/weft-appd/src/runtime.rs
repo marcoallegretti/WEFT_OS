@@ -75,10 +75,14 @@ pub(crate) async fn supervise(
         }
     }
 
-    registry
-        .lock()
-        .await
-        .set_state(session_id, AppStateKind::Stopped);
+    {
+        let mut reg = registry.lock().await;
+        reg.set_state(session_id, AppStateKind::Stopped);
+        let _ = reg.broadcast().send(Response::AppState {
+            session_id,
+            state: AppStateKind::Stopped,
+        });
+    }
 
     Ok(())
 }
