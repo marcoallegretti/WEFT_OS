@@ -497,6 +497,13 @@ mod tests {
         assert!(matches!(reg.state(42), AppStateKind::NotFound));
     }
 
+    #[tokio::test]
+    async fn dispatch_query_installed_returns_installed_apps() {
+        let reg = make_registry();
+        let resp = dispatch(Request::QueryInstalledApps, &reg).await;
+        assert!(matches!(resp, Response::InstalledApps { .. }));
+    }
+
     #[test]
     fn scan_installed_apps_finds_valid_packages() {
         use std::fs;

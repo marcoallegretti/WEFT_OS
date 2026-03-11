@@ -32,7 +32,7 @@ cargo test -p weft-appd 2>&1
 
 echo ""
 echo "==> cargo test -p weft-runtime"
-cargo test -p weft-runtime 2>&1
+cargo test -p weft-runtime -- --test-threads=1 2>&1
 
 echo ""
 echo "==> cargo test -p weft-pack"
