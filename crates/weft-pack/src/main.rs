@@ -17,6 +17,7 @@ struct PackageMeta {
     version: String,
     description: Option<String>,
     author: Option<String>,
+    capabilities: Option<Vec<String>>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -141,6 +142,11 @@ fn print_info(m: &Manifest) {
     }
     println!("module:  {}", m.runtime.module);
     println!("ui:      {}", m.ui.entry);
+    if let Some(ref caps) = m.package.capabilities {
+        for cap in caps {
+            println!("cap:     {cap}");
+        }
+    }
 }
 
 fn is_valid_app_id(id: &str) -> bool {

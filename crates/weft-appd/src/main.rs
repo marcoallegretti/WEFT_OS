@@ -286,7 +286,7 @@ pub(crate) async fn dispatch(req: Request, registry: &Registry) -> Response {
     }
 }
 
-fn app_store_roots() -> Vec<std::path::PathBuf> {
+pub(crate) fn app_store_roots() -> Vec<std::path::PathBuf> {
     if let Ok(explicit) = std::env::var("WEFT_APP_STORE") {
         return vec![std::path::PathBuf::from(explicit)];
     }

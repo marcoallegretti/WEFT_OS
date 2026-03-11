@@ -1,3 +1,4 @@
+use std::path::PathBuf;
 use std::time::Duration;
 
 use tokio::io::{AsyncBufReadExt, BufReader};
@@ -8,6 +9,71 @@ use crate::compositor_client::CompositorSender;
 use crate::ipc::{AppStateKind, Response};
 
 const READY_TIMEOUT: Duration = Duration::from_secs(30);
+
+fn resolve_preopens(app_id: &str) -> Vec<(String, String)> {
+    #[derive(serde::Deserialize)]
+    struct Pkg {
+        capabilities: Option<Vec<String>>,
+    }
+    #[derive(serde::Deserialize)]
+    struct M {
+        package: Pkg,
+    }
+
+    let pkg_dir = crate::app_store_roots().into_iter().find_map(|root| {
+        let dir = root.join(app_id);
+        if dir.join("wapp.toml").exists() {
+            Some(dir)
+        } else {
+            None
+        }
+    });
+
+    let caps = match pkg_dir {
+        None => return Vec::new(),
+        Some(dir) => {
+            let Ok(text) = std::fs::read_to_string(dir.join("wapp.toml")) else {
+                return Vec::new();
+            };
+            match toml::from_str::<M>(&text) {
+                Ok(m) => m.package.capabilities.unwrap_or_default(),
+                Err(_) => return Vec::new(),
+            }
+        }
+    };
+
+    let home = match std::env::var("HOME") {
+        Ok(h) => PathBuf::from(h),
+        Err(_) => return Vec::new(),
+    };
+
+    let mut preopens = Vec::new();
+    for cap in &caps {
+        match cap.as_str() {
+            "fs:rw:app-data" | "fs:read:app-data" => {
+                let data_dir = home
+                    .join(".local/share/weft/apps")
+                    .join(app_id)
+                    .join("data");
+                let _ = std::fs::create_dir_all(&data_dir);
+                preopens.push((data_dir.to_string_lossy().into_owned(), "/data".to_string()));
+            }
+            "fs:rw:xdg-documents" | "fs:read:xdg-documents" => {
+                let docs = home.join("Documents");
+                if docs.exists() {
+                    preopens.push((
+                        docs.to_string_lossy().into_owned(),
+                        "/xdg/documents".to_string(),
+                    ));
+                }
+            }
+            other => {
+                tracing::debug!(capability = other, "not mapped to preopen; skipped");
+            }
+        }
+    }
+    preopens
+}
 
 pub(crate) async fn supervise(
     session_id: u64,
@@ -35,6 +101,10 @@ pub(crate) async fn supervise(
 
     if let Some(ref sock) = ipc_socket_path {
         cmd.arg("--ipc-socket").arg(sock);
+    }
+
+    for (host, guest) in resolve_preopens(app_id) {
+        cmd.arg("--preopen").arg(format!("{host}::{guest}"));
     }
 
     let mut child = match cmd.spawn() {
