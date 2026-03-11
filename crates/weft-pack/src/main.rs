@@ -55,6 +55,22 @@ fn main() -> anyhow::Result<()> {
         Some("list") => {
             list_installed();
         }
+        Some("build-image") => {
+            let dir = args.get(2).context("usage: weft-pack build-image <dir>")?;
+            let out = args
+                .windows(2)
+                .find(|w| w[0] == "--out")
+                .map(|w| w[1].as_str());
+            build_image(Path::new(dir), out.map(Path::new))?;
+        }
+        Some("build-verity") => {
+            let img = args.get(2).context("usage: weft-pack build-verity <img>")?;
+            let out = args
+                .windows(2)
+                .find(|w| w[0] == "--out")
+                .map(|w| w[1].as_str());
+            build_verity(Path::new(img), out.map(Path::new))?;
+        }
         Some("bundle") => {
             let dir = args.get(2).context("usage: weft-pack bundle <dir>")?;
             let out = args
@@ -111,6 +127,8 @@ fn main() -> anyhow::Result<()> {
             eprintln!("  weft-pack install      <dir>             install package to app store");
             eprintln!("  weft-pack uninstall    <app_id>          remove installed package");
             eprintln!("  weft-pack list                           list installed packages");
+            eprintln!("  weft-pack build-image   <dir> [--out <img>] create EROFS image with mkfs.erofs");
+            eprintln!("  weft-pack build-verity   <img> [--out <hash>] add dm-verity hash tree");
             eprintln!("  weft-pack bundle        <dir> [--out <dir>] create .app.tar.zst archive");
             eprintln!("  weft-pack unbundle      <archive> [--out <dir>] extract .app.tar.zst");
             eprintln!("  weft-pack generate-key [<outdir>]        generate Ed25519 keypair");
@@ -354,6 +372,61 @@ fn copy_dir(src: &Path, dst: &Path) -> anyhow::Result<()> {
                 .with_context(|| format!("copy {}", src_path.display()))?;
         }
     }
+    Ok(())
+}
+
+fn build_image(dir: &Path, out_path: Option<&Path>) -> anyhow::Result<()> {
+    let manifest = load_manifest(dir)?;
+    let app_id = &manifest.package.id;
+    let default_name = format!("{app_id}.app.img");
+    let output = match out_path {
+        Some(p) => p.to_path_buf(),
+        None => PathBuf::from(&default_name),
+    };
+    if output.exists() {
+        anyhow::bail!("{} already exists", output.display());
+    }
+    let status = std::process::Command::new("mkfs.erofs")
+        .arg(&output)
+        .arg(dir)
+        .status()
+        .context("spawn mkfs.erofs; ensure erofs-utils is installed")?;
+    if !status.success() {
+        anyhow::bail!("mkfs.erofs failed with status {status}");
+    }
+    println!("image: {}", output.display());
+    Ok(())
+}
+
+fn build_verity(img: &Path, hash_out: Option<&Path>) -> anyhow::Result<()> {
+    let stem = img.file_stem().context("no file stem")?.to_string_lossy();
+    let default_hash = img.with_file_name(format!("{stem}.hash"));
+    let hash_path = hash_out.map(|p| p.to_path_buf()).unwrap_or(default_hash);
+    if hash_path.exists() {
+        anyhow::bail!("{} already exists", hash_path.display());
+    }
+    let output = std::process::Command::new("veritysetup")
+        .args(["format", &img.to_string_lossy(), &hash_path.to_string_lossy()])
+        .output()
+        .context("spawn veritysetup; ensure cryptsetup-bin is installed")?;
+    if !output.status.success() {
+        anyhow::bail!(
+            "veritysetup failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let root_hash = stdout
+        .lines()
+        .find(|l| l.starts_with("Root hash:"))
+        .context("root hash not found in veritysetup output")?;
+    let hash_value = root_hash.trim_start_matches("Root hash:").trim();
+    let roothash_path = img.with_extension("roothash");
+    std::fs::write(&roothash_path, hash_value)
+        .with_context(|| format!("write {}", roothash_path.display()))?;
+    println!("hash image:  {}", hash_path.display());
+    println!("root hash:   {hash_value}");
+    println!("roothash:    {}", roothash_path.display());
     Ok(())
 }
 
