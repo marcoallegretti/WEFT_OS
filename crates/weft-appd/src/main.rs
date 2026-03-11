@@ -80,6 +80,14 @@ impl SessionRegistry {
             .collect()
     }
 
+    fn running_app_ids(&self) -> Vec<String> {
+        self.sessions
+            .values()
+            .filter(|e| !matches!(e.state, AppStateKind::Stopped))
+            .map(|e| e.app_id.clone())
+            .collect()
+    }
+
     fn state(&self, session_id: u64) -> AppStateKind {
         self.sessions
             .get(&session_id)
@@ -151,6 +159,20 @@ async fn run() -> anyhow::Result<()> {
 
     let _ = sd_notify::notify(false, &[sd_notify::NotifyState::Ready]);
 
+    if let Some(app_ids) = load_session() {
+        tracing::info!(count = app_ids.len(), "restoring previous session");
+        for app_id in app_ids {
+            let _ = dispatch(
+                crate::ipc::Request::LaunchApp {
+                    app_id,
+                    surface_id: 0,
+                },
+                &registry,
+            )
+            .await;
+        }
+    }
+
     #[cfg(unix)]
     let mut sigterm = {
         use tokio::signal::unix::{SignalKind, signal};
@@ -194,10 +216,32 @@ async fn run() -> anyhow::Result<()> {
         }
     }
 
+    save_session(registry.lock().await.running_app_ids()).await;
     registry.lock().await.shutdown_all();
     tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;
     let _ = std::fs::remove_file(&socket_path);
     Ok(())
+}
+
+fn session_file_path() -> Option<std::path::PathBuf> {
+    let runtime_dir = std::env::var("XDG_RUNTIME_DIR").ok()?;
+    Some(PathBuf::from(runtime_dir).join("weft/last-session.json"))
+}
+
+async fn save_session(app_ids: Vec<String>) {
+    let Some(path) = session_file_path() else {
+        return;
+    };
+    if let Ok(json) = serde_json::to_string(&app_ids) {
+        let _ = std::fs::write(&path, json);
+    }
+}
+
+fn load_session() -> Option<Vec<String>> {
+    let path = session_file_path()?;
+    let json = std::fs::read_to_string(&path).ok()?;
+    let _ = std::fs::remove_file(&path);
+    serde_json::from_str(&json).ok()
 }
 
 fn ws_port() -> u16 {
