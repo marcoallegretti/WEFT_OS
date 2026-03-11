@@ -24,7 +24,10 @@ fn run() -> anyhow::Result<()> {
     let html_path = system_ui_html_path()?;
     tracing::info!(path = %html_path.display(), "system UI entry point located");
 
-    embed_servo(&wayland_display, &html_path)
+    let ws_port = appd_ws_port();
+    tracing::info!(ws_port, "appd WebSocket port");
+
+    embed_servo(&wayland_display, &html_path, ws_port)
 }
 
 fn system_ui_html_path() -> anyhow::Result<PathBuf> {
@@ -42,7 +45,30 @@ fn system_ui_html_path() -> anyhow::Result<PathBuf> {
     )
 }
 
-fn embed_servo(_wayland_display: &str, _html_path: &std::path::Path) -> anyhow::Result<()> {
+fn appd_ws_port() -> u16 {
+    if let Ok(explicit) = std::env::var("WEFT_APPD_WS_PORT")
+        && let Ok(n) = explicit.trim().parse::<u16>()
+    {
+        return n;
+    }
+    if let Ok(runtime_dir) = std::env::var("XDG_RUNTIME_DIR") {
+        let port_file = std::path::Path::new(&runtime_dir)
+            .join("weft")
+            .join("appd.wsport");
+        if let Ok(contents) = std::fs::read_to_string(&port_file)
+            && let Ok(n) = contents.trim().parse::<u16>()
+        {
+            return n;
+        }
+    }
+    7410
+}
+
+fn embed_servo(
+    _wayland_display: &str,
+    _html_path: &std::path::Path,
+    _ws_port: u16,
+) -> anyhow::Result<()> {
     anyhow::bail!(
         "Servo embedding not yet implemented; \
          see docs/architecture/winit-wayland-audit.md for gap assessment"
