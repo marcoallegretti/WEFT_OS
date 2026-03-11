@@ -98,6 +98,11 @@ fn check_package(dir: &Path) -> anyhow::Result<String> {
                 "runtime.module '{}' not found",
                 wasm_path.display()
             ));
+        } else if !is_wasm_module(&wasm_path) {
+            errors.push(format!(
+                "runtime.module '{}' is not a valid Wasm module (bad magic bytes)",
+                wasm_path.display()
+            ));
         }
 
         let ui_path = dir.join(&m.ui.entry);
@@ -148,6 +153,20 @@ fn is_valid_app_id(id: &str) -> bool {
             && p.chars()
                 .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit())
     })
+}
+
+fn is_wasm_module(path: &Path) -> bool {
+    const MAGIC: [u8; 4] = [0x00, 0x61, 0x73, 0x6D];
+    let mut buf = [0u8; 4];
+    match std::fs::File::open(path) {
+        Ok(mut f) => {
+            use std::io::Read;
+            f.read_exact(&mut buf)
+                .map(|_| buf == MAGIC)
+                .unwrap_or(false)
+        }
+        Err(_) => false,
+    }
 }
 
 fn resolve_install_root() -> anyhow::Result<PathBuf> {
@@ -343,6 +362,37 @@ entry = "ui/index.html"
         assert!(uninstall_package_from(&app_id, &store).is_err());
         let _ = fs::remove_dir_all(&src);
         let _ = fs::remove_dir_all(&store);
+    }
+
+    #[test]
+    fn check_package_bad_wasm_magic() {
+        use std::fs;
+        let tmp = std::env::temp_dir().join("weft_pack_test_bad_wasm");
+        let ui_dir = tmp.join("ui");
+        let _ = fs::create_dir_all(&ui_dir);
+        fs::write(tmp.join("app.wasm"), b"NOT_WASM").unwrap();
+        fs::write(ui_dir.join("index.html"), b"").unwrap();
+        fs::write(
+            tmp.join("wapp.toml"),
+            r#"
+[package]
+id = "com.example.badwasm"
+name = "Bad Wasm"
+version = "0.1.0"
+
+[runtime]
+module = "app.wasm"
+
+[ui]
+entry = "ui/index.html"
+"#,
+        )
+        .unwrap();
+        let result = check_package(&tmp);
+        assert!(result.is_err());
+        let msg = result.unwrap_err().to_string();
+        assert!(msg.contains("bad magic bytes"), "got: {msg}");
+        let _ = fs::remove_dir_all(&tmp);
     }
 
     #[test]
