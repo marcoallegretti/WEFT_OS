@@ -133,6 +133,9 @@ impl App {
     }
 
     fn create_app_webview(&mut self, session_id: u64, app_id: &str) {
+        if self.app_webviews.contains_key(&session_id) {
+            return;
+        }
         let (Some(servo), Some(rc)) = (&self.servo, &self.rendering_context) else {
             return;
         };
