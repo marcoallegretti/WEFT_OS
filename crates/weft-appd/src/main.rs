@@ -344,6 +344,34 @@ mod tests {
     }
 
     #[test]
+    fn ws_port_defaults_to_7410() {
+        let prior = std::env::var("WEFT_APPD_WS_PORT").ok();
+        unsafe { std::env::remove_var("WEFT_APPD_WS_PORT") };
+        let port = ws_port();
+        unsafe {
+            match prior {
+                Some(v) => std::env::set_var("WEFT_APPD_WS_PORT", v),
+                None => {}
+            }
+        }
+        assert_eq!(port, 7410);
+    }
+
+    #[test]
+    fn ws_port_uses_env_override() {
+        let prior = std::env::var("WEFT_APPD_WS_PORT").ok();
+        unsafe { std::env::set_var("WEFT_APPD_WS_PORT", "9000") };
+        let port = ws_port();
+        unsafe {
+            match prior {
+                Some(v) => std::env::set_var("WEFT_APPD_WS_PORT", v),
+                None => std::env::remove_var("WEFT_APPD_WS_PORT"),
+            }
+        }
+        assert_eq!(port, 9000);
+    }
+
+    #[test]
     fn appd_socket_path_uses_override_env() {
         let prior = std::env::var("WEFT_APPD_SOCKET").ok();
         unsafe { std::env::set_var("WEFT_APPD_SOCKET", "/tmp/custom.sock") };
