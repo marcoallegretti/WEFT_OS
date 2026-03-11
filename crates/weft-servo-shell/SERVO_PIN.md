@@ -64,19 +64,28 @@ On Fedora/RHEL: `mesa-libGL-devel openssl-devel dbus-devel systemd-devel libxkbc
 Default: `SoftwareRenderingContext` (CPU rasterisation) blitted to a
 `softbuffer`-backed winit window.
 
-EGL path (scaffolded): set `WEFT_EGL_RENDERING=1` at runtime. The embedder
-attempts `WindowRenderingContext::new` using the winit display and window
-handles. If construction fails it falls back to software automatically.
-When the EGL path is active Servo presents directly to the EGL surface;
-the softbuffer blit is skipped. Full DMA-BUF export to the Wayland
-compositor is not yet wired (`RenderingCtx::Egl` blit body is a no-op).
+EGL path: set `WEFT_EGL_RENDERING=1` at runtime. The embedder attempts
+`WindowRenderingContext::new` using the winit display and window handles.
+If construction fails it falls back to software automatically.
+When the EGL path is active Servo presents directly to the EGL surface via
+surfman's `eglSwapBuffers`; the softbuffer blit is skipped. Mesa handles
+DMA-BUF buffer sharing with the compositor transparently.
 
 ## Known gaps at this pin
 
 - **GAP-1**: ~~Wayland input events not forwarded to Servo~~ **Resolved** — keyboard and
   mouse events forwarded via `webview.notify_input_event`; key mapping in `keyutils.rs`.
-- **GAP-2**: EGL `WindowRenderingContext` path scaffolded (`WEFT_EGL_RENDERING=1`);
-  DMA-BUF export to the Wayland compositor (linux-dmabuf-unstable-v1) not yet wired.
+- **GAP-2**: EGL `WindowRenderingContext` path scaffolded (`WEFT_EGL_RENDERING=1`).
+  When EGL is active, Servo presents frames via surfman's `eglSwapBuffers`; Mesa handles
+  DMA-BUF buffer sharing with the compositor transparently — no explicit
+  `zwp_linux_dmabuf_v1` code is needed in the shell for basic rendering.
+  The `zweft_shell_manager_v1` event queue is now dispatched each frame so `configure`,
+  `focus_changed`, and `window_closed` events are processed; `window_closed` triggers a
+  clean Servo shutdown.
+  Remaining gap: the `ZweftShellWindowV1` is created with `surface = null`; the winit
+  `wl_surface` is not yet associated with the shell window slot (requires sharing a single
+  Wayland connection between winit and the shell client, which is not currently feasible
+  without significant refactoring).
 - **GAP-3**: WebGPU adapter on Mesa may fail CTS — validation task, requires Mesa GPU hardware.
 - **GAP-4**: ~~CSS Grid~~ **Grid resolved** (Taffy-backed, fully wired).
   ~~CSS `backdrop-filter` unimplemented~~ **`backdrop-filter` resolved** (servo/servo issue

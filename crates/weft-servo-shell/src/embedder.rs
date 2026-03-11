@@ -99,6 +99,7 @@ struct App {
     shutting_down: bool,
     modifiers: ModifiersState,
     cursor_pos: servo::euclid::default::Point2D<f32>,
+    shell_client: Option<crate::shell_client::ShellClient>,
 }
 
 impl App {
@@ -107,6 +108,7 @@ impl App {
         waker: WeftEventLoopWaker,
         ws_port: u16,
         app_rx: mpsc::Receiver<crate::appd_ws::AppdCmd>,
+        shell_client: Option<crate::shell_client::ShellClient>,
     ) -> Self {
         Self {
             url,
@@ -123,6 +125,7 @@ impl App {
             shutting_down: false,
             modifiers: ModifiersState::default(),
             cursor_pos: servo::euclid::default::Point2D::zero(),
+            shell_client,
         }
     }
 
@@ -245,6 +248,18 @@ impl ApplicationHandler<ServoWake> for App {
         if self.shutting_down {
             event_loop.exit();
             return;
+        }
+        if let Some(sc) = &mut self.shell_client {
+            match sc.dispatch_pending() {
+                Ok(false) => {
+                    self.shutting_down = true;
+                    if let Some(servo) = &self.servo {
+                        servo.start_shutting_down();
+                    }
+                }
+                Err(e) => tracing::warn!("shell client dispatch error: {e}"),
+                Ok(true) => {}
+            }
         }
         while let Ok(cmd) = self.app_rx.try_recv() {
             match cmd {
@@ -418,7 +433,11 @@ fn app_store_roots() -> Vec<PathBuf> {
     roots
 }
 
-pub fn run(html_path: &Path, ws_port: u16) -> anyhow::Result<()> {
+pub fn run(
+    html_path: &Path,
+    ws_port: u16,
+    shell_client: Option<crate::shell_client::ShellClient>,
+) -> anyhow::Result<()> {
     let url_str = format!("file://{}", html_path.display());
     let raw_url =
         ServoUrl::parse(&url_str).map_err(|e| anyhow::anyhow!("invalid URL {url_str}: {e}"))?;
@@ -436,7 +455,7 @@ pub fn run(html_path: &Path, ws_port: u16) -> anyhow::Result<()> {
     let waker_for_thread = waker.clone();
     crate::appd_ws::spawn_appd_listener(ws_port, app_tx, Box::new(move || waker_for_thread.wake()));
 
-    let mut app = App::new(url, waker, ws_port, app_rx);
+    let mut app = App::new(url, waker, ws_port, app_rx, shell_client);
     event_loop
         .run_app(&mut app)
         .map_err(|e| anyhow::anyhow!("event loop run: {e}"))
