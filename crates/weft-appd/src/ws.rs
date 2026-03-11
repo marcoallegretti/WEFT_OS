@@ -21,7 +21,7 @@ pub async fn handle_ws_connection(
                         let req: Request = match serde_json::from_str(&text) {
                             Ok(r) => r,
                             Err(e) => {
-                                tracing::warn!(error = %e, "invalid WS request");
+                                tracing::debug!(error = %e, "unrecognised WS message");
                                 continue;
                             }
                         };
