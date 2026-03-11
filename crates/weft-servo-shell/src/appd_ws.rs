@@ -20,26 +20,38 @@ pub fn spawn_appd_listener(
 
 fn run_listener(ws_port: u16, tx: mpsc::SyncSender<AppdCmd>, wake: Box<dyn Fn() + Send>) {
     let url = format!("ws://127.0.0.1:{ws_port}");
-    let (mut ws, _) = match tungstenite::connect(url) {
-        Ok(p) => p,
-        Err(e) => {
-            tracing::warn!("appd WebSocket connect failed: {e}");
-            return;
-        }
-    };
-
-    let _ = ws.send(tungstenite::Message::Text(
-        r#"{"type":"QUERY_RUNNING"}"#.into(),
-    ));
+    let mut backoff = std::time::Duration::from_millis(500);
+    const MAX_BACKOFF: std::time::Duration = std::time::Duration::from_secs(16);
 
     loop {
-        match ws.read() {
-            Ok(tungstenite::Message::Text(text)) => {
-                process_message(&text, &tx, &*wake);
+        match tungstenite::connect(&url) {
+            Err(e) => {
+                tracing::debug!("appd WebSocket connect failed: {e}; retry in {backoff:?}");
+                std::thread::sleep(backoff);
+                backoff = (backoff * 2).min(MAX_BACKOFF);
+                continue;
             }
-            Ok(_) => {}
-            Err(_) => break,
+            Ok((mut ws, _)) => {
+                backoff = std::time::Duration::from_millis(500);
+                let _ = ws.send(tungstenite::Message::Text(
+                    r#"{"type":"QUERY_RUNNING"}"#.into(),
+                ));
+                loop {
+                    match ws.read() {
+                        Ok(tungstenite::Message::Text(text)) => {
+                            process_message(&text, &tx, &*wake);
+                        }
+                        Ok(_) => {}
+                        Err(e) => {
+                            tracing::debug!("appd WebSocket read error: {e}; reconnecting");
+                            break;
+                        }
+                    }
+                }
+            }
         }
+        std::thread::sleep(backoff);
+        backoff = (backoff * 2).min(MAX_BACKOFF);
     }
 }
 
