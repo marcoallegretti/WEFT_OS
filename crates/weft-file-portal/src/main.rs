@@ -142,6 +142,9 @@ fn handle_request(req: Request, allowed: &[PathBuf]) -> Response {
                     Ok(d) => d,
                     Err(e) => return Response::err(format!("bad base64: {e}")),
                 };
+            if let Some(Err(e)) = p.parent().map(std::fs::create_dir_all) {
+                return Response::err(e);
+            }
             match std::fs::write(&p, &data) {
                 Ok(()) => Response::Ok,
                 Err(e) => Response::err(e),
@@ -271,6 +274,29 @@ mod tests {
             panic!("expected OkEntries");
         }
 
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn handle_request_write_creates_parent_dirs() {
+        use std::fs;
+        let dir = std::env::temp_dir().join(format!("wfp_write_{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        let nested = dir.join("sub").join("deep").join("file.txt");
+        let data = base64::Engine::encode(
+            &base64::engine::general_purpose::STANDARD,
+            b"nested content",
+        );
+        let allowed = vec![dir.clone()];
+        let resp = handle_request(
+            Request::Write {
+                path: nested.to_string_lossy().into(),
+                data_b64: data,
+            },
+            &allowed,
+        );
+        assert!(matches!(resp, Response::Ok), "expected Ok response");
+        assert_eq!(fs::read(&nested).unwrap(), b"nested content");
         let _ = fs::remove_dir_all(&dir);
     }
 }
