@@ -25,5 +25,10 @@ cd "$PROJECT"
 
 echo "==> cargo test -p weft-compositor"
 cargo test -p weft-compositor 2>&1
+
+echo ""
+echo "==> cargo test -p weft-appd"
+cargo test -p weft-appd 2>&1
+
 echo ""
 echo "ALL DONE"

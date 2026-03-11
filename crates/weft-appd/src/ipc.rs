@@ -68,3 +68,68 @@ pub async fn write_frame(
     writer.write_all(&body).await?;
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn request_msgpack_roundtrip() {
+        let req = Request::LaunchApp {
+            app_id: "com.example.app".into(),
+            surface_id: 42,
+        };
+        let bytes = rmp_serde::to_vec(&req).unwrap();
+        let decoded: Request = rmp_serde::from_slice(&bytes).unwrap();
+        match decoded {
+            Request::LaunchApp { app_id, surface_id } => {
+                assert_eq!(app_id, "com.example.app");
+                assert_eq!(surface_id, 42);
+            }
+            _ => panic!("wrong variant"),
+        }
+    }
+
+    #[test]
+    fn response_msgpack_roundtrip() {
+        let resp = Response::LaunchAck { session_id: 7 };
+        let bytes = rmp_serde::to_vec(&resp).unwrap();
+        let decoded: Response = rmp_serde::from_slice(&bytes).unwrap();
+        match decoded {
+            Response::LaunchAck { session_id } => assert_eq!(session_id, 7),
+            _ => panic!("wrong variant"),
+        }
+    }
+
+    #[tokio::test]
+    async fn frame_write_read_roundtrip() {
+        let resp = Response::RunningApps {
+            session_ids: vec![1, 2, 3],
+        };
+        let mut buf: Vec<u8> = Vec::new();
+        write_frame(&mut buf, &resp).await.unwrap();
+
+        assert_eq!(
+            buf.len() as u32,
+            u32::from_le_bytes(buf[..4].try_into().unwrap()) + 4
+        );
+
+        let req_to_write = Request::QueryRunning;
+        let mut req_buf: Vec<u8> = Vec::new();
+        let body = rmp_serde::to_vec(&req_to_write).unwrap();
+        let len = (body.len() as u32).to_le_bytes();
+        req_buf.extend_from_slice(&len);
+        req_buf.extend_from_slice(&body);
+
+        let mut cursor = std::io::Cursor::new(req_buf);
+        let decoded = read_frame(&mut cursor).await.unwrap();
+        assert!(matches!(decoded, Some(Request::QueryRunning)));
+    }
+
+    #[tokio::test]
+    async fn read_frame_eof_returns_none() {
+        let mut empty = std::io::Cursor::new(Vec::<u8>::new());
+        let result = read_frame(&mut empty).await.unwrap();
+        assert!(result.is_none());
+    }
+}

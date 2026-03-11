@@ -155,3 +155,49 @@ fn appd_socket_path() -> anyhow::Result<PathBuf> {
 
     Ok(PathBuf::from(runtime_dir).join("weft/appd.sock"))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ipc::AppStateKind;
+
+    #[test]
+    fn registry_launch_increments_id() {
+        let mut reg = SessionRegistry::default();
+        let id1 = reg.launch("com.example.a");
+        let id2 = reg.launch("com.example.b");
+        assert!(id2 > id1);
+    }
+
+    #[test]
+    fn registry_terminate_known_session() {
+        let mut reg = SessionRegistry::default();
+        let id = reg.launch("com.example.app");
+        assert!(reg.terminate(id));
+        assert!(matches!(reg.state(id), AppStateKind::NotFound));
+    }
+
+    #[test]
+    fn registry_terminate_unknown_returns_false() {
+        let mut reg = SessionRegistry::default();
+        assert!(!reg.terminate(999));
+    }
+
+    #[test]
+    fn registry_running_ids_reflects_live_sessions() {
+        let mut reg = SessionRegistry::default();
+        let id1 = reg.launch("a");
+        let id2 = reg.launch("b");
+        let mut ids = reg.running_ids();
+        ids.sort();
+        assert_eq!(ids, vec![id1, id2]);
+        reg.terminate(id1);
+        assert_eq!(reg.running_ids(), vec![id2]);
+    }
+
+    #[test]
+    fn registry_state_not_found_for_unknown() {
+        let reg = SessionRegistry::default();
+        assert!(matches!(reg.state(42), AppStateKind::NotFound));
+    }
+}
