@@ -449,7 +449,7 @@ mod tests {
         let notification = rx.try_recv();
         assert!(matches!(
             notification,
-            Ok(Response::AppReady { session_id: sid }) if sid == session_id
+            Ok(Response::AppReady { session_id: sid, .. }) if sid == session_id
         ));
 
         let _ = std::fs::remove_file(&script);

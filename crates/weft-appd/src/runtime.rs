@@ -42,11 +42,10 @@ pub(crate) async fn supervise(
                 .lock()
                 .await
                 .set_state(session_id, AppStateKind::Running);
-            let _ = registry
-                .lock()
-                .await
-                .broadcast()
-                .send(Response::AppReady { session_id });
+            let _ = registry.lock().await.broadcast().send(Response::AppReady {
+                session_id,
+                app_id: app_id.to_owned(),
+            });
             tracing::info!(session_id, %app_id, "app ready");
         }
         Ok(Err(e)) => {

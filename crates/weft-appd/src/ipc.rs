@@ -25,6 +25,7 @@ pub enum Response {
     },
     AppReady {
         session_id: u64,
+        app_id: String,
     },
     RunningApps {
         sessions: Vec<SessionInfo>,
