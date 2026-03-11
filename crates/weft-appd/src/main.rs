@@ -598,4 +598,48 @@ mod tests {
             }
         }
     }
+
+    #[cfg(unix)]
+    #[tokio::test(flavor = "current_thread")]
+    async fn supervisor_spawn_failure_broadcasts_stopped() {
+        let prior = std::env::var("WEFT_RUNTIME_BIN").ok();
+        unsafe {
+            std::env::set_var(
+                "WEFT_RUNTIME_BIN",
+                "/nonexistent/path/to/weft-runtime-does-not-exist",
+            )
+        };
+
+        let registry: Registry = Arc::new(Mutex::new(SessionRegistry::default()));
+        let mut rx = registry.lock().await.subscribe();
+        let session_id = registry.lock().await.launch("test.spawn.fail");
+        let abort_rx = registry.lock().await.register_abort(session_id);
+
+        runtime::supervise(
+            session_id,
+            "test.spawn.fail",
+            Arc::clone(&registry),
+            abort_rx,
+        )
+        .await
+        .unwrap();
+
+        assert!(matches!(
+            registry.lock().await.state(session_id),
+            AppStateKind::Stopped
+        ));
+
+        let broadcast = rx.try_recv();
+        assert!(matches!(
+            broadcast,
+            Ok(Response::AppState { session_id: sid, state: AppStateKind::Stopped }) if sid == session_id
+        ));
+
+        unsafe {
+            match prior {
+                Some(v) => std::env::set_var("WEFT_RUNTIME_BIN", v),
+                None => std::env::remove_var("WEFT_RUNTIME_BIN"),
+            }
+        }
+    }
 }
