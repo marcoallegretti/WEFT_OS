@@ -292,6 +292,7 @@ fn app_store_roots() -> Vec<std::path::PathBuf> {
 struct WappPackage {
     id: String,
     name: String,
+    version: String,
 }
 
 #[derive(serde::Deserialize)]
@@ -318,6 +319,7 @@ fn scan_installed_apps() -> Vec<AppInfo> {
                 apps.push(AppInfo {
                     app_id: m.package.id,
                     name: m.package.name,
+                    version: m.package.version,
                 });
             }
         }
@@ -615,6 +617,7 @@ mod tests {
         assert_eq!(apps.len(), 1);
         assert_eq!(apps[0].app_id, "com.example.scanner");
         assert_eq!(apps[0].name, "Scanner");
+        assert_eq!(apps[0].version, "1.0.0");
 
         unsafe {
             match prior {

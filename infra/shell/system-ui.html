@@ -319,7 +319,7 @@
         apps.forEach(function (app) {
           var icon = document.createElement('weft-app-icon');
           icon.dataset.appId = app.app_id;
-          icon.title = app.app_id;
+          icon.title = app.app_id + (app.version ? ' v' + app.version : '');
           icon.innerHTML =
             '<svg width="40" height="40" viewBox="0 0 40 40" fill="none"' +
             ' xmlns="http://www.w3.org/2000/svg" aria-hidden="true">' +
