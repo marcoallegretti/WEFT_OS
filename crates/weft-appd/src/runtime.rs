@@ -10,6 +10,18 @@ use crate::ipc::{AppStateKind, Response};
 
 const READY_TIMEOUT: Duration = Duration::from_secs(30);
 
+fn systemd_cgroup_available() -> bool {
+    if std::env::var("WEFT_DISABLE_CGROUP").is_ok() {
+        return false;
+    }
+    let Ok(runtime_dir) = std::env::var("XDG_RUNTIME_DIR") else {
+        return false;
+    };
+    std::path::Path::new(&runtime_dir)
+        .join("systemd/private")
+        .exists()
+}
+
 fn resolve_preopens(app_id: &str) -> Vec<(String, String)> {
     #[derive(serde::Deserialize)]
     struct Pkg {
@@ -92,7 +104,25 @@ pub(crate) async fn supervise(
         }
     };
 
-    let mut cmd = tokio::process::Command::new(&bin);
+    let mut cmd = if systemd_cgroup_available() {
+        let mut c = tokio::process::Command::new("systemd-run");
+        c.args([
+            "--user",
+            "--scope",
+            "--wait",
+            "--collect",
+            "--slice=weft-apps.slice",
+            "-p",
+            "CPUQuota=200%",
+            "-p",
+            "MemoryMax=512M",
+            "--",
+            &bin,
+        ]);
+        c
+    } else {
+        tokio::process::Command::new(&bin)
+    };
     cmd.arg(app_id)
         .arg(session_id.to_string())
         .stdout(std::process::Stdio::piped())
