@@ -188,6 +188,18 @@ fn check_package(dir: &Path) -> anyhow::Result<String> {
         if !ui_path.exists() {
             errors.push(format!("ui.entry '{}' not found", ui_path.display()));
         }
+
+        const KNOWN_CAPS: &[&str] = &[
+            "fs:rw:app-data",
+            "fs:read:app-data",
+            "fs:rw:xdg-documents",
+            "fs:read:xdg-documents",
+        ];
+        for cap in m.package.capabilities.iter().flatten() {
+            if !KNOWN_CAPS.contains(&cap.as_str()) {
+                errors.push(format!("unknown capability '{cap}'"));
+            }
+        }
     }
 
     if errors.is_empty() {
