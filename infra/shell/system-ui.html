@@ -212,7 +212,7 @@
             ensureTaskbarEntry(s.session_id, s.app_id);
           });
         } else if (msg.type === 'LAUNCH_ACK') {
-          ensureTaskbarEntry(msg.session_id, null);
+          ensureTaskbarEntry(msg.session_id, msg.app_id || null);
         }
       }
 
