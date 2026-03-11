@@ -2,6 +2,7 @@ use tracing_subscriber::EnvFilter;
 
 mod backend;
 mod input;
+mod protocols;
 mod state;
 
 fn main() -> anyhow::Result<()> {

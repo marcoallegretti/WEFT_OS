@@ -1,0 +1,196 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<protocol name="weft_shell_unstable_v1">
+
+  <copyright>
+    Copyright (C) 2026 WEFT OS contributors
+
+    Permission is hereby granted, free of charge, to any person obtaining
+    a copy of this software and associated documentation files (the
+    "Software"), to deal in the Software without restriction, including
+    without limitation the rights to use, copy, modify, merge, publish,
+    distribute, sublicense, and/or sell copies of the Software, and to
+    permit persons to whom the Software is furnished to do so, subject to
+    the following conditions:
+
+    The above copyright notice and this permission notice (including the
+    next paragraph) shall be included in all copies or substantial portions
+    of the Software.
+
+    THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,
+    EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
+    MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND
+    NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE
+    LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION
+    OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION
+    WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+  </copyright>
+
+  <description summary="WEFT compositor–shell protocol">
+    This protocol defines the boundary between weft-compositor and
+    weft-servo-shell. It allows the shell to manage window slots on behalf
+    of application surfaces that the compositor owns.
+
+    The shell binds the weft_shell_manager_v1 global once per connection.
+    The manager creates weft_shell_window_v1 objects, each representing one
+    visual window slot. The compositor is authoritative for geometry,
+    focus, and stacking. The shell is authoritative for window metadata,
+    chrome layout, and the decision to create or destroy a window slot.
+
+    Warning: This protocol is unstable and subject to change before version
+    1 is finalized. Clients must check the version advertised by the
+    compositor and handle unknown events gracefully.
+  </description>
+
+  <!-- ───────────────────────────── Manager ───────────────────────────── -->
+
+  <interface name="zweft_shell_manager_v1" version="1">
+
+    <description summary="shell session manager">
+      Bound once by weft-servo-shell. The manager owns the shell session.
+      If the binding is destroyed the compositor invalidates all window
+      objects that were created through it.
+    </description>
+
+    <request name="destroy" type="destructor">
+      <description summary="destroy the manager and end the shell session">
+        Destroys the manager. All weft_shell_window_v1 objects created
+        through this manager become inert. The compositor will emit
+        window_closed on each before processing the destructor.
+      </description>
+    </request>
+
+    <request name="create_window">
+      <description summary="create a window slot">
+        Creates a new window slot. The compositor assigns the protocol
+        object identity; no separate window_id is exchanged. The
+        compositor will emit configure on the new object to communicate the
+        effective initial geometry and state.
+      </description>
+      <arg name="id"     type="new_id" interface="zweft_shell_window_v1"
+           summary="new window object"/>
+      <arg name="app_id" type="string"
+           summary="application identifier, reverse-DNS format"/>
+      <arg name="title"  type="string"
+           summary="initial window title"/>
+      <arg name="role"   type="string"
+           summary="window role hint (normal, dialog, panel, overlay)"/>
+      <arg name="x"      type="int"
+           summary="requested x position in compositor logical coordinates"/>
+      <arg name="y"      type="int"
+           summary="requested y position in compositor logical coordinates"/>
+      <arg name="width"  type="int"
+           summary="requested width in compositor logical coordinates"/>
+      <arg name="height" type="int"
+           summary="requested height in compositor logical coordinates"/>
+    </request>
+
+  </interface>
+
+  <!-- ───────────────────────────── Window ────────────────────────────── -->
+
+  <interface name="zweft_shell_window_v1" version="1">
+
+    <description summary="a compositor-managed window slot">
+      Represents one visual window. The compositor controls the effective
+      geometry, stacking, and focus state. The shell controls metadata and
+      may request geometry changes; the compositor may reject or adjust
+      such requests.
+
+      A window object becomes inert after window_closed is received. The
+      shell must call destroy on an inert object as soon as possible.
+    </description>
+
+    <enum name="state" bitfield="true">
+      <description summary="window state bitmask"/>
+      <entry name="maximized"  value="1" summary="window occupies full output area"/>
+      <entry name="fullscreen" value="2" summary="window covers the entire output including chrome"/>
+      <entry name="activated"  value="4" summary="window has input focus"/>
+      <entry name="resizing"   value="8" summary="an interactive resize is in progress"/>
+    </enum>
+
+    <enum name="error">
+      <description summary="protocol errors"/>
+      <entry name="defunct_window" value="0"
+             summary="request sent after window_closed was received"/>
+    </enum>
+
+    <request name="destroy" type="destructor">
+      <description summary="destroy the window object">
+        Destroys the window object. If the window is still alive the
+        compositor will remove the corresponding window slot from the
+        display. The shell must not send requests on this object after
+        calling destroy.
+      </description>
+    </request>
+
+    <request name="update_metadata">
+      <description summary="update window title and role">
+        Updates advisory metadata. The compositor may use these values in
+        window decorations or accessibility trees. Updates are not
+        authoritative for policy decisions.
+      </description>
+      <arg name="title" type="string" summary="new window title"/>
+      <arg name="role"  type="string" summary="new window role hint"/>
+    </request>
+
+    <request name="set_geometry">
+      <description summary="request a geometry change">
+        Asks the compositor to change the window geometry. The compositor
+        validates the request against output bounds and current policy. The
+        compositor is not required to honor the exact values. A configure
+        event will be sent with the effective geometry that results.
+      </description>
+      <arg name="x"      type="int" summary="requested x position"/>
+      <arg name="y"      type="int" summary="requested y position"/>
+      <arg name="width"  type="int" summary="requested width"/>
+      <arg name="height" type="int" summary="requested height"/>
+    </request>
+
+    <event name="configure">
+      <description summary="compositor sets effective geometry and state">
+        Sent by the compositor when the effective geometry or state
+        changes. The shell must treat this as authoritative and update its
+        DOM layout to match. The shell must ack each configure event by
+        sending an update_metadata request or by doing nothing if no
+        metadata changed; no explicit ack request is defined in version 1.
+      </description>
+      <arg name="x"      type="int"  summary="effective x position"/>
+      <arg name="y"      type="int"  summary="effective y position"/>
+      <arg name="width"  type="int"  summary="effective width"/>
+      <arg name="height" type="int"  summary="effective height"/>
+      <arg name="state"  type="uint" summary="bitmask of state enum values"/>
+    </event>
+
+    <event name="focus_changed">
+      <description summary="input focus state changed">
+        Sent when surface-level focus changes for this window slot. The
+        shell updates visual focus state in its DOM but does not override
+        compositor focus policy.
+      </description>
+      <arg name="focused" type="uint" summary="1 if focused, 0 if not"/>
+    </event>
+
+    <event name="window_closed">
+      <description summary="window slot is no longer valid">
+        Sent by the compositor when the window object is being invalidated.
+        After this event the shell must call destroy on the object. Any
+        request sent after window_closed is a protocol error.
+      </description>
+    </event>
+
+    <event name="presentation_feedback">
+      <description summary="frame presentation timing">
+        Sent after a frame containing this window's content is presented
+        to the output. Allows the shell to align animations and resize
+        flows with compositor timing. tv_sec and tv_nsec are wall-clock
+        values from the compositor's monotonic clock. refresh is the
+        output refresh interval in nanoseconds; 0 if unknown.
+      </description>
+      <arg name="tv_sec"   type="uint" summary="seconds component of presentation time"/>
+      <arg name="tv_nsec"  type="uint" summary="nanoseconds component of presentation time"/>
+      <arg name="refresh"  type="uint" summary="output refresh interval in nanoseconds"/>
+    </event>
+
+  </interface>
+
+</protocol>

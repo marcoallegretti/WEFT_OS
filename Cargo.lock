@@ -2258,11 +2258,15 @@ name = "weft-compositor"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "bitflags 2.11.0",
  "sd-notify",
  "smithay",
  "smithay-drm-extras",
  "tracing",
  "tracing-subscriber",
+ "wayland-backend",
+ "wayland-scanner",
+ "wayland-server",
 ]
 
 [[package]]

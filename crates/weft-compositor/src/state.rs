@@ -1,5 +1,9 @@
 #[cfg(target_os = "linux")]
 use crate::backend::drm_device::WeftDrmData;
+use crate::protocols::{
+    WeftShellState, WeftShellWindowData, ZweftShellManagerV1, ZweftShellWindowV1,
+    server::{zweft_shell_manager_v1, zweft_shell_window_v1},
+};
 
 use smithay::{
     backend::{input::TabletToolDescriptor, renderer::utils::on_commit_buffer_handler},
@@ -15,7 +19,7 @@ use smithay::{
     reexports::{
         calloop::{LoopHandle, LoopSignal},
         wayland_server::{
-            Client, DisplayHandle,
+            Client, DataInit, Dispatch, DisplayHandle, GlobalDispatch, New,
             backend::{ClientData, ClientId, DisconnectReason},
             protocol::{wl_buffer::WlBuffer, wl_output::WlOutput, wl_surface::WlSurface},
         },
@@ -89,6 +93,9 @@ pub struct WeftCompositorState {
     // Set to false when the compositor should exit the event loop.
     pub running: bool,
 
+    // WEFT compositor–shell protocol global.
+    pub weft_shell_state: WeftShellState,
+
     #[cfg(target_os = "linux")]
     pub drm: Option<WeftDrmData>,
 }
@@ -113,6 +120,7 @@ impl WeftCompositorState {
             InputMethodManagerState::new::<Self, _>(&display_handle, |_client| true);
         let pointer_constraints_state = PointerConstraintsState::new::<Self>(&display_handle);
         let cursor_shape_state = CursorShapeManagerState::new::<Self>(&display_handle);
+        let weft_shell_state = WeftShellState::new::<Self>(&display_handle);
 
         let mut seat_state = SeatState::new();
         let mut seat = seat_state.new_wl_seat(&display_handle, seat_name);
@@ -136,6 +144,7 @@ impl WeftCompositorState {
             input_method_state,
             pointer_constraints_state,
             cursor_shape_state,
+            weft_shell_state,
             space: Space::default(),
             popups: PopupManager::default(),
             seat_state,
@@ -404,3 +413,81 @@ impl TabletSeatHandler for WeftCompositorState {
 
 // CursorShapeManagerState has no handler trait; it calls SeatHandler::cursor_image directly.
 delegate_cursor_shape!(WeftCompositorState);
+
+// --- weft-shell-protocol ---
+
+impl GlobalDispatch<ZweftShellManagerV1, ()> for WeftCompositorState {
+    fn bind(
+        _state: &mut Self,
+        _handle: &DisplayHandle,
+        _client: &Client,
+        resource: New<ZweftShellManagerV1>,
+        _global_data: &(),
+        data_init: &mut DataInit<'_, Self>,
+    ) {
+        data_init.init(resource, ());
+    }
+}
+
+impl Dispatch<ZweftShellManagerV1, ()> for WeftCompositorState {
+    fn request(
+        _state: &mut Self,
+        _client: &Client,
+        _resource: &ZweftShellManagerV1,
+        request: zweft_shell_manager_v1::Request,
+        _data: &(),
+        _dh: &DisplayHandle,
+        data_init: &mut DataInit<'_, Self>,
+    ) {
+        match request {
+            zweft_shell_manager_v1::Request::Destroy => {}
+            zweft_shell_manager_v1::Request::CreateWindow {
+                id,
+                app_id,
+                title,
+                role,
+                x,
+                y,
+                width,
+                height,
+            } => {
+                let window = data_init.init(
+                    id,
+                    WeftShellWindowData {
+                        app_id,
+                        title,
+                        role,
+                    },
+                );
+                window.configure(x, y, width, height, 0);
+            }
+        }
+    }
+}
+
+impl Dispatch<ZweftShellWindowV1, WeftShellWindowData> for WeftCompositorState {
+    fn request(
+        _state: &mut Self,
+        _client: &Client,
+        resource: &ZweftShellWindowV1,
+        request: zweft_shell_window_v1::Request,
+        _data: &WeftShellWindowData,
+        _dh: &DisplayHandle,
+        _data_init: &mut DataInit<'_, Self>,
+    ) {
+        match request {
+            zweft_shell_window_v1::Request::Destroy => {}
+            zweft_shell_window_v1::Request::UpdateMetadata { title, role } => {
+                let _ = (title, role);
+            }
+            zweft_shell_window_v1::Request::SetGeometry {
+                x,
+                y,
+                width,
+                height,
+            } => {
+                resource.configure(x, y, width, height, 0);
+            }
+        }
+    }
+}
