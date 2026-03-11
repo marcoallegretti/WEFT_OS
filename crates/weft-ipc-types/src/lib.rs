@@ -83,7 +83,10 @@ impl std::fmt::Display for FrameDecodeError {
             Self::TooShort => write!(f, "frame buffer shorter than 4-byte header"),
             Self::TooLong(n) => write!(f, "frame length {n} exceeds MAX_FRAME_LEN"),
             Self::LengthMismatch { declared, actual } => {
-                write!(f, "declared length {declared} != actual body length {actual}")
+                write!(
+                    f,
+                    "declared length {declared} != actual body length {actual}"
+                )
             }
             Self::Deserialize(e) => write!(f, "MessagePack deserialize error: {e}"),
         }
@@ -113,7 +116,11 @@ mod tests {
         let frame = frame_encode(&msg).unwrap();
         let decoded: AppdToCompositor = frame_decode(&frame).unwrap();
         match decoded {
-            AppdToCompositor::AppSurfaceCreated { app_id, session_id, pid } => {
+            AppdToCompositor::AppSurfaceCreated {
+                app_id,
+                session_id,
+                pid,
+            } => {
                 assert_eq!(app_id, "com.example.app");
                 assert_eq!(session_id, 42);
                 assert_eq!(pid, 1234);
@@ -184,6 +191,9 @@ mod tests {
         frame[2] = bad_len[2];
         frame[3] = bad_len[3];
         let result: Result<AppdToCompositor, _> = frame_decode(&frame);
-        assert!(matches!(result, Err(FrameDecodeError::LengthMismatch { .. })));
+        assert!(matches!(
+            result,
+            Err(FrameDecodeError::LengthMismatch { .. })
+        ));
     }
 }

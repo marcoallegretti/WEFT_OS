@@ -39,4 +39,8 @@ echo "==> cargo test -p weft-pack"
 cargo test -p weft-pack -- --test-threads=1 2>&1
 
 echo ""
+echo "==> cargo test -p weft-mount-helper"
+cargo test -p weft-mount-helper -- --test-threads=1 2>&1
+
+echo ""
 echo "ALL DONE"

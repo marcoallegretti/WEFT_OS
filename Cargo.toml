@@ -4,6 +4,7 @@ members = [
     "crates/weft-build-meta",
     "crates/weft-compositor",
     "crates/weft-ipc-types",
+    "crates/weft-mount-helper",
     "crates/weft-pack",
     "crates/weft-runtime",
     "crates/weft-servo-shell",

@@ -127,7 +127,9 @@ fn main() -> anyhow::Result<()> {
             eprintln!("  weft-pack install      <dir>             install package to app store");
             eprintln!("  weft-pack uninstall    <app_id>          remove installed package");
             eprintln!("  weft-pack list                           list installed packages");
-            eprintln!("  weft-pack build-image   <dir> [--out <img>] create EROFS image with mkfs.erofs");
+            eprintln!(
+                "  weft-pack build-image   <dir> [--out <img>] create EROFS image with mkfs.erofs"
+            );
             eprintln!("  weft-pack build-verity   <img> [--out <hash>] add dm-verity hash tree");
             eprintln!("  weft-pack bundle        <dir> [--out <dir>] create .app.tar.zst archive");
             eprintln!("  weft-pack unbundle      <archive> [--out <dir>] extract .app.tar.zst");
@@ -406,7 +408,11 @@ fn build_verity(img: &Path, hash_out: Option<&Path>) -> anyhow::Result<()> {
         anyhow::bail!("{} already exists", hash_path.display());
     }
     let output = std::process::Command::new("veritysetup")
-        .args(["format", &img.to_string_lossy(), &hash_path.to_string_lossy()])
+        .args([
+            "format",
+            &img.to_string_lossy(),
+            &hash_path.to_string_lossy(),
+        ])
         .output()
         .context("spawn veritysetup; ensure cryptsetup-bin is installed")?;
     if !output.status.success() {

@@ -1,0 +1,12 @@
+[package]
+name = "weft-mount-helper"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[[bin]]
+name = "weft-mount-helper"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = "1.0"
