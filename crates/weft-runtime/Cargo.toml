@@ -8,7 +8,13 @@ rust-version.workspace = true
 name = "weft-runtime"
 path = "src/main.rs"
 
+[features]
+default = []
+wasmtime-runtime = ["dep:wasmtime", "dep:wasmtime-wasi"]
+
 [dependencies]
 anyhow = "1.0"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+wasmtime = { version = "30", optional = true }
+wasmtime-wasi = { version = "30", optional = true }

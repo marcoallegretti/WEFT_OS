@@ -29,12 +29,8 @@ fn main() -> anyhow::Result<()> {
         anyhow::bail!("app.wasm not found at {}", wasm_path.display());
     }
 
-    // TODO: Load wasm_path into a Wasmtime Engine and run the module.
-    // Until Wasmtime is integrated, print READY and exit cleanly so that
-    // weft-appd can complete the session lifecycle in tests and development.
-    tracing::info!(session_id, %app_id, wasm = %wasm_path.display(), "Wasmtime integration pending");
-
-    println!("READY");
+    tracing::info!(session_id, %app_id, wasm = %wasm_path.display(), "executing module");
+    run_module(&wasm_path)?;
 
     tracing::info!(session_id, %app_id, "exiting");
     Ok(())
@@ -49,6 +45,42 @@ fn resolve_package(app_id: &str) -> anyhow::Result<PathBuf> {
         }
     }
     anyhow::bail!("package '{}' not found in any package store", app_id)
+}
+
+#[cfg(not(feature = "wasmtime-runtime"))]
+fn run_module(_wasm_path: &std::path::Path) -> anyhow::Result<()> {
+    println!("READY");
+    Ok(())
+}
+
+#[cfg(feature = "wasmtime-runtime")]
+fn run_module(wasm_path: &std::path::Path) -> anyhow::Result<()> {
+    use anyhow::Context as _;
+    use wasmtime::{Config, Engine, Module, Store};
+
+    let engine = Engine::new(&Config::default()).context("create Wasmtime engine")?;
+    let module = Module::from_file(&engine, wasm_path).context("load Wasm module")?;
+
+    let mut linker: wasmtime::Linker<wasmtime_wasi::WasiCtx> = wasmtime::Linker::new(&engine);
+    wasmtime_wasi::add_to_linker(&mut linker, |cx| cx).context("add WASI to linker")?;
+
+    let wasi = wasmtime_wasi::WasiCtxBuilder::new()
+        .inherit_stdout()
+        .inherit_stderr()
+        .build();
+    let mut store = Store::new(&engine, wasi);
+
+    println!("READY");
+
+    let instance = linker
+        .instantiate(&mut store, &module)
+        .context("instantiate module")?;
+    let start = instance
+        .get_typed_func::<(), ()>(&mut store, "_start")
+        .context("get _start export")?;
+    start.call(&mut store, ()).context("call _start")?;
+
+    Ok(())
 }
 
 fn package_store_roots() -> Vec<PathBuf> {
