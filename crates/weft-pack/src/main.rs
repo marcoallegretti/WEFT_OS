@@ -55,6 +55,23 @@ fn main() -> anyhow::Result<()> {
         Some("list") => {
             list_installed();
         }
+        Some("bundle") => {
+            let dir = args.get(2).context("usage: weft-pack bundle <dir>")?;
+            let out = args
+                .windows(2)
+                .find(|w| w[0] == "--out")
+                .map(|w| w[1].as_str());
+            bundle_package(Path::new(dir), out.map(Path::new))?;
+        }
+        Some("unbundle") => {
+            let archive = args.get(2).context("usage: weft-pack unbundle <archive>")?;
+            let out = args
+                .windows(2)
+                .find(|w| w[0] == "--out")
+                .map(|w| w[1].as_str())
+                .unwrap_or(".");
+            unbundle_package(Path::new(archive), Path::new(out))?;
+        }
         Some("generate-key") => {
             let out = args.get(2).map(String::as_str).unwrap_or(".");
             generate_key(Path::new(out))?;
@@ -94,6 +111,8 @@ fn main() -> anyhow::Result<()> {
             eprintln!("  weft-pack install      <dir>             install package to app store");
             eprintln!("  weft-pack uninstall    <app_id>          remove installed package");
             eprintln!("  weft-pack list                           list installed packages");
+            eprintln!("  weft-pack bundle        <dir> [--out <dir>] create .app.tar.zst archive");
+            eprintln!("  weft-pack unbundle      <archive> [--out <dir>] extract .app.tar.zst");
             eprintln!("  weft-pack generate-key [<outdir>]        generate Ed25519 keypair");
             eprintln!("  weft-pack sign         <dir> --key <key> sign package with private key");
             eprintln!("  weft-pack verify       <dir> --key <pub> verify package signature");
@@ -335,6 +354,40 @@ fn copy_dir(src: &Path, dst: &Path) -> anyhow::Result<()> {
                 .with_context(|| format!("copy {}", src_path.display()))?;
         }
     }
+    Ok(())
+}
+
+fn bundle_package(dir: &Path, out_dir: Option<&Path>) -> anyhow::Result<()> {
+    let manifest = load_manifest(dir)?;
+    let app_id = &manifest.package.id;
+    let archive_name = format!("{app_id}.app.tar.zst");
+    let dest_dir = out_dir.unwrap_or_else(|| Path::new("."));
+    let archive_path = dest_dir.join(&archive_name);
+    if archive_path.exists() {
+        anyhow::bail!("{} already exists", archive_path.display());
+    }
+    let file = std::fs::File::create(&archive_path)
+        .with_context(|| format!("create {}", archive_path.display()))?;
+    let encoder = zstd::Encoder::new(file, 0)
+        .context("create zstd encoder")?
+        .auto_finish();
+    let mut tar = tar::Builder::new(encoder);
+    tar.follow_symlinks(false);
+    tar.append_dir_all(app_id, dir)
+        .with_context(|| format!("append {} to archive", dir.display()))?;
+    tar.finish().context("finish tar archive")?;
+    println!("bundled: {}", archive_path.display());
+    Ok(())
+}
+
+fn unbundle_package(archive: &Path, out_dir: &Path) -> anyhow::Result<()> {
+    let file =
+        std::fs::File::open(archive).with_context(|| format!("open {}", archive.display()))?;
+    let decoder = zstd::Decoder::new(file).context("create zstd decoder")?;
+    let mut tar = tar::Archive::new(decoder);
+    tar.unpack(out_dir)
+        .with_context(|| format!("unpack to {}", out_dir.display()))?;
+    println!("unbundled: {} -> {}", archive.display(), out_dir.display());
     Ok(())
 }
 
@@ -676,6 +729,42 @@ entry = "ui/index.html"
         let result = check_package(&tmp);
         assert!(result.is_err());
         let _ = fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn bundle_and_unbundle_roundtrip() {
+        use std::fs;
+        let id = format!("bundle_{}", std::process::id());
+        let src = std::env::temp_dir().join(&id);
+        let out = std::env::temp_dir().join(format!("{id}_out"));
+        let ui = src.join("ui");
+        let _ = fs::create_dir_all(&ui);
+        fs::write(src.join("app.wasm"), b"\0asm\x01\0\0\0").unwrap();
+        fs::write(ui.join("index.html"), b"<!DOCTYPE html>").unwrap();
+        let app_id = format!("com.example.b{}", std::process::id());
+        fs::write(
+            src.join("wapp.toml"),
+            format!(
+                "[package]\nid = \"{app_id}\"\nname = \"B\"\nversion = \"1.0.0\"\n\n\
+                 [runtime]\nmodule = \"app.wasm\"\n\n[ui]\nentry = \"ui/index.html\"\n"
+            ),
+        )
+        .unwrap();
+
+        let _ = fs::create_dir_all(&out);
+        bundle_package(&src, Some(&out)).unwrap();
+        let archive = out.join(format!("{app_id}.app.tar.zst"));
+        assert!(archive.exists());
+
+        let unpack = std::env::temp_dir().join(format!("{id}_unpack"));
+        let _ = fs::create_dir_all(&unpack);
+        unbundle_package(&archive, &unpack).unwrap();
+        assert!(unpack.join(&app_id).join("app.wasm").exists());
+        assert!(unpack.join(&app_id).join("ui").join("index.html").exists());
+
+        let _ = fs::remove_dir_all(&src);
+        let _ = fs::remove_dir_all(&out);
+        let _ = fs::remove_dir_all(&unpack);
     }
 
     #[test]
