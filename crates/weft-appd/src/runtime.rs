@@ -281,11 +281,7 @@ pub(crate) async fn supervise(
 
     mount_orch.umount();
 
-    if let Some((ref sock, mut portal_child)) = portal {
-        let _ = portal_child.kill().await;
-        let _ = portal_child.wait().await;
-        let _ = std::fs::remove_file(sock);
-    }
+    kill_portal(portal).await;
 
     {
         let mut reg = registry.lock().await;
