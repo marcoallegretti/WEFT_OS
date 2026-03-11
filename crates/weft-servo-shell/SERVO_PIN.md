@@ -78,16 +78,17 @@ compositor is not yet wired (`RenderingCtx::Egl` blit body is a no-op).
 - **GAP-2**: EGL `WindowRenderingContext` path scaffolded (`WEFT_EGL_RENDERING=1`);
   DMA-BUF export to the Wayland compositor (linux-dmabuf-unstable-v1) not yet wired.
 - **GAP-3**: WebGPU adapter on Mesa may fail CTS — validation task, requires Mesa GPU hardware.
-- **GAP-4**: ~~CSS Grid~~ **Grid resolved** (Taffy-backed, fully wired). CSS `backdrop-filter` is
-  unimplemented (servo/servo issue [#41567](https://github.com/servo/servo/issues/41567)).
-  Implementation requires two changes:
-  1. Enable `backdrop-filter` parsing in `servo/stylo` — the property is disabled at the current
-     stylo pin (`dca3934`); requires a `marcoallegretti/stylo` fork with a `servo-weft` branch,
-     then patch the stylo dep in this fork's `Cargo.toml` via `[patch."https://github.com/servo/stylo"]`.
-  2. Wire the display list in `servo/servo` (this fork): add `backdrop-filter` to
-     `establishes_stacking_context` and `establishes_containing_block_for_all_descendants` in
-     `components/layout/style_ext.rs`, then call `push_backdrop_filter` in
-     `components/layout/display_list/mod.rs`.
+- **GAP-4**: ~~CSS Grid~~ **Grid resolved** (Taffy-backed, fully wired).
+  ~~CSS `backdrop-filter` unimplemented~~ **`backdrop-filter` resolved** (servo/servo issue
+  [#41567](https://github.com/servo/servo/issues/41567)). Implemented across two commits:
+  - `marcoallegretti/stylo` `servo-weft` `f1ba496`: removed `servo_pref = "layout.unimplemented"`
+    from `backdrop-filter` in `style/properties/longhands.toml` (enables parsing).
+  - `marcoallegretti/servo` `servo-weft` `8e7dc40`: `Cargo.toml` patched to use the stylo fork;
+    `style_ext.rs` adds `backdrop-filter` to `establishes_stacking_context` and
+    `establishes_containing_block_for_all_descendants`; `stacking_context.rs` guards the
+    WebRender stacking-context early-return on `backdrop_filter.0.is_empty()`; `display_list/mod.rs`
+    adds `BuilderForBoxFragment::build_backdrop_filter` calling `push_backdrop_filter` before
+    background paint.
 - **GAP-5**: Per-app process isolation — requires Servo multi-process (constellation) architecture.
 
 ## Update policy
