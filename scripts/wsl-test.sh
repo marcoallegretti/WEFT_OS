@@ -35,4 +35,8 @@ echo "==> cargo test -p weft-runtime"
 cargo test -p weft-runtime 2>&1
 
 echo ""
+echo "==> cargo test -p weft-pack"
+cargo test -p weft-pack 2>&1
+
+echo ""
 echo "ALL DONE"
