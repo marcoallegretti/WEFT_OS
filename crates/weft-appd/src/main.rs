@@ -373,4 +373,47 @@ mod tests {
         let reg = SessionRegistry::default();
         assert!(matches!(reg.state(42), AppStateKind::NotFound));
     }
+
+    #[cfg(unix)]
+    #[tokio::test(flavor = "current_thread")]
+    async fn supervisor_transitions_through_ready_to_stopped() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let script =
+            std::env::temp_dir().join(format!("weft_test_runtime_{}.sh", std::process::id()));
+        std::fs::write(&script, "#!/bin/sh\necho READY\n").unwrap();
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        let prior = std::env::var("WEFT_RUNTIME_BIN").ok();
+        // SAFETY: single-threaded test (flavor = "current_thread"); no concurrent env access.
+        unsafe { std::env::set_var("WEFT_RUNTIME_BIN", &script) };
+
+        let registry: Registry = Arc::new(Mutex::new(SessionRegistry::default()));
+        let mut rx = registry.lock().await.subscribe();
+        let session_id = registry.lock().await.launch("test.app");
+
+        runtime::supervise(session_id, "test.app", Arc::clone(&registry))
+            .await
+            .unwrap();
+
+        assert!(matches!(
+            registry.lock().await.state(session_id),
+            AppStateKind::Stopped
+        ));
+
+        let notification = rx.try_recv();
+        assert!(matches!(
+            notification,
+            Ok(Response::AppReady { session_id: sid }) if sid == session_id
+        ));
+
+        let _ = std::fs::remove_file(&script);
+        // SAFETY: single-threaded test; restoring env to prior state.
+        unsafe {
+            match prior {
+                Some(v) => std::env::set_var("WEFT_RUNTIME_BIN", v),
+                None => std::env::remove_var("WEFT_RUNTIME_BIN"),
+            }
+        }
+    }
 }
