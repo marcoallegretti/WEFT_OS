@@ -215,7 +215,7 @@ pub(crate) async fn dispatch(req: Request, registry: &Registry) -> Response {
                     tracing::warn!(session_id, error = %e, "runtime supervisor error");
                 }
             });
-            Response::LaunchAck { session_id }
+            Response::LaunchAck { session_id, app_id }
         }
         Request::TerminateApp { session_id } => {
             let found = registry.lock().await.terminate(session_id);
@@ -274,7 +274,13 @@ mod tests {
         )
         .await;
         match resp {
-            Response::LaunchAck { session_id } => assert!(session_id > 0),
+            Response::LaunchAck {
+                session_id,
+                ref app_id,
+            } => {
+                assert!(session_id > 0);
+                assert_eq!(app_id, "com.test.app");
+            }
             _ => panic!("expected LaunchAck"),
         }
     }
@@ -291,7 +297,7 @@ mod tests {
         )
         .await;
         let session_id = match ack {
-            Response::LaunchAck { session_id } => session_id,
+            Response::LaunchAck { session_id, .. } => session_id,
             _ => panic!("expected LaunchAck"),
         };
         let resp = dispatch(Request::TerminateApp { session_id }, &reg).await;
@@ -354,7 +360,7 @@ mod tests {
         )
         .await;
         let session_id = match ack {
-            Response::LaunchAck { session_id } => session_id,
+            Response::LaunchAck { session_id, .. } => session_id,
             _ => panic!(),
         };
         let resp = dispatch(Request::QueryAppState { session_id }, &reg).await;

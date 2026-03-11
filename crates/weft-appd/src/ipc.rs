@@ -21,6 +21,7 @@ pub struct SessionInfo {
 pub enum Response {
     LaunchAck {
         session_id: u64,
+        app_id: String,
     },
     AppReady {
         session_id: u64,
@@ -98,11 +99,17 @@ mod tests {
 
     #[test]
     fn response_msgpack_roundtrip() {
-        let resp = Response::LaunchAck { session_id: 7 };
+        let resp = Response::LaunchAck {
+            session_id: 7,
+            app_id: "com.example.app".into(),
+        };
         let bytes = rmp_serde::to_vec(&resp).unwrap();
         let decoded: Response = rmp_serde::from_slice(&bytes).unwrap();
         match decoded {
-            Response::LaunchAck { session_id } => assert_eq!(session_id, 7),
+            Response::LaunchAck { session_id, app_id } => {
+                assert_eq!(session_id, 7);
+                assert_eq!(app_id, "com.example.app");
+            }
             _ => panic!("wrong variant"),
         }
     }
