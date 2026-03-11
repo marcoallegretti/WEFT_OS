@@ -1007,4 +1007,42 @@ entry = "ui/index.html"
                 .any(|p| p == &PathBuf::from("/usr/share/weft/apps"))
         );
     }
+
+    fn make_valid_package(dir: &std::path::Path, id: &str, caps: &str) {
+        use std::fs;
+        let ui = dir.join("ui");
+        let _ = fs::create_dir_all(&ui);
+        fs::write(dir.join("app.wasm"), b"\0asm\x01\0\0\0").unwrap();
+        fs::write(ui.join("index.html"), b"").unwrap();
+        fs::write(
+            dir.join("wapp.toml"),
+            format!(
+                "[package]\nid = \"{id}\"\nname = \"T\"\nversion = \"0.1.0\"\n{caps}\n\
+                 [runtime]\nmodule = \"app.wasm\"\n[ui]\nentry = \"ui/index.html\"\n"
+            ),
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn check_package_unknown_capability_errors() {
+        let tmp = std::env::temp_dir().join(format!("weft_pack_caps_bad_{}", std::process::id()));
+        make_valid_package(&tmp, "com.example.caps", "capabilities = [\"network:tcp\"]");
+        let result = check_package(&tmp);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("network:tcp"));
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn check_package_known_capabilities_accepted() {
+        let tmp = std::env::temp_dir().join(format!("weft_pack_caps_ok_{}", std::process::id()));
+        make_valid_package(
+            &tmp,
+            "com.example.caps",
+            "capabilities = [\"fs:rw:app-data\", \"fs:read:xdg-documents\"]",
+        );
+        assert!(check_package(&tmp).is_ok());
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
 }
