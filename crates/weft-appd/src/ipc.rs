@@ -177,6 +177,48 @@ mod tests {
         }
     }
 
+    #[test]
+    fn terminate_app_request_roundtrip() {
+        let req = Request::TerminateApp { session_id: 42 };
+        let bytes = rmp_serde::to_vec(&req).unwrap();
+        let decoded: Request = rmp_serde::from_slice(&bytes).unwrap();
+        assert!(matches!(decoded, Request::TerminateApp { session_id: 42 }));
+    }
+
+    #[test]
+    fn error_response_roundtrip() {
+        let resp = Response::Error {
+            code: 1,
+            message: "not found".into(),
+        };
+        let bytes = rmp_serde::to_vec(&resp).unwrap();
+        let decoded: Response = rmp_serde::from_slice(&bytes).unwrap();
+        match decoded {
+            Response::Error { code, message } => {
+                assert_eq!(code, 1);
+                assert_eq!(message, "not found");
+            }
+            _ => panic!("wrong variant"),
+        }
+    }
+
+    #[test]
+    fn app_state_response_roundtrip() {
+        let resp = Response::AppState {
+            session_id: 5,
+            state: super::AppStateKind::Running,
+        };
+        let bytes = rmp_serde::to_vec(&resp).unwrap();
+        let decoded: Response = rmp_serde::from_slice(&bytes).unwrap();
+        assert!(matches!(
+            decoded,
+            Response::AppState {
+                session_id: 5,
+                state: super::AppStateKind::Running
+            }
+        ));
+    }
+
     #[tokio::test]
     async fn frame_write_read_roundtrip() {
         let resp = Response::RunningApps { sessions: vec![] };
