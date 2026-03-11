@@ -256,6 +256,7 @@
 
         ws.addEventListener('open', function () {
           wsReconnectDelay = 1000;
+          document.querySelectorAll('weft-taskbar-app').forEach(function (el) { el.remove(); });
           ws.send(JSON.stringify({ type: 'QUERY_RUNNING' }));
           ws.send(JSON.stringify({ type: 'QUERY_INSTALLED_APPS' }));
         });
