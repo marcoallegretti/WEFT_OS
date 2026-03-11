@@ -31,4 +31,8 @@ echo "==> cargo test -p weft-appd"
 cargo test -p weft-appd 2>&1
 
 echo ""
+echo "==> cargo test -p weft-runtime"
+cargo test -p weft-runtime 2>&1
+
+echo ""
 echo "ALL DONE"

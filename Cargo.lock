@@ -2430,6 +2430,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "weft-runtime"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "weft-servo-shell"
 version = "0.1.0"
 dependencies = [
