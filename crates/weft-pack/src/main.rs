@@ -328,6 +328,61 @@ mod tests {
     }
 
     #[test]
+    fn check_package_missing_wasm() {
+        use std::fs;
+        let tmp = std::env::temp_dir().join("weft_pack_test_no_wasm");
+        let ui_dir = tmp.join("ui");
+        let _ = fs::create_dir_all(&ui_dir);
+        fs::write(ui_dir.join("index.html"), b"").unwrap();
+        fs::write(
+            tmp.join("wapp.toml"),
+            r#"
+[package]
+id = "com.example.nowasm"
+name = "No Wasm"
+version = "0.1.0"
+
+[runtime]
+module = "app.wasm"
+
+[ui]
+entry = "ui/index.html"
+"#,
+        )
+        .unwrap();
+        let result = check_package(&tmp);
+        assert!(result.is_err());
+        let _ = fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn check_package_missing_ui_entry() {
+        use std::fs;
+        let tmp = std::env::temp_dir().join("weft_pack_test_no_ui");
+        let _ = fs::create_dir_all(&tmp);
+        fs::write(tmp.join("app.wasm"), b"\0asm\x01\0\0\0").unwrap();
+        fs::write(
+            tmp.join("wapp.toml"),
+            r#"
+[package]
+id = "com.example.noui"
+name = "No UI"
+version = "0.1.0"
+
+[runtime]
+module = "app.wasm"
+
+[ui]
+entry = "ui/index.html"
+"#,
+        )
+        .unwrap();
+        let result = check_package(&tmp);
+        assert!(result.is_err());
+        let _ = fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
     fn check_package_valid() {
         use std::fs;
         let tmp = std::env::temp_dir().join("weft_pack_test_valid");
