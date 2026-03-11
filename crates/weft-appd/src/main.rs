@@ -454,6 +454,19 @@ mod tests {
         ));
     }
 
+    #[tokio::test]
+    async fn dispatch_query_app_state_unknown_returns_not_found() {
+        let reg = make_registry();
+        let resp = dispatch(Request::QueryAppState { session_id: 9999 }, &reg).await;
+        assert!(matches!(
+            resp,
+            Response::AppState {
+                state: AppStateKind::NotFound,
+                ..
+            }
+        ));
+    }
+
     #[test]
     fn registry_launch_increments_id() {
         let mut reg = SessionRegistry::default();
