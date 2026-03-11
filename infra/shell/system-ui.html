@@ -301,6 +301,8 @@
           });
         } else if (msg.type === 'LAUNCH_ACK') {
           ensureTaskbarEntry(msg.session_id, msg.app_id || null);
+        } else if (msg.type === 'ERROR') {
+          console.warn('appd error', msg.code, msg.message);
         }
       }
 
