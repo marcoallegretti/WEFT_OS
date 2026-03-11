@@ -1,6 +1,5 @@
 use std::time::Duration;
 
-use anyhow::Context;
 use tokio::io::{AsyncBufReadExt, BufReader};
 
 use crate::Registry;
@@ -22,14 +21,26 @@ pub(crate) async fn supervise(
         }
     };
 
-    let mut child = tokio::process::Command::new(&bin)
+    let mut child = match tokio::process::Command::new(&bin)
         .arg(app_id)
         .arg(session_id.to_string())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
         .stdin(std::process::Stdio::null())
         .spawn()
-        .with_context(|| format!("spawn {bin}"))?;
+    {
+        Ok(c) => c,
+        Err(e) => {
+            tracing::warn!(session_id, %app_id, error = %e, "failed to spawn runtime; marking session stopped");
+            let mut reg = registry.lock().await;
+            reg.set_state(session_id, AppStateKind::Stopped);
+            let _ = reg.broadcast().send(Response::AppState {
+                session_id,
+                state: AppStateKind::Stopped,
+            });
+            return Ok(());
+        }
+    };
 
     let stdout = child.stdout.take().expect("stdout piped");
     let stderr = child.stderr.take().expect("stderr piped");
