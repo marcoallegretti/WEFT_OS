@@ -165,6 +165,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9d297deb1925b89f2ccc13d7635fa0714f12c87adce1c75356b39ca9b7178567"
 
 [[package]]
+name = "base64"
+version = "0.22.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "72b3254f16251a8381aa12e40e3c4d2f0199f8c6508fbecb9d91f575e0fbb8c6"
+
+[[package]]
 name = "base64ct"
 version = "1.8.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3542,7 +3548,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7a5d75ac36ee28647f6d871a93eefc7edcb729c3096590031ba50857fac44fa8"
 dependencies = [
  "anyhow",
- "base64",
+ "base64 0.21.7",
  "directories-next",
  "log",
  "postcard",
@@ -4004,6 +4010,16 @@ dependencies = [
  "wayland-scanner",
  "wayland-server",
  "weft-ipc-types",
+]
+
+[[package]]
+name = "weft-file-portal"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "base64 0.22.1",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]

@@ -1,0 +1,15 @@
+[package]
+name = "weft-file-portal"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[[bin]]
+name = "weft-file-portal"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = "1.0"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+base64 = "0.22"
