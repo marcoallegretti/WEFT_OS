@@ -225,6 +225,9 @@
         var launcher = document.getElementById('launcher');
         if (launcher.hasAttribute('hidden')) {
           launcher.removeAttribute('hidden');
+          if (ws && ws.readyState === WebSocket.OPEN) {
+            ws.send(JSON.stringify({ type: 'QUERY_INSTALLED_APPS' }));
+          }
         } else {
           launcher.setAttribute('hidden', '');
         }
