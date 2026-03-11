@@ -9,13 +9,18 @@ mod ipc;
 mod runtime;
 mod ws;
 
-use ipc::{AppStateKind, Request, Response};
+use ipc::{AppStateKind, Request, Response, SessionInfo};
 
 pub(crate) type Registry = Arc<Mutex<SessionRegistry>>;
 
+struct SessionEntry {
+    app_id: String,
+    state: AppStateKind,
+}
+
 struct SessionRegistry {
     next_id: u64,
-    sessions: std::collections::HashMap<u64, AppStateKind>,
+    sessions: std::collections::HashMap<u64, SessionEntry>,
     broadcast: tokio::sync::broadcast::Sender<Response>,
     abort_senders: std::collections::HashMap<u64, tokio::sync::oneshot::Sender<()>>,
 }
@@ -33,10 +38,16 @@ impl Default for SessionRegistry {
 }
 
 impl SessionRegistry {
-    fn launch(&mut self, _app_id: &str) -> u64 {
+    fn launch(&mut self, app_id: &str) -> u64 {
         self.next_id += 1;
         let id = self.next_id;
-        self.sessions.insert(id, AppStateKind::Starting);
+        self.sessions.insert(
+            id,
+            SessionEntry {
+                app_id: app_id.to_owned(),
+                state: AppStateKind::Starting,
+            },
+        );
         id
     }
 
@@ -52,20 +63,26 @@ impl SessionRegistry {
         rx
     }
 
-    fn running_ids(&self) -> Vec<u64> {
-        self.sessions.keys().copied().collect()
+    fn running_sessions(&self) -> Vec<SessionInfo> {
+        self.sessions
+            .iter()
+            .map(|(&session_id, e)| SessionInfo {
+                session_id,
+                app_id: e.app_id.clone(),
+            })
+            .collect()
     }
 
     fn state(&self, session_id: u64) -> AppStateKind {
         self.sessions
             .get(&session_id)
-            .cloned()
+            .map(|e| e.state.clone())
             .unwrap_or(AppStateKind::NotFound)
     }
 
     pub(crate) fn set_state(&mut self, session_id: u64, state: AppStateKind) {
         if let Some(entry) = self.sessions.get_mut(&session_id) {
-            *entry = state;
+            entry.state = state;
         }
     }
 
@@ -216,8 +233,8 @@ pub(crate) async fn dispatch(req: Request, registry: &Registry) -> Response {
             }
         }
         Request::QueryRunning => {
-            let session_ids = registry.lock().await.running_ids();
-            Response::RunningApps { session_ids }
+            let sessions = registry.lock().await.running_sessions();
+            Response::RunningApps { sessions }
         }
         Request::QueryAppState { session_id } => {
             let state = registry.lock().await.state(session_id);
@@ -315,7 +332,12 @@ mod tests {
         .await;
         let resp = dispatch(Request::QueryRunning, &reg).await;
         match resp {
-            Response::RunningApps { session_ids } => assert_eq!(session_ids.len(), 2),
+            Response::RunningApps { sessions } => {
+                assert_eq!(sessions.len(), 2);
+                let mut ids: Vec<&str> = sessions.iter().map(|s| s.app_id.as_str()).collect();
+                ids.sort();
+                assert_eq!(ids, vec!["a", "b"]);
+            }
             _ => panic!("expected RunningApps"),
         }
     }
@@ -368,15 +390,20 @@ mod tests {
     }
 
     #[test]
-    fn registry_running_ids_reflects_live_sessions() {
+    fn registry_running_sessions_reflects_live_sessions() {
         let mut reg = SessionRegistry::default();
-        let id1 = reg.launch("a");
-        let id2 = reg.launch("b");
-        let mut ids = reg.running_ids();
-        ids.sort();
-        assert_eq!(ids, vec![id1, id2]);
+        let id1 = reg.launch("com.example.a");
+        let id2 = reg.launch("com.example.b");
+        let mut sessions = reg.running_sessions();
+        sessions.sort_by_key(|s| s.session_id);
+        assert_eq!(sessions.len(), 2);
+        assert_eq!(sessions[0].session_id, id1);
+        assert_eq!(sessions[0].app_id, "com.example.a");
+        assert_eq!(sessions[1].session_id, id2);
+        assert_eq!(sessions[1].app_id, "com.example.b");
         reg.terminate(id1);
-        assert_eq!(reg.running_ids(), vec![id2]);
+        assert_eq!(reg.running_sessions().len(), 1);
+        assert_eq!(reg.running_sessions()[0].session_id, id2);
     }
 
     #[test]

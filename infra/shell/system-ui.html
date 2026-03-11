@@ -208,23 +208,25 @@
             removeTaskbarEntry(msg.session_id);
           }
         } else if (msg.type === 'RUNNING_APPS') {
-          msg.session_ids.forEach(function (id) {
-            ensureTaskbarEntry(id);
+          msg.sessions.forEach(function (s) {
+            ensureTaskbarEntry(s.session_id, s.app_id);
           });
         } else if (msg.type === 'LAUNCH_ACK') {
-          ensureTaskbarEntry(msg.session_id);
+          ensureTaskbarEntry(msg.session_id, null);
         }
       }
 
-      function ensureTaskbarEntry(sessionId) {
+      function ensureTaskbarEntry(sessionId, appId) {
         var id = 'task-' + sessionId;
         if (document.getElementById(id)) { return; }
+        var label = appId ? appId.split('.').pop() : String(sessionId);
         var el = document.createElement('weft-taskbar-app');
         el.id = id;
         el.dataset.sessionId = sessionId;
-        el.textContent = '● ' + sessionId;
+        if (appId) { el.dataset.appId = appId; }
+        el.textContent = '● ' + label;
         el.style.cssText = 'font-size:12px;color:var(--text-secondary);padding:0 6px;cursor:pointer;';
-        el.title = 'Session ' + sessionId;
+        el.title = appId ? appId + ' (session ' + sessionId + ')' : 'Session ' + sessionId;
         var taskbar = document.querySelector('weft-taskbar');
         var clock = document.getElementById('clock');
         taskbar.insertBefore(el, clock);

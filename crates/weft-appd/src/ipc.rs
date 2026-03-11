@@ -11,6 +11,12 @@ pub enum Request {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SessionInfo {
+    pub session_id: u64,
+    pub app_id: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "SCREAMING_SNAKE_CASE")]
 pub enum Response {
     LaunchAck {
@@ -20,7 +26,7 @@ pub enum Response {
         session_id: u64,
     },
     RunningApps {
-        session_ids: Vec<u64>,
+        sessions: Vec<SessionInfo>,
     },
     AppState {
         session_id: u64,
@@ -101,11 +107,21 @@ mod tests {
         }
     }
 
+    #[test]
+    fn session_info_roundtrip() {
+        let info = super::SessionInfo {
+            session_id: 3,
+            app_id: "com.example.app".into(),
+        };
+        let bytes = rmp_serde::to_vec(&info).unwrap();
+        let decoded: super::SessionInfo = rmp_serde::from_slice(&bytes).unwrap();
+        assert_eq!(decoded.session_id, 3);
+        assert_eq!(decoded.app_id, "com.example.app");
+    }
+
     #[tokio::test]
     async fn frame_write_read_roundtrip() {
-        let resp = Response::RunningApps {
-            session_ids: vec![1, 2, 3],
-        };
+        let resp = Response::RunningApps { sessions: vec![] };
         let mut buf: Vec<u8> = Vec::new();
         write_frame(&mut buf, &resp).await.unwrap();
 
