@@ -343,6 +343,42 @@ mod tests {
         Arc::new(Mutex::new(SessionRegistry::default()))
     }
 
+    #[test]
+    fn appd_socket_path_uses_override_env() {
+        let prior = std::env::var("WEFT_APPD_SOCKET").ok();
+        unsafe { std::env::set_var("WEFT_APPD_SOCKET", "/tmp/custom.sock") };
+        let path = appd_socket_path().unwrap();
+        unsafe {
+            match prior {
+                Some(v) => std::env::set_var("WEFT_APPD_SOCKET", v),
+                None => std::env::remove_var("WEFT_APPD_SOCKET"),
+            }
+        }
+        assert_eq!(path, PathBuf::from("/tmp/custom.sock"));
+    }
+
+    #[test]
+    fn appd_socket_path_errors_without_xdg_and_no_override() {
+        let prior_sock = std::env::var("WEFT_APPD_SOCKET").ok();
+        let prior_xdg = std::env::var("XDG_RUNTIME_DIR").ok();
+        unsafe {
+            std::env::remove_var("WEFT_APPD_SOCKET");
+            std::env::remove_var("XDG_RUNTIME_DIR");
+        }
+        let result = appd_socket_path();
+        unsafe {
+            match prior_sock {
+                Some(v) => std::env::set_var("WEFT_APPD_SOCKET", v),
+                None => {}
+            }
+            match prior_xdg {
+                Some(v) => std::env::set_var("XDG_RUNTIME_DIR", v),
+                None => {}
+            }
+        }
+        assert!(result.is_err());
+    }
+
     #[tokio::test]
     async fn dispatch_launch_returns_ack() {
         let reg = make_registry();

@@ -28,7 +28,7 @@ cargo test -p weft-compositor 2>&1
 
 echo ""
 echo "==> cargo test -p weft-appd"
-cargo test -p weft-appd 2>&1
+cargo test -p weft-appd -- --test-threads=1 2>&1
 
 echo ""
 echo "==> cargo test -p weft-runtime"
