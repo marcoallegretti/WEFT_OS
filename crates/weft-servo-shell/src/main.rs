@@ -5,6 +5,7 @@ use anyhow::Context;
 #[cfg(feature = "servo-embed")]
 mod embedder;
 mod protocols;
+mod shell_client;
 
 fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt()
@@ -28,6 +29,17 @@ fn run() -> anyhow::Result<()> {
 
     let ws_port = appd_ws_port();
     tracing::info!(ws_port, "appd WebSocket port");
+
+    let _shell = match shell_client::ShellClient::connect() {
+        Ok(c) => {
+            tracing::info!("shell window registered with compositor");
+            Some(c)
+        }
+        Err(e) => {
+            tracing::warn!(error = %e, "shell protocol unavailable; continuing without compositor registration");
+            None
+        }
+    };
 
     embed_servo(&wayland_display, &html_path, ws_port)
 }
