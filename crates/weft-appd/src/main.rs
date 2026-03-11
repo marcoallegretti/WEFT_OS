@@ -6,16 +6,28 @@ use tokio::io::AsyncWriteExt;
 use tokio::sync::Mutex;
 
 mod ipc;
+mod runtime;
 mod ws;
 
 use ipc::{AppStateKind, Request, Response};
 
 pub(crate) type Registry = Arc<Mutex<SessionRegistry>>;
 
-#[derive(Default)]
 struct SessionRegistry {
     next_id: u64,
     sessions: std::collections::HashMap<u64, AppStateKind>,
+    broadcast: tokio::sync::broadcast::Sender<Response>,
+}
+
+impl Default for SessionRegistry {
+    fn default() -> Self {
+        let (broadcast, _) = tokio::sync::broadcast::channel(16);
+        Self {
+            next_id: 0,
+            sessions: std::collections::HashMap::new(),
+            broadcast,
+        }
+    }
 }
 
 impl SessionRegistry {
@@ -39,6 +51,20 @@ impl SessionRegistry {
             .get(&session_id)
             .cloned()
             .unwrap_or(AppStateKind::NotFound)
+    }
+
+    pub(crate) fn set_state(&mut self, session_id: u64, state: AppStateKind) {
+        if let Some(entry) = self.sessions.get_mut(&session_id) {
+            *entry = state;
+        }
+    }
+
+    pub(crate) fn subscribe(&self) -> tokio::sync::broadcast::Receiver<Response> {
+        self.broadcast.subscribe()
+    }
+
+    pub(crate) fn broadcast(&self) -> &tokio::sync::broadcast::Sender<Response> {
+        &self.broadcast
     }
 }
 
@@ -67,7 +93,6 @@ async fn run() -> anyhow::Result<()> {
     tracing::info!(path = %socket_path.display(), "IPC socket listening");
 
     let registry: Registry = Arc::new(Mutex::new(SessionRegistry::default()));
-    let (broadcast_tx, _) = tokio::sync::broadcast::channel::<Response>(16);
 
     let ws_port = ws_port();
     let ws_addr: std::net::SocketAddr = format!("127.0.0.1:{ws_port}").parse()?;
@@ -95,7 +120,7 @@ async fn run() -> anyhow::Result<()> {
             result = ws_listener.accept() => {
                 let (stream, _) = result.context("ws accept")?;
                 let reg = Arc::clone(&registry);
-                let rx = broadcast_tx.subscribe();
+                let rx = registry.lock().await.subscribe();
                 tokio::spawn(async move {
                     if let Err(e) = ws::handle_ws_connection(stream, reg, rx).await {
                         tracing::warn!(error = %e, "ws connection error");
@@ -155,6 +180,13 @@ pub(crate) async fn dispatch(req: Request, registry: &Registry) -> Response {
         } => {
             let session_id = registry.lock().await.launch(&app_id);
             tracing::info!(session_id, %app_id, "launched");
+            let reg = Arc::clone(registry);
+            let aid = app_id.clone();
+            tokio::spawn(async move {
+                if let Err(e) = runtime::supervise(session_id, &aid, reg).await {
+                    tracing::warn!(session_id, error = %e, "runtime supervisor error");
+                }
+            });
             Response::LaunchAck { session_id }
         }
         Request::TerminateApp { session_id } => {
