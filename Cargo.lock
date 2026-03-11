@@ -2274,8 +2274,12 @@ name = "weft-servo-shell"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "bitflags 2.11.0",
  "tracing",
  "tracing-subscriber",
+ "wayland-backend",
+ "wayland-client",
+ "wayland-scanner",
 ]
 
 [[package]]

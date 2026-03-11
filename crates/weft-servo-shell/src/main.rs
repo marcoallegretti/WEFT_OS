@@ -2,6 +2,8 @@ use std::path::PathBuf;
 
 use anyhow::Context;
 
+mod protocols;
+
 fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(
