@@ -132,7 +132,9 @@ async fn run() -> anyhow::Result<()> {
         .with_context(|| format!("bind WebSocket {ws_addr}"))?;
     let ws_bound_port = ws_listener.local_addr()?.port();
     tracing::info!(port = ws_bound_port, "WebSocket listener ready");
-    write_ws_port(ws_bound_port)?;
+    if let Err(e) = write_ws_port(ws_bound_port) {
+        tracing::warn!(error = %e, "could not write appd.wsport; servo-shell port discovery will fall back to default");
+    }
 
     let _ = sd_notify::notify(false, &[sd_notify::NotifyState::Ready]);
 
@@ -196,9 +198,9 @@ fn write_ws_port(port: u16) -> anyhow::Result<()> {
     let runtime_dir = std::env::var("XDG_RUNTIME_DIR").context("XDG_RUNTIME_DIR not set")?;
     let path = PathBuf::from(runtime_dir).join("weft/appd.wsport");
     if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)?;
+        std::fs::create_dir_all(parent).with_context(|| format!("create {}", parent.display()))?;
     }
-    std::fs::write(&path, port.to_string())?;
+    std::fs::write(&path, port.to_string()).with_context(|| format!("write {}", path.display()))?;
     Ok(())
 }
 
