@@ -50,6 +50,9 @@ fn main() -> anyhow::Result<()> {
         i += 1;
     }
 
+    #[cfg(feature = "seccomp")]
+    apply_seccomp_filter().context("apply seccomp filter")?;
+
     tracing::info!(session_id, %app_id, "weft-runtime starting");
 
     let pkg_dir = resolve_package(app_id)?;
@@ -166,6 +169,59 @@ fn run_module(
         .call_run(&mut store)
         .context("call run")?
         .map_err(|()| anyhow::anyhow!("wasm component run exited with error"))
+}
+
+#[cfg(feature = "seccomp")]
+fn apply_seccomp_filter() -> anyhow::Result<()> {
+    use seccompiler::{BpfProgram, SeccompAction, SeccompFilter, SeccompRule};
+    use std::collections::BTreeMap;
+    use std::convert::TryInto;
+
+    #[cfg(target_arch = "x86_64")]
+    let arch = seccompiler::TargetArch::x86_64;
+    #[cfg(target_arch = "aarch64")]
+    let arch = seccompiler::TargetArch::aarch64;
+
+    let blocked: &[i64] = &[
+        libc::SYS_ptrace,
+        libc::SYS_process_vm_readv,
+        libc::SYS_process_vm_writev,
+        libc::SYS_kexec_load,
+        libc::SYS_personality,
+        libc::SYS_syslog,
+        libc::SYS_reboot,
+        libc::SYS_mount,
+        libc::SYS_umount2,
+        libc::SYS_setuid,
+        libc::SYS_setgid,
+        libc::SYS_setreuid,
+        libc::SYS_setregid,
+        libc::SYS_setresuid,
+        libc::SYS_setresgid,
+        libc::SYS_chroot,
+        libc::SYS_pivot_root,
+        libc::SYS_init_module,
+        libc::SYS_finit_module,
+        libc::SYS_delete_module,
+        libc::SYS_bpf,
+        libc::SYS_perf_event_open,
+        libc::SYS_acct,
+    ];
+
+    let mut rules: BTreeMap<i64, Vec<SeccompRule>> = BTreeMap::new();
+    for &syscall in blocked {
+        rules.insert(syscall, vec![SeccompRule::new(vec![])?]);
+    }
+
+    let filter = SeccompFilter::new(
+        rules,
+        SeccompAction::Allow,
+        SeccompAction::KillProcess,
+        arch,
+    )?;
+    let bpf: BpfProgram = filter.try_into()?;
+    seccompiler::apply_filter(&bpf)?;
+    Ok(())
 }
 
 fn package_store_roots() -> Vec<PathBuf> {
