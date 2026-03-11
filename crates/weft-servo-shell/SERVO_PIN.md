@@ -66,7 +66,8 @@ context once the Wayland surface pipeline is stable.
 
 ## Known gaps at this pin
 
-- **GAP-1**: Wayland input events not forwarded to Servo (keyboard/pointer stubs)
+- **GAP-1**: ~~Wayland input events not forwarded to Servo~~ **Resolved** — keyboard and
+  mouse events forwarded via `webview.notify_input_event`; key mapping in `keyutils.rs`.
 - **GAP-2**: DMA-BUF surface export not implemented (software blit only)
 - **GAP-3**: WebGPU adapter on Mesa may fail CTS
 - **GAP-4**: CSS `backdrop-filter` and CSS Grid have partial coverage
