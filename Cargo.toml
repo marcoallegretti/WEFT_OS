@@ -3,6 +3,7 @@ members = [
     "crates/weft-appd",
     "crates/weft-build-meta",
     "crates/weft-compositor",
+    "crates/weft-ipc-types",
     "crates/weft-pack",
     "crates/weft-runtime",
     "crates/weft-servo-shell",
