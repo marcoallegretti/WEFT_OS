@@ -12,12 +12,43 @@ fn main() -> anyhow::Result<()> {
 
     let args: Vec<String> = std::env::args().collect();
     if args.len() < 3 {
-        anyhow::bail!("usage: weft-runtime <app_id> <session_id>");
+        anyhow::bail!(
+            "usage: weft-runtime <app_id> <session_id> \
+             [--preopen HOST::GUEST]... [--ipc-socket PATH]"
+        );
     }
     let app_id = &args[1];
     let session_id: u64 = args[2]
         .parse()
         .with_context(|| format!("invalid session_id: {}", args[2]))?;
+
+    let mut preopen: Vec<(String, String)> = Vec::new();
+    let mut ipc_socket: Option<String> = None;
+
+    let mut i = 3usize;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--preopen" => {
+                i += 1;
+                let spec = args.get(i).context("--preopen requires an argument")?;
+                if let Some((host, guest)) = spec.split_once("::") {
+                    preopen.push((host.to_string(), guest.to_string()));
+                } else {
+                    preopen.push((spec.clone(), spec.clone()));
+                }
+            }
+            "--ipc-socket" => {
+                i += 1;
+                ipc_socket = Some(
+                    args.get(i)
+                        .context("--ipc-socket requires an argument")?
+                        .clone(),
+                );
+            }
+            other => anyhow::bail!("unexpected argument: {other}"),
+        }
+        i += 1;
+    }
 
     tracing::info!(session_id, %app_id, "weft-runtime starting");
 
@@ -30,7 +61,7 @@ fn main() -> anyhow::Result<()> {
     }
 
     tracing::info!(session_id, %app_id, wasm = %wasm_path.display(), "executing module");
-    run_module(&wasm_path)?;
+    run_module(&wasm_path, &preopen, ipc_socket.as_deref())?;
 
     tracing::info!(session_id, %app_id, "exiting");
     Ok(())
@@ -48,19 +79,28 @@ fn resolve_package(app_id: &str) -> anyhow::Result<PathBuf> {
 }
 
 #[cfg(not(feature = "wasmtime-runtime"))]
-fn run_module(_wasm_path: &std::path::Path) -> anyhow::Result<()> {
+fn run_module(
+    _wasm_path: &std::path::Path,
+    _preopen: &[(String, String)],
+    _ipc_socket: Option<&str>,
+) -> anyhow::Result<()> {
     println!("READY");
     Ok(())
 }
 
 #[cfg(feature = "wasmtime-runtime")]
-fn run_module(wasm_path: &std::path::Path) -> anyhow::Result<()> {
+fn run_module(
+    wasm_path: &std::path::Path,
+    preopen: &[(String, String)],
+    ipc_socket: Option<&str>,
+) -> anyhow::Result<()> {
+    use cap_std::{ambient_authority, fs::Dir};
     use wasmtime::{
         Config, Engine, Store,
         component::{Component, Linker},
     };
     use wasmtime_wasi::{
-        ResourceTable, WasiCtx, WasiCtxBuilder, WasiView, add_to_linker_sync,
+        DirPerms, FilePerms, ResourceTable, WasiCtx, WasiCtxBuilder, WasiView, add_to_linker_sync,
         bindings::sync::Command,
     };
 
@@ -88,10 +128,20 @@ fn run_module(wasm_path: &std::path::Path) -> anyhow::Result<()> {
     let mut linker: Linker<State> = Linker::new(&engine);
     add_to_linker_sync(&mut linker).context("add WASI to linker")?;
 
-    let ctx = WasiCtxBuilder::new()
-        .inherit_stdout()
-        .inherit_stderr()
-        .build();
+    let mut ctx_builder = WasiCtxBuilder::new();
+    ctx_builder.inherit_stdout().inherit_stderr();
+
+    if let Some(socket_path) = ipc_socket {
+        ctx_builder.env("WEFT_IPC_SOCKET", socket_path);
+    }
+
+    for (host_path, guest_path) in preopen {
+        let dir = Dir::open_ambient_dir(host_path, ambient_authority())
+            .with_context(|| format!("open preopen dir {host_path}"))?;
+        ctx_builder.preopened_dir(dir, DirPerms::all(), FilePerms::all(), guest_path);
+    }
+
+    let ctx = ctx_builder.build();
     let mut store = Store::new(
         &engine,
         State {

@@ -25,6 +25,7 @@ struct SessionRegistry {
     broadcast: tokio::sync::broadcast::Sender<Response>,
     abort_senders: std::collections::HashMap<u64, tokio::sync::oneshot::Sender<()>>,
     compositor_tx: Option<compositor_client::CompositorSender>,
+    ipc_socket: Option<PathBuf>,
 }
 
 impl Default for SessionRegistry {
@@ -36,6 +37,7 @@ impl Default for SessionRegistry {
             broadcast,
             abort_senders: std::collections::HashMap::new(),
             compositor_tx: None,
+            ipc_socket: None,
         }
     }
 }
@@ -128,6 +130,7 @@ async fn run() -> anyhow::Result<()> {
     tracing::info!(path = %socket_path.display(), "IPC socket listening");
 
     let registry: Registry = Arc::new(Mutex::new(SessionRegistry::default()));
+    registry.lock().await.ipc_socket = Some(socket_path.clone());
 
     if let Some(path) = compositor_client::socket_path() {
         let tx = compositor_client::spawn(path);
@@ -240,11 +243,13 @@ pub(crate) async fn dispatch(req: Request, registry: &Registry) -> Response {
             tracing::info!(session_id, %app_id, "launched");
             let abort_rx = registry.lock().await.register_abort(session_id);
             let compositor_tx = registry.lock().await.compositor_tx.clone();
+            let ipc_socket = registry.lock().await.ipc_socket.clone();
             let reg = Arc::clone(registry);
             let aid = app_id.clone();
             tokio::spawn(async move {
                 if let Err(e) =
-                    runtime::supervise(session_id, &aid, reg, abort_rx, compositor_tx).await
+                    runtime::supervise(session_id, &aid, reg, abort_rx, compositor_tx, ipc_socket)
+                        .await
                 {
                     tracing::warn!(session_id, error = %e, "runtime supervisor error");
                 }
@@ -664,6 +669,7 @@ mod tests {
             Arc::clone(&registry),
             abort_rx,
             None,
+            None,
         )
         .await
         .unwrap();
@@ -721,6 +727,7 @@ mod tests {
             Arc::clone(&registry),
             abort_rx,
             None,
+            None,
         )
         .await
         .unwrap();
@@ -766,6 +773,7 @@ mod tests {
             "test.spawn.fail",
             Arc::clone(&registry),
             abort_rx,
+            None,
             None,
         )
         .await

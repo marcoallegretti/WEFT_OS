@@ -15,6 +15,7 @@ pub(crate) async fn supervise(
     registry: Registry,
     abort_rx: tokio::sync::oneshot::Receiver<()>,
     compositor_tx: Option<CompositorSender>,
+    ipc_socket_path: Option<std::path::PathBuf>,
 ) -> anyhow::Result<()> {
     let mut abort_rx = abort_rx;
     let bin = match std::env::var("WEFT_RUNTIME_BIN") {
@@ -25,14 +26,18 @@ pub(crate) async fn supervise(
         }
     };
 
-    let mut child = match tokio::process::Command::new(&bin)
-        .arg(app_id)
+    let mut cmd = tokio::process::Command::new(&bin);
+    cmd.arg(app_id)
         .arg(session_id.to_string())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
-        .stdin(std::process::Stdio::null())
-        .spawn()
-    {
+        .stdin(std::process::Stdio::null());
+
+    if let Some(ref sock) = ipc_socket_path {
+        cmd.arg("--ipc-socket").arg(sock);
+    }
+
+    let mut child = match cmd.spawn() {
         Ok(c) => c,
         Err(e) => {
             tracing::warn!(session_id, %app_id, error = %e, "failed to spawn runtime; marking session stopped");
