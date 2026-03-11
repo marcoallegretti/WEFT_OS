@@ -74,11 +74,27 @@ fn parse_allowed(args: &[String]) -> Vec<PathBuf> {
     allowed
 }
 
+fn normalize_path(path: &Path) -> PathBuf {
+    use std::path::Component;
+    let mut out = PathBuf::new();
+    for c in path.components() {
+        match c {
+            Component::ParentDir => {
+                out.pop();
+            }
+            Component::CurDir => {}
+            other => out.push(other),
+        }
+    }
+    out
+}
+
 fn is_allowed(path: &Path, allowed: &[PathBuf]) -> bool {
     if allowed.is_empty() {
         return false;
     }
-    allowed.iter().any(|a| path.starts_with(a))
+    let norm = normalize_path(path);
+    allowed.iter().any(|a| norm.starts_with(a))
 }
 
 fn handle_connection(stream: UnixStream, allowed: &[PathBuf]) {
@@ -189,6 +205,15 @@ mod tests {
     fn disallowed_path_rejected() {
         let allowed = vec![PathBuf::from("/tmp/weft-test-allowed")];
         assert!(!is_allowed(Path::new("/etc/passwd"), &allowed));
+    }
+
+    #[test]
+    fn dotdot_traversal_blocked() {
+        let allowed = vec![PathBuf::from("/tmp/weft-test-allowed")];
+        assert!(!is_allowed(
+            Path::new("/tmp/weft-test-allowed/../etc/passwd"),
+            &allowed
+        ));
     }
 
     #[test]
