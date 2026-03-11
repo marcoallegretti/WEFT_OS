@@ -66,6 +66,22 @@ impl WebViewDelegate for WeftWebViewDelegate {
     }
 }
 
+// ── Rendering context abstraction (GAP-2) ───────────────────────────────────
+
+enum RenderingCtx {
+    Software(Rc<servo::SoftwareRenderingContext>),
+    Egl(Rc<servo::WindowRenderingContext>),
+}
+
+impl RenderingCtx {
+    fn as_dyn(&self) -> Rc<dyn servo::RenderingContext> {
+        match self {
+            Self::Software(rc) => Rc::clone(rc) as Rc<dyn servo::RenderingContext>,
+            Self::Egl(rc) => Rc::clone(rc) as Rc<dyn servo::RenderingContext>,
+        }
+    }
+}
+
 // ── Application state ─────────────────────────────────────────────────────────
 
 struct App {
@@ -74,7 +90,7 @@ struct App {
     window: Option<Arc<Window>>,
     servo: Option<servo::Servo>,
     webview: Option<servo::WebView>,
-    rendering_context: Option<Rc<servo::SoftwareRenderingContext>>,
+    rendering_context: Option<RenderingCtx>,
     app_webviews: HashMap<u64, servo::WebView>,
     active_session: Option<u64>,
     app_rx: mpsc::Receiver<crate::appd_ws::AppdCmd>,
@@ -133,7 +149,7 @@ impl App {
             sid = session_id,
         );
         ucm.add_script(Rc::new(UserScript::new(bridge_js, None)));
-        let wv = WebViewBuilder::new(servo, Rc::clone(rc))
+        let wv = WebViewBuilder::new(servo, rc.as_dyn())
             .delegate(Rc::new(WeftWebViewDelegate {
                 redraw_requested: Arc::clone(&self.redraw_requested),
             }))
@@ -144,7 +160,14 @@ impl App {
         self.active_session = Some(session_id);
     }
 
-    fn blit_to_window(window: &Arc<Window>, rendering_context: &servo::SoftwareRenderingContext) {
+    fn render_frame(window: &Arc<Window>, ctx: &RenderingCtx) {
+        match ctx {
+            RenderingCtx::Software(rc) => Self::blit_software(window, rc),
+            RenderingCtx::Egl(_) => {}
+        }
+    }
+
+    fn blit_software(window: &Arc<Window>, rendering_context: &servo::SoftwareRenderingContext) {
         let size = window.inner_size();
         let Some(pixels) = rendering_context.read_pixels() else {
             return;
@@ -187,13 +210,7 @@ impl ApplicationHandler<ServoWake> for App {
 
         servo.set_delegate(Rc::new(WeftServoDelegate));
 
-        let rendering_context = Rc::new(
-            servo::SoftwareRenderingContext::new(servo::euclid::Size2D::new(
-                size.width,
-                size.height,
-            ))
-            .expect("SoftwareRenderingContext"),
-        );
+        let rendering_context = build_rendering_ctx(event_loop, &window, size);
 
         let user_content_manager = Rc::new(UserContentManager::new(&servo));
         let bridge_js = format!(
@@ -202,7 +219,7 @@ impl ApplicationHandler<ServoWake> for App {
         );
         user_content_manager.add_script(Rc::new(UserScript::new(bridge_js, None)));
 
-        let webview = WebViewBuilder::new(&servo, Rc::clone(&rendering_context))
+        let webview = WebViewBuilder::new(&servo, rendering_context.as_dyn())
             .delegate(Rc::new(WeftWebViewDelegate {
                 redraw_requested: Arc::clone(&self.redraw_requested),
             }))
@@ -261,9 +278,8 @@ impl ApplicationHandler<ServoWake> for App {
         match event {
             WindowEvent::RedrawRequested => {
                 if let (Some(window), Some(servo)) = (&self.window, &self.servo) {
-                    if let Some(wv) = self.active_webview() {
-                        let rc = wv.rendering_context();
-                        Self::blit_to_window(window, rc);
+                    if let Some(rc) = &self.rendering_context {
+                        Self::render_frame(window, rc);
                     }
                     servo.spin_event_loop();
                 }
@@ -322,6 +338,34 @@ impl ApplicationHandler<ServoWake> for App {
             _ => {}
         }
     }
+}
+
+// ── Rendering context factory ─────────────────────────────────────────────────
+
+fn build_rendering_ctx(
+    event_loop: &ActiveEventLoop,
+    window: &Arc<Window>,
+    size: winit::dpi::PhysicalSize<u32>,
+) -> RenderingCtx {
+    if std::env::var_os("WEFT_EGL_RENDERING").is_some() {
+        let display_handle = event_loop.display_handle();
+        let window_handle = window.window_handle();
+        if let (Ok(dh), Ok(wh)) = (display_handle, window_handle) {
+            match servo::WindowRenderingContext::new(dh, wh, size) {
+                Ok(rc) => {
+                    tracing::info!("using EGL rendering context");
+                    return RenderingCtx::Egl(Rc::new(rc));
+                }
+                Err(e) => {
+                    tracing::warn!("EGL rendering context failed ({e}), falling back to software");
+                }
+            }
+        }
+    }
+    RenderingCtx::Software(Rc::new(
+        servo::SoftwareRenderingContext::new(servo::euclid::Size2D::new(size.width, size.height))
+            .expect("SoftwareRenderingContext"),
+    ))
 }
 
 // ── Public entry point ────────────────────────────────────────────────────────
