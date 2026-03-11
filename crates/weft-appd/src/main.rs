@@ -101,6 +101,10 @@ impl SessionRegistry {
         }
     }
 
+    pub(crate) fn remove_abort_sender(&mut self, session_id: u64) {
+        self.abort_senders.remove(&session_id);
+    }
+
     pub(crate) fn subscribe(&self) -> tokio::sync::broadcast::Receiver<Response> {
         self.broadcast.subscribe()
     }
