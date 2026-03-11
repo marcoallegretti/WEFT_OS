@@ -55,32 +55,61 @@ fn run_module(_wasm_path: &std::path::Path) -> anyhow::Result<()> {
 
 #[cfg(feature = "wasmtime-runtime")]
 fn run_module(wasm_path: &std::path::Path) -> anyhow::Result<()> {
-    use anyhow::Context as _;
-    use wasmtime::{Config, Engine, Module, Store};
+    use wasmtime::{
+        Config, Engine, Store,
+        component::{Component, Linker},
+    };
+    use wasmtime_wasi::{
+        ResourceTable, WasiCtx, WasiCtxBuilder, WasiView, add_to_linker_sync,
+        bindings::sync::Command,
+    };
 
-    let engine = Engine::new(&Config::default()).context("create Wasmtime engine")?;
-    let module = Module::from_file(&engine, wasm_path).context("load Wasm module")?;
+    struct State {
+        ctx: WasiCtx,
+        table: ResourceTable,
+    }
 
-    let mut linker: wasmtime::Linker<wasmtime_wasi::WasiCtx> = wasmtime::Linker::new(&engine);
-    wasmtime_wasi::add_to_linker(&mut linker, |cx| cx).context("add WASI to linker")?;
+    impl WasiView for State {
+        fn ctx(&mut self) -> &mut WasiCtx {
+            &mut self.ctx
+        }
+        fn table(&mut self) -> &mut ResourceTable {
+            &mut self.table
+        }
+    }
 
-    let wasi = wasmtime_wasi::WasiCtxBuilder::new()
+    let mut config = Config::new();
+    config.wasm_component_model(true);
+    let engine = Engine::new(&config).context("create engine")?;
+
+    let component = Component::from_file(&engine, wasm_path)
+        .with_context(|| format!("load component {}", wasm_path.display()))?;
+
+    let mut linker: Linker<State> = Linker::new(&engine);
+    add_to_linker_sync(&mut linker).context("add WASI to linker")?;
+
+    let ctx = WasiCtxBuilder::new()
         .inherit_stdout()
         .inherit_stderr()
         .build();
-    let mut store = Store::new(&engine, wasi);
+    let mut store = Store::new(
+        &engine,
+        State {
+            ctx,
+            table: ResourceTable::new(),
+        },
+    );
 
     println!("READY");
 
-    let instance = linker
-        .instantiate(&mut store, &module)
-        .context("instantiate module")?;
-    let start = instance
-        .get_typed_func::<(), ()>(&mut store, "_start")
-        .context("get _start export")?;
-    start.call(&mut store, ()).context("call _start")?;
+    let command =
+        Command::instantiate(&mut store, &component, &linker).context("instantiate component")?;
 
-    Ok(())
+    command
+        .wasi_cli_run()
+        .call_run(&mut store)
+        .context("call run")?
+        .map_err(|()| anyhow::anyhow!("wasm component run exited with error"))
 }
 
 fn package_store_roots() -> Vec<PathBuf> {
