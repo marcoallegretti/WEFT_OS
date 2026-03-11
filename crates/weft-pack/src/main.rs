@@ -267,12 +267,37 @@ fn resolve_install_root() -> anyhow::Result<PathBuf> {
     anyhow::bail!("cannot determine install root: HOME and WEFT_APP_STORE are both unset")
 }
 
-fn install_package(dir: &Path) -> anyhow::Result<()> {
+fn install_package(path: &Path) -> anyhow::Result<()> {
     let root = resolve_install_root()?;
-    install_package_to(dir, &root)
+    install_package_to(path, &root)
 }
 
-fn install_package_to(dir: &Path, store_root: &Path) -> anyhow::Result<()> {
+fn install_package_to(path: &Path, store_root: &Path) -> anyhow::Result<()> {
+    let dir_buf;
+    let dir: &Path = if path.extension().is_some_and(|e| e == "zst" || e == "tar")
+        || path.to_string_lossy().ends_with(".app.tar.zst")
+    {
+        let tmp = std::env::temp_dir().join(format!(
+            "weft-install-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .subsec_nanos()
+        ));
+        std::fs::create_dir_all(&tmp)
+            .with_context(|| format!("create temp dir {}", tmp.display()))?;
+        unbundle_package(path, &tmp)?;
+        let name = path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .and_then(|n| n.strip_suffix(".app.tar.zst"))
+            .context("cannot determine app_id from archive filename")?;
+        dir_buf = tmp.join(name);
+        &dir_buf
+    } else {
+        path
+    };
+
     check_package(dir)?;
     let manifest = load_manifest(dir)?;
     let app_id = &manifest.package.id;
@@ -808,6 +833,40 @@ entry = "ui/index.html"
         let result = check_package(&tmp);
         assert!(result.is_err());
         let _ = fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn install_package_from_archive() {
+        use std::fs;
+        let id = format!("instarch_{}", std::process::id());
+        let src = std::env::temp_dir().join(&id);
+        let ui = src.join("ui");
+        let _ = fs::create_dir_all(&ui);
+        fs::write(src.join("app.wasm"), b"\0asm\x01\0\0\0").unwrap();
+        fs::write(ui.join("index.html"), b"<!DOCTYPE html>").unwrap();
+        let app_id = format!("com.example.ia{}", std::process::id());
+        fs::write(
+            src.join("wapp.toml"),
+            format!(
+                "[package]\nid = \"{app_id}\"\nname = \"IA\"\nversion = \"1.0.0\"\n\n\
+                 [runtime]\nmodule = \"app.wasm\"\n\n[ui]\nentry = \"ui/index.html\"\n"
+            ),
+        )
+        .unwrap();
+
+        let bundle_dir = std::env::temp_dir().join(format!("{id}_bnd"));
+        let _ = fs::create_dir_all(&bundle_dir);
+        bundle_package(&src, Some(&bundle_dir)).unwrap();
+        let archive = bundle_dir.join(format!("{app_id}.app.tar.zst"));
+
+        let store = std::env::temp_dir().join(format!("{id}_store"));
+        let _ = fs::create_dir_all(&store);
+        install_package_to(&archive, &store).unwrap();
+        assert!(store.join(&app_id).join("app.wasm").exists());
+
+        let _ = fs::remove_dir_all(&src);
+        let _ = fs::remove_dir_all(&bundle_dir);
+        let _ = fs::remove_dir_all(&store);
     }
 
     #[test]
