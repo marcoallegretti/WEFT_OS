@@ -248,6 +248,7 @@ pub(crate) async fn supervise(
             kill_portal(portal).await;
             let mut reg = registry.lock().await;
             reg.set_state(session_id, AppStateKind::Stopped);
+            reg.remove_abort_sender(session_id);
             let _ = reg.broadcast().send(Response::AppState {
                 session_id,
                 state: AppStateKind::Stopped,
