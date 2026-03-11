@@ -257,6 +257,19 @@ impl ApplicationHandler<ServoWake> for App {
                         self.active_session = None;
                     }
                 }
+                crate::appd_ws::AppdCmd::SyncSessions { active } => {
+                    let active_ids: std::collections::HashSet<u64> =
+                        active.iter().map(|(sid, _)| *sid).collect();
+                    self.app_webviews.retain(|sid, _| active_ids.contains(sid));
+                    if let Some(cur) = self.active_session {
+                        if !active_ids.contains(&cur) {
+                            self.active_session = None;
+                        }
+                    }
+                    for (session_id, app_id) in active {
+                        self.create_app_webview(session_id, &app_id);
+                    }
+                }
             }
         }
         if let Some(servo) = &self.servo {

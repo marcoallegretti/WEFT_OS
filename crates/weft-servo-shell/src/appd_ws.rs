@@ -5,6 +5,7 @@ use std::sync::mpsc;
 pub enum AppdCmd {
     Launch { session_id: u64, app_id: String },
     Stop { session_id: u64 },
+    SyncSessions { active: Vec<(u64, String)> },
 }
 
 pub fn spawn_appd_listener(
@@ -76,16 +77,17 @@ fn process_message(text: &str, tx: &mpsc::SyncSender<AppdCmd>, wake: &dyn Fn()) 
             let Some(sessions) = v["sessions"].as_array() else {
                 return;
             };
-            for s in sessions {
-                let Some(session_id) = s["session_id"].as_u64() else {
-                    continue;
-                };
-                let Some(app_id) = s["app_id"].as_str().map(str::to_string) else {
-                    continue;
-                };
-                let _ = tx.try_send(AppdCmd::Launch { session_id, app_id });
+            let active: Vec<(u64, String)> = sessions
+                .iter()
+                .filter_map(|s| {
+                    let sid = s["session_id"].as_u64()?;
+                    let aid = s["app_id"].as_str()?.to_string();
+                    Some((sid, aid))
+                })
+                .collect();
+            if tx.try_send(AppdCmd::SyncSessions { active }).is_ok() {
+                wake();
             }
-            wake();
         }
         Some("APP_STATE") if v["state"].as_str() == Some("stopped") => {
             let Some(session_id) = v["session_id"].as_u64() else {
