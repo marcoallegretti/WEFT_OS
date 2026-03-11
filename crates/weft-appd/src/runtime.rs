@@ -87,6 +87,14 @@ fn resolve_preopens(app_id: &str) -> Vec<(String, String)> {
     preopens
 }
 
+async fn kill_portal(portal: Option<(PathBuf, tokio::process::Child)>) {
+    if let Some((sock, mut child)) = portal {
+        let _ = child.kill().await;
+        let _ = child.wait().await;
+        let _ = std::fs::remove_file(&sock);
+    }
+}
+
 fn portal_socket_path(session_id: u64) -> Option<PathBuf> {
     let runtime_dir = std::env::var("XDG_RUNTIME_DIR").ok()?;
     let dir = PathBuf::from(runtime_dir).join("weft");
@@ -181,6 +189,7 @@ pub(crate) async fn supervise(
         Ok(c) => c,
         Err(e) => {
             tracing::warn!(session_id, %app_id, error = %e, "failed to spawn runtime; marking session stopped");
+            kill_portal(portal).await;
             let mut reg = registry.lock().await;
             reg.set_state(session_id, AppStateKind::Stopped);
             let _ = reg.broadcast().send(Response::AppState {
@@ -229,6 +238,7 @@ pub(crate) async fn supervise(
         Some(Err(_elapsed)) => {
             tracing::warn!(session_id, %app_id, "READY timeout after 30s; killing process");
             let _ = child.kill().await;
+            kill_portal(portal).await;
             let mut reg = registry.lock().await;
             reg.set_state(session_id, AppStateKind::Stopped);
             let _ = reg.broadcast().send(Response::AppState {
@@ -240,6 +250,7 @@ pub(crate) async fn supervise(
         None => {
             tracing::info!(session_id, %app_id, "abort during startup; killing process");
             let _ = child.kill().await;
+            kill_portal(portal).await;
             let mut reg = registry.lock().await;
             reg.set_state(session_id, AppStateKind::Stopped);
             let _ = reg.broadcast().send(Response::AppState {
