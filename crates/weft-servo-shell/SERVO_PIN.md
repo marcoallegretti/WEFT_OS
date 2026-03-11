@@ -60,15 +60,22 @@ On Fedora/RHEL: `mesa-libGL-devel openssl-devel dbus-devel systemd-devel libxkbc
 
 ## Rendering approach
 
-Initial bringup uses `SoftwareRenderingContext` (CPU rasterisation) blitted to a
-`softbuffer`-backed winit window. Production rendering will move to an EGL/GL
-context once the Wayland surface pipeline is stable.
+Default: `SoftwareRenderingContext` (CPU rasterisation) blitted to a
+`softbuffer`-backed winit window.
+
+EGL path (scaffolded): set `WEFT_EGL_RENDERING=1` at runtime. The embedder
+attempts `WindowRenderingContext::new` using the winit display and window
+handles. If construction fails it falls back to software automatically.
+When the EGL path is active Servo presents directly to the EGL surface;
+the softbuffer blit is skipped. Full DMA-BUF export to the Wayland
+compositor is not yet wired (`RenderingCtx::Egl` blit body is a no-op).
 
 ## Known gaps at this pin
 
 - **GAP-1**: ~~Wayland input events not forwarded to Servo~~ **Resolved** — keyboard and
   mouse events forwarded via `webview.notify_input_event`; key mapping in `keyutils.rs`.
-- **GAP-2**: DMA-BUF surface export not implemented (software blit only)
+- **GAP-2**: EGL `WindowRenderingContext` path scaffolded (`WEFT_EGL_RENDERING=1`);
+  DMA-BUF export to the Wayland compositor (linux-dmabuf-unstable-v1) not yet wired.
 - **GAP-3**: WebGPU adapter on Mesa may fail CTS
 - **GAP-4**: CSS `backdrop-filter` and CSS Grid have partial coverage
 
