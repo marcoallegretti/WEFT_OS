@@ -10,7 +10,7 @@ pub enum Request {
     QueryAppState { session_id: u64 },
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "SCREAMING_SNAKE_CASE")]
 pub enum Response {
     LaunchAck {

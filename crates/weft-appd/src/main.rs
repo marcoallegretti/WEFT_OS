@@ -6,10 +6,11 @@ use tokio::io::AsyncWriteExt;
 use tokio::sync::Mutex;
 
 mod ipc;
+mod ws;
 
 use ipc::{AppStateKind, Request, Response};
 
-type Registry = Arc<Mutex<SessionRegistry>>;
+pub(crate) type Registry = Arc<Mutex<SessionRegistry>>;
 
 #[derive(Default)]
 struct SessionRegistry {
@@ -65,9 +66,18 @@ async fn run() -> anyhow::Result<()> {
         .with_context(|| format!("bind {}", socket_path.display()))?;
     tracing::info!(path = %socket_path.display(), "IPC socket listening");
 
-    let _ = sd_notify::notify(false, &[sd_notify::NotifyState::Ready]);
-
     let registry: Registry = Arc::new(Mutex::new(SessionRegistry::default()));
+    let (broadcast_tx, _) = tokio::sync::broadcast::channel::<Response>(16);
+
+    let ws_port = ws_port();
+    let ws_addr: std::net::SocketAddr = format!("127.0.0.1:{ws_port}").parse()?;
+    let ws_listener = tokio::net::TcpListener::bind(ws_addr)
+        .await
+        .with_context(|| format!("bind WebSocket {ws_addr}"))?;
+    tracing::info!(addr = %ws_addr, "WebSocket listener ready");
+    write_ws_port(ws_port)?;
+
+    let _ = sd_notify::notify(false, &[sd_notify::NotifyState::Ready]);
 
     let mut shutdown = std::pin::pin!(tokio::signal::ctrl_c());
 
@@ -78,7 +88,17 @@ async fn run() -> anyhow::Result<()> {
                 let reg = Arc::clone(&registry);
                 tokio::spawn(async move {
                     if let Err(e) = handle_connection(stream, reg).await {
-                        tracing::warn!(error = %e, "connection error");
+                        tracing::warn!(error = %e, "unix connection error");
+                    }
+                });
+            }
+            result = ws_listener.accept() => {
+                let (stream, _) = result.context("ws accept")?;
+                let reg = Arc::clone(&registry);
+                let rx = broadcast_tx.subscribe();
+                tokio::spawn(async move {
+                    if let Err(e) = ws::handle_ws_connection(stream, reg, rx).await {
+                        tracing::warn!(error = %e, "ws connection error");
                     }
                 });
             }
@@ -90,6 +110,23 @@ async fn run() -> anyhow::Result<()> {
     }
 
     let _ = std::fs::remove_file(&socket_path);
+    Ok(())
+}
+
+fn ws_port() -> u16 {
+    std::env::var("WEFT_APPD_WS_PORT")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(7410)
+}
+
+fn write_ws_port(port: u16) -> anyhow::Result<()> {
+    let runtime_dir = std::env::var("XDG_RUNTIME_DIR").context("XDG_RUNTIME_DIR not set")?;
+    let path = PathBuf::from(runtime_dir).join("weft/appd.wsport");
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    std::fs::write(&path, port.to_string())?;
     Ok(())
 }
 
@@ -110,7 +147,7 @@ async fn handle_connection(
     Ok(())
 }
 
-async fn dispatch(req: Request, registry: &Registry) -> Response {
+pub(crate) async fn dispatch(req: Request, registry: &Registry) -> Response {
     match req {
         Request::LaunchApp {
             app_id,

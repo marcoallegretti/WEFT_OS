@@ -161,6 +161,99 @@
           launcher.setAttribute('hidden', '');
         }
       });
+
+      var APPD_WS_PORT = window.WEFT_APPD_WS_PORT || 7410;
+      var ws = null;
+      var wsReconnectDelay = 1000;
+
+      function appdConnect() {
+        try {
+          ws = new WebSocket('ws://127.0.0.1:' + APPD_WS_PORT + '/appd');
+        } catch (e) {
+          scheduleReconnect();
+          return;
+        }
+
+        ws.addEventListener('open', function () {
+          wsReconnectDelay = 1000;
+          ws.send(JSON.stringify({ type: 'QUERY_RUNNING' }));
+        });
+
+        ws.addEventListener('message', function (ev) {
+          var msg;
+          try { msg = JSON.parse(ev.data); } catch (e) { return; }
+          handleAppdMessage(msg);
+        });
+
+        ws.addEventListener('close', function () {
+          ws = null;
+          scheduleReconnect();
+        });
+
+        ws.addEventListener('error', function () {
+          ws = null;
+        });
+      }
+
+      function scheduleReconnect() {
+        setTimeout(appdConnect, wsReconnectDelay);
+        wsReconnectDelay = Math.min(wsReconnectDelay * 2, 16000);
+      }
+
+      function handleAppdMessage(msg) {
+        if (msg.type === 'APP_READY') {
+          showNotification('App ready (session ' + msg.session_id + ')');
+        } else if (msg.type === 'APP_STATE') {
+          if (msg.state === 'stopped') {
+            removeTaskbarEntry(msg.session_id);
+          }
+        } else if (msg.type === 'RUNNING_APPS') {
+          msg.session_ids.forEach(function (id) {
+            ensureTaskbarEntry(id);
+          });
+        } else if (msg.type === 'LAUNCH_ACK') {
+          ensureTaskbarEntry(msg.session_id);
+        }
+      }
+
+      function ensureTaskbarEntry(sessionId) {
+        var id = 'task-' + sessionId;
+        if (document.getElementById(id)) { return; }
+        var el = document.createElement('weft-taskbar-app');
+        el.id = id;
+        el.dataset.sessionId = sessionId;
+        el.textContent = '● ' + sessionId;
+        el.style.cssText = 'font-size:12px;color:var(--text-secondary);padding:0 6px;cursor:pointer;';
+        el.title = 'Session ' + sessionId;
+        var taskbar = document.querySelector('weft-taskbar');
+        var clock = document.getElementById('clock');
+        taskbar.insertBefore(el, clock);
+      }
+
+      function removeTaskbarEntry(sessionId) {
+        var el = document.getElementById('task-' + sessionId);
+        if (el) { el.remove(); }
+      }
+
+      function showNotification(text) {
+        var center = document.getElementById('notifications');
+        var note = document.createElement('div');
+        note.textContent = text;
+        note.style.cssText = [
+          'background:var(--surface-bg)',
+          'border:1px solid var(--surface-border)',
+          'border-radius:8px',
+          'padding:10px 14px',
+          'font-size:13px',
+          'color:var(--text-primary)',
+          'pointer-events:auto',
+          'backdrop-filter:blur(20px)',
+        ].join(';');
+        center.appendChild(note);
+        setTimeout(function () { note.remove(); }, 4000);
+      }
+
+      appdConnect();
     }());
   </script>
 </body>
