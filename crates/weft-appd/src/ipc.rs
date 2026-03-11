@@ -137,6 +137,46 @@ mod tests {
         assert_eq!(decoded.app_id, "com.example.app");
     }
 
+    #[test]
+    fn app_info_roundtrip() {
+        let info = super::AppInfo {
+            app_id: "com.example.app".into(),
+            name: "Example App".into(),
+        };
+        let bytes = rmp_serde::to_vec(&info).unwrap();
+        let decoded: super::AppInfo = rmp_serde::from_slice(&bytes).unwrap();
+        assert_eq!(decoded.app_id, "com.example.app");
+        assert_eq!(decoded.name, "Example App");
+    }
+
+    #[test]
+    fn query_installed_apps_request_roundtrip() {
+        let req = Request::QueryInstalledApps;
+        let bytes = rmp_serde::to_vec(&req).unwrap();
+        let decoded: Request = rmp_serde::from_slice(&bytes).unwrap();
+        assert!(matches!(decoded, Request::QueryInstalledApps));
+    }
+
+    #[test]
+    fn installed_apps_response_roundtrip() {
+        let resp = Response::InstalledApps {
+            apps: vec![super::AppInfo {
+                app_id: "com.example.app".into(),
+                name: "Example App".into(),
+            }],
+        };
+        let bytes = rmp_serde::to_vec(&resp).unwrap();
+        let decoded: Response = rmp_serde::from_slice(&bytes).unwrap();
+        match decoded {
+            Response::InstalledApps { apps } => {
+                assert_eq!(apps.len(), 1);
+                assert_eq!(apps[0].app_id, "com.example.app");
+                assert_eq!(apps[0].name, "Example App");
+            }
+            _ => panic!("wrong variant"),
+        }
+    }
+
     #[tokio::test]
     async fn frame_write_read_roundtrip() {
         let resp = Response::RunningApps { sessions: vec![] };
