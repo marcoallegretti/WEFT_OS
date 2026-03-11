@@ -28,6 +28,7 @@ pub struct WeftShellWindowData {
     pub app_id: String,
     pub title: String,
     pub role: String,
+    pub closed: std::sync::atomic::AtomicBool,
 }
 
 impl WeftShellState {
@@ -38,5 +39,60 @@ impl WeftShellState {
     {
         let global = display.create_global::<D, ZweftShellManagerV1, ()>(1, ());
         Self { _global: global }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::atomic::Ordering;
+    use wayland_server::Resource;
+
+    use super::*;
+
+    #[test]
+    fn window_data_stores_fields() {
+        let d = WeftShellWindowData {
+            app_id: "com.example.test".into(),
+            title: "Test Window".into(),
+            role: "normal".into(),
+            closed: std::sync::atomic::AtomicBool::new(false),
+        };
+        assert_eq!(d.app_id, "com.example.test");
+        assert_eq!(d.title, "Test Window");
+        assert_eq!(d.role, "normal");
+        assert!(!d.closed.load(Ordering::Relaxed));
+    }
+
+    #[test]
+    fn closed_flag_transition() {
+        let d = WeftShellWindowData {
+            app_id: String::new(),
+            title: String::new(),
+            role: String::new(),
+            closed: std::sync::atomic::AtomicBool::new(false),
+        };
+        assert!(!d.closed.load(Ordering::Relaxed));
+        d.closed.store(true, Ordering::Relaxed);
+        assert!(d.closed.load(Ordering::Relaxed));
+    }
+
+    #[test]
+    fn manager_interface_name_and_version() {
+        let iface = ZweftShellManagerV1::interface();
+        assert_eq!(iface.name, "zweft_shell_manager_v1");
+        assert_eq!(iface.version, 1);
+    }
+
+    #[test]
+    fn window_interface_name_and_version() {
+        let iface = ZweftShellWindowV1::interface();
+        assert_eq!(iface.name, "zweft_shell_window_v1");
+        assert_eq!(iface.version, 1);
+    }
+
+    #[test]
+    fn defunct_window_error_code() {
+        let code = server::zweft_shell_window_v1::Error::DefunctWindow as u32;
+        assert_eq!(code, 0);
     }
 }

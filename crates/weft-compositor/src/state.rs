@@ -19,7 +19,7 @@ use smithay::{
     reexports::{
         calloop::{LoopHandle, LoopSignal},
         wayland_server::{
-            Client, DataInit, Dispatch, DisplayHandle, GlobalDispatch, New,
+            Client, DataInit, Dispatch, DisplayHandle, GlobalDispatch, New, Resource,
             backend::{ClientData, ClientId, DisconnectReason},
             protocol::{wl_buffer::WlBuffer, wl_output::WlOutput, wl_surface::WlSurface},
         },
@@ -457,6 +457,7 @@ impl Dispatch<ZweftShellManagerV1, ()> for WeftCompositorState {
                         app_id,
                         title,
                         role,
+                        closed: std::sync::atomic::AtomicBool::new(false),
                     },
                 );
                 window.configure(x, y, width, height, 0);
@@ -471,10 +472,17 @@ impl Dispatch<ZweftShellWindowV1, WeftShellWindowData> for WeftCompositorState {
         _client: &Client,
         resource: &ZweftShellWindowV1,
         request: zweft_shell_window_v1::Request,
-        _data: &WeftShellWindowData,
+        data: &WeftShellWindowData,
         _dh: &DisplayHandle,
         _data_init: &mut DataInit<'_, Self>,
     ) {
+        if data.closed.load(std::sync::atomic::Ordering::Relaxed) {
+            resource.post_error(
+                crate::protocols::server::zweft_shell_window_v1::Error::DefunctWindow as u32,
+                "request on closed window",
+            );
+            return;
+        }
         match request {
             zweft_shell_window_v1::Request::Destroy => {}
             zweft_shell_window_v1::Request::UpdateMetadata { title, role } => {
