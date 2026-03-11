@@ -126,8 +126,9 @@ async fn run() -> anyhow::Result<()> {
     let ws_listener = tokio::net::TcpListener::bind(ws_addr)
         .await
         .with_context(|| format!("bind WebSocket {ws_addr}"))?;
-    tracing::info!(addr = %ws_addr, "WebSocket listener ready");
-    write_ws_port(ws_port)?;
+    let ws_bound_port = ws_listener.local_addr()?.port();
+    tracing::info!(port = ws_bound_port, "WebSocket listener ready");
+    write_ws_port(ws_bound_port)?;
 
     let _ = sd_notify::notify(false, &[sd_notify::NotifyState::Ready]);
 
