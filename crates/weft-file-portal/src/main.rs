@@ -62,12 +62,12 @@ fn parse_allowed(args: &[String]) -> Vec<PathBuf> {
     let mut allowed = Vec::new();
     let mut i = 0;
     while i < args.len() {
-        if args[i] == "--allow" {
-            if let Some(p) = args.get(i + 1) {
-                allowed.push(PathBuf::from(p));
-                i += 2;
-                continue;
-            }
+        if args[i] == "--allow"
+            && let Some(p) = args.get(i + 1)
+        {
+            allowed.push(PathBuf::from(p));
+            i += 2;
+            continue;
         }
         i += 1;
     }

@@ -4,6 +4,8 @@ use anyhow::Context;
 
 #[cfg(feature = "servo-embed")]
 mod embedder;
+#[cfg(feature = "servo-embed")]
+mod keyutils;
 mod protocols;
 mod shell_client;
 
