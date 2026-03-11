@@ -1,0 +1,16 @@
+[Unit]
+Description=WEFT Application Daemon
+Documentation=https://github.com/weft-os/weft
+Requires=weft-compositor.service
+After=weft-compositor.service servo-shell.service
+
+[Service]
+Type=notify
+ExecStart=/packages/system/weft-appd/active/bin/weft-appd
+Restart=on-failure
+RestartSec=1s
+# sd_notify(READY=1) is sent after IpcServer is bound and CompositorClient
+# has connected, so downstream services can depend on the IPC socket being ready.
+
+[Install]
+WantedBy=graphical.target

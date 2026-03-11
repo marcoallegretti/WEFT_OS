@@ -20,7 +20,7 @@ use crate::{
 };
 
 pub fn run() -> anyhow::Result<()> {
-    let mut display = smithay::reexports::wayland_server::Display::<WeftCompositorState>::new()?;
+    let display = smithay::reexports::wayland_server::Display::<WeftCompositorState>::new()?;
     let display_handle = display.handle();
 
     let mut event_loop: EventLoop<'static, WeftCompositorState> = EventLoop::try_new()?;
@@ -57,7 +57,7 @@ pub fn run() -> anyhow::Result<()> {
     let listening_socket = ListeningSocketSource::new_auto()
         .map_err(|e| anyhow::anyhow!("Wayland socket creation failed: {e}"))?;
     let socket_name = listening_socket.socket_name().to_os_string();
-    std::env::set_var("WAYLAND_DISPLAY", &socket_name);
+    unsafe { std::env::set_var("WAYLAND_DISPLAY", &socket_name) };
     tracing::info!(?socket_name, "Wayland compositor socket open");
 
     loop_handle
