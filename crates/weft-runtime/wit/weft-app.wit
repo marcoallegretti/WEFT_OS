@@ -1,0 +1,10 @@
+package weft:app@0.1.0;
+
+/// Host interface that a WEFT app component imports to signal lifecycle events.
+interface notify {
+    /// Signal to the runtime that the application has finished initialising
+    /// and is ready to serve requests.  The runtime forwards this signal to
+    /// the session supervisor (appd), which transitions the session to the
+    /// Running state.
+    ready: func();
+}

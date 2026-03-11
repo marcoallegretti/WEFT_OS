@@ -127,6 +127,14 @@ fn run_module(
 
     let mut linker: Linker<State> = Linker::new(&engine);
     add_to_linker_sync(&mut linker).context("add WASI to linker")?;
+    linker
+        .instance("weft:app/notify@0.1.0")
+        .context("define weft:app/notify instance")?
+        .func_wrap("ready", |_: wasmtime::StoreContextMut<'_, State>, ()| {
+            println!("READY");
+            Ok::<(), wasmtime::Error>(())
+        })
+        .context("define weft:app/notify#ready")?;
 
     let mut ctx_builder = WasiCtxBuilder::new();
     ctx_builder.inherit_stdout().inherit_stderr();
@@ -149,8 +157,6 @@ fn run_module(
             table: ResourceTable::new(),
         },
     );
-
-    println!("READY");
 
     let command =
         Command::instantiate(&mut store, &component, &linker).context("instantiate component")?;
