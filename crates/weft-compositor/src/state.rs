@@ -1,3 +1,5 @@
+#[cfg(unix)]
+use crate::appd_ipc::WeftAppdIpc;
 #[cfg(target_os = "linux")]
 use crate::backend::drm_device::WeftDrmData;
 use crate::protocols::{
@@ -96,6 +98,10 @@ pub struct WeftCompositorState {
     // WEFT compositor–shell protocol global.
     pub weft_shell_state: WeftShellState,
 
+    // IPC channel with weft-appd (compositor is the server, appd is the client).
+    #[cfg(unix)]
+    pub appd_ipc: Option<WeftAppdIpc>,
+
     #[cfg(target_os = "linux")]
     pub drm: Option<WeftDrmData>,
 }
@@ -153,6 +159,8 @@ impl WeftCompositorState {
             cursor_image_status: CursorImageStatus::Hidden,
             dmabuf_global: None,
             running: true,
+            #[cfg(unix)]
+            appd_ipc: None,
             #[cfg(target_os = "linux")]
             drm: None,
         }

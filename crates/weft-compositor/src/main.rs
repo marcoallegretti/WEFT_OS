@@ -1,5 +1,6 @@
 use tracing_subscriber::EnvFilter;
 
+mod appd_ipc;
 mod backend;
 mod input;
 mod protocols;

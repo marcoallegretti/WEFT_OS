@@ -15,6 +15,7 @@ use smithay::{
 };
 
 use crate::{
+    appd_ipc::{self, WeftAppdIpc},
     input,
     state::{WeftClientState, WeftCompositorState},
 };
@@ -91,6 +92,14 @@ pub fn run() -> anyhow::Result<()> {
         "seat-0".to_string(),
     );
     state.space.map_output(&output, (0, 0));
+
+    #[cfg(unix)]
+    {
+        state.appd_ipc = Some(WeftAppdIpc::new(appd_ipc::compositor_socket_path()));
+        if let Err(e) = appd_ipc::setup(&mut state) {
+            tracing::warn!(?e, "compositor IPC setup failed");
+        }
+    }
 
     let mut damage_tracker = OutputDamageTracker::from_output(&output);
     let start_time = std::time::Instant::now();

@@ -62,6 +62,7 @@ use smithay_drm_extras::drm_scanner::{DrmScanEvent, DrmScanner};
 
 #[cfg(target_os = "linux")]
 use crate::{
+    appd_ipc::{self, WeftAppdIpc},
     input,
     state::{WeftClientState, WeftCompositorState},
 };
@@ -242,6 +243,11 @@ pub fn run() -> anyhow::Result<()> {
 
     let mut state =
         WeftCompositorState::new(display_handle.clone(), loop_signal, loop_handle, seat_name);
+
+    state.appd_ipc = Some(WeftAppdIpc::new(appd_ipc::compositor_socket_path()));
+    if let Err(e) = appd_ipc::setup(&mut state) {
+        tracing::warn!(?e, "compositor IPC setup failed");
+    }
 
     state.drm = Some(WeftDrmData {
         session,

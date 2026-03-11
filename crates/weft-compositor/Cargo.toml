@@ -21,6 +21,7 @@ smithay = { version = "0.7", default-features = false, features = [
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 anyhow = "1"
+weft-ipc-types = { path = "../weft-ipc-types" }
 wayland-scanner = "0.31"
 wayland-server = "0.31"
 wayland-backend = "0.3"
