@@ -1,4 +1,4 @@
-{ pkgs, lib, self, modulesPath, ... }:
+{ pkgs, lib, self, modulesPath, rustOverlay, ... }:
 
 {
   imports = [
@@ -66,8 +66,12 @@
   ];
 
   nixpkgs.overlays = [
+    rustOverlay
     (final: prev: {
-      weft = final.callPackage ./weft-packages.nix { };
+      rust193 = final.rust-bin.stable."1.93.0".default;
+      weft = final.callPackage ./weft-packages.nix {
+        rust193 = final.rust193;
+      };
     })
   ];
 

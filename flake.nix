@@ -4,16 +4,26 @@
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-25.05";
     flake-utils.url = "github:numtide/flake-utils";
+    rust-overlay = {
+      url = "github:oxalica/rust-overlay";
+      inputs.nixpkgs.follows = "nixpkgs";
+    };
   };
 
-  outputs = { self, nixpkgs, flake-utils }:
+  outputs = { self, nixpkgs, flake-utils, rust-overlay }:
     let
       supportedSystems = [ "x86_64-linux" "aarch64-linux" ];
     in
     flake-utils.lib.eachSystem supportedSystems (system:
       let
-        pkgs = nixpkgs.legacyPackages.${system};
-        weftPkgs = pkgs.callPackage ./infra/nixos/weft-packages.nix { };
+        pkgs = import nixpkgs {
+          inherit system;
+          overlays = [ rust-overlay.overlays.default ];
+        };
+        rust193 = pkgs.rust-bin.stable."1.93.0".default;
+        weftPkgs = pkgs.callPackage ./infra/nixos/weft-packages.nix {
+          inherit rust193;
+        };
       in
       {
         packages = weftPkgs // {
@@ -23,7 +33,7 @@
         devShells.default = pkgs.mkShell {
           name = "weft-dev";
           nativeBuildInputs = with pkgs; [
-            rustup
+            rust193
             pkg-config
             cmake
             clang
@@ -52,7 +62,10 @@
     ) // {
       nixosConfigurations.weft-vm = nixpkgs.lib.nixosSystem {
         system = "x86_64-linux";
-        specialArgs = { inherit self; };
+        specialArgs = {
+          inherit self;
+          rustOverlay = rust-overlay.overlays.default;
+        };
         modules = [
           ./infra/nixos/configuration.nix
         ];

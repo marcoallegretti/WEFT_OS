@@ -1,6 +1,11 @@
-{ pkgs, ... }:
+{ pkgs, rust193, ... }:
 
 let
+  rustPlatform = pkgs.makeRustPlatform {
+    cargo = rust193;
+    rustc = rust193;
+  };
+
   src = ../..;
 
   cargoLock = {
@@ -17,7 +22,7 @@ let
     nativeBuildInputs = with pkgs; [ pkg-config ];
   };
 
-  mkWeftPkg = { pname, extraBuildInputs ? [], extraNativeBuildInputs ? [], cargoFlags ? [], extraEnv ? {} }: pkgs.rustPlatform.buildRustPackage (commonArgs // {
+  mkWeftPkg = { pname, extraBuildInputs ? [], extraNativeBuildInputs ? [], cargoFlags ? [], extraEnv ? {} }: rustPlatform.buildRustPackage (commonArgs // {
     inherit pname;
     cargoBuildFlags = [ "--package" pname ] ++ cargoFlags;
     cargoTestFlags = [ "--package" pname ];
