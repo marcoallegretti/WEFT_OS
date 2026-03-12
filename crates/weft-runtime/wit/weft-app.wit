@@ -50,3 +50,13 @@ interface notifications {
         icon: option<string>,
     ) -> result<_, string>;
 }
+
+/// Host interface for reading and writing the Wayland clipboard.
+/// Requires sys:clipboard:read and/or sys:clipboard:write capabilities.
+interface clipboard {
+    /// Return the current clipboard text contents.
+    read: func() -> result<string, string>;
+
+    /// Replace the clipboard contents with the given text.
+    write: func(text: string) -> result<_, string>;
+}

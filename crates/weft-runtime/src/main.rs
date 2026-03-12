@@ -267,6 +267,28 @@ fn run_module(
         )
         .context("define weft:app/notifications#notify")?;
 
+    linker
+        .instance("weft:app/clipboard@0.1.0")
+        .context("define weft:app/clipboard instance")?
+        .func_wrap(
+            "read",
+            |_: wasmtime::StoreContextMut<'_, State>,
+             ()|
+             -> wasmtime::Result<(Result<String, String>,)> {
+                Ok((host_clipboard_read(),))
+            },
+        )
+        .context("define weft:app/clipboard#read")?
+        .func_wrap(
+            "write",
+            |_: wasmtime::StoreContextMut<'_, State>,
+             (text,): (String,)|
+             -> wasmtime::Result<(Result<(), String>,)> {
+                Ok((host_clipboard_write(&text),))
+            },
+        )
+        .context("define weft:app/clipboard#write")?;
+
     let mut ctx_builder = WasiCtxBuilder::new();
     ctx_builder.inherit_stdout().inherit_stderr();
 
@@ -344,6 +366,37 @@ fn host_fetch(
     _body: Option<&[u8]>,
 ) -> Result<(u16, String, Vec<u8>), String> {
     Err("net-fetch capability not compiled in".to_owned())
+}
+
+#[cfg(feature = "wasmtime-runtime")]
+fn host_clipboard_read() -> Result<String, String> {
+    let out = std::process::Command::new("wl-paste")
+        .arg("--no-newline")
+        .output()
+        .map_err(|e| e.to_string())?;
+    if out.status.success() {
+        String::from_utf8(out.stdout).map_err(|e| e.to_string())
+    } else {
+        Err(String::from_utf8_lossy(&out.stderr).trim().to_owned())
+    }
+}
+
+#[cfg(feature = "wasmtime-runtime")]
+fn host_clipboard_write(text: &str) -> Result<(), String> {
+    use std::io::Write;
+    let mut child = std::process::Command::new("wl-copy")
+        .stdin(std::process::Stdio::piped())
+        .spawn()
+        .map_err(|e| e.to_string())?;
+    if let Some(stdin) = child.stdin.as_mut() {
+        stdin.write_all(text.as_bytes()).map_err(|e| e.to_string())?;
+    }
+    let status = child.wait().map_err(|e| e.to_string())?;
+    if status.success() {
+        Ok(())
+    } else {
+        Err(format!("wl-copy exited with {status}"))
+    }
 }
 
 #[cfg(feature = "wasmtime-runtime")]
