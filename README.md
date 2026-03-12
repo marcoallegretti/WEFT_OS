@@ -47,8 +47,8 @@ Linux system packages required (openSUSE):
 
 ```sh
 sudo zypper install -y \
-  libwayland-devel libxkbcommon-devel Mesa-libEGL-devel Mesa-libGLES-devel \
-  libgbm-devel libdrm-devel libinput-devel libseat-devel libudev-devel \
+  libwayland-devel libxkbcommon-devel libglvnd-devel \
+  libgbm-devel libdrm-devel libinput-devel seatd-devel libudev-devel \
   systemd-devel pkg-config clang cmake python3
 ```
 

@@ -52,14 +52,14 @@ The first build downloads and compiles Servo and its dependencies, which takes
 
 The following system packages are required when `servo-embed` is enabled:
 
-- `Mesa-libGLES-devel`
+- `libglvnd-devel`
 - `libopenssl-devel`
 - `dbus-1-devel`
 - `libudev-devel`
 - `libxkbcommon-devel`
 - `libwayland-devel`
 
-Install with: `sudo zypper install -y Mesa-libGLES-devel libopenssl-devel dbus-1-devel libudev-devel libxkbcommon-devel libwayland-devel`
+Install with: `sudo zypper install -y libglvnd-devel libopenssl-devel dbus-1-devel libudev-devel libxkbcommon-devel libwayland-devel`
 
 ## Rendering approach
 
