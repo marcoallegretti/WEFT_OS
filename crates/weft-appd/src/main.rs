@@ -813,8 +813,12 @@ mod tests {
         std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
 
         let prior = std::env::var("WEFT_RUNTIME_BIN").ok();
+        let prior_cgroup = std::env::var("WEFT_DISABLE_CGROUP").ok();
         // SAFETY: single-threaded test (flavor = "current_thread"); no concurrent env access.
-        unsafe { std::env::set_var("WEFT_RUNTIME_BIN", &script) };
+        unsafe {
+            std::env::set_var("WEFT_RUNTIME_BIN", &script);
+            std::env::set_var("WEFT_DISABLE_CGROUP", "1");
+        }
 
         let registry: Registry = Arc::new(Mutex::new(SessionRegistry::default()));
         let mut rx = registry.lock().await.subscribe();
@@ -855,6 +859,10 @@ mod tests {
             match prior {
                 Some(v) => std::env::set_var("WEFT_RUNTIME_BIN", v),
                 None => std::env::remove_var("WEFT_RUNTIME_BIN"),
+            }
+            match prior_cgroup {
+                Some(v) => std::env::set_var("WEFT_DISABLE_CGROUP", v),
+                None => std::env::remove_var("WEFT_DISABLE_CGROUP"),
             }
         }
     }
