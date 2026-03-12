@@ -43,30 +43,10 @@ in {
 
   weft-servo-shell = mkWeftPkg {
     pname = "weft-servo-shell";
-    extraBuildInputs = with pkgs; [
-      mesa wayland libxkbcommon openssl dbus udev libGL fontconfig
-    ];
-    extraNativeBuildInputs = with pkgs; [
-      pkgs.llvmPackages.clang pkgs.llvmPackages.llvm cmake python3 nasm
-    ];
-    cargoFlags = [ "--features" "servo-embed" ];
-    extraEnv = {
-      LIBCLANG_PATH = "${pkgs.llvmPackages.libclang.lib}/lib";
-    };
   };
 
   weft-app-shell = mkWeftPkg {
     pname = "weft-app-shell";
-    extraBuildInputs = with pkgs; [
-      mesa wayland libxkbcommon openssl dbus udev libGL fontconfig
-    ];
-    extraNativeBuildInputs = with pkgs; [
-      pkgs.llvmPackages.clang pkgs.llvmPackages.llvm cmake python3 nasm
-    ];
-    cargoFlags = [ "--features" "servo-embed" ];
-    extraEnv = {
-      LIBCLANG_PATH = "${pkgs.llvmPackages.libclang.lib}/lib";
-    };
   };
 
   weft-appd = mkWeftPkg {
