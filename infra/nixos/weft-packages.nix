@@ -36,9 +36,12 @@ in {
   weft-compositor = mkWeftPkg {
     pname = "weft-compositor";
     extraBuildInputs = with pkgs; [
-      libdrm mesa wayland libxkbcommon seatd udev dbus libGL libdisplay-info
+      libdrm mesa wayland libxkbcommon seatd udev dbus libGL libdisplay-info libinput
     ];
     extraNativeBuildInputs = with pkgs; [ wayland-scanner ];
+    extraEnv = {
+      NIX_LDFLAGS = "-L${pkgs.mesa}/lib -L${pkgs.libinput}/lib";
+    };
   };
 
   weft-servo-shell = mkWeftPkg {
