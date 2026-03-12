@@ -44,7 +44,7 @@ in {
   weft-servo-shell = mkWeftPkg {
     pname = "weft-servo-shell";
     extraBuildInputs = with pkgs; [
-      mesa wayland libxkbcommon openssl dbus udev libGL
+      mesa wayland libxkbcommon openssl dbus udev libGL fontconfig
     ];
     extraNativeBuildInputs = with pkgs; [
       pkgs.llvmPackages.clang cmake python3
@@ -58,7 +58,7 @@ in {
   weft-app-shell = mkWeftPkg {
     pname = "weft-app-shell";
     extraBuildInputs = with pkgs; [
-      mesa wayland libxkbcommon openssl dbus udev libGL
+      mesa wayland libxkbcommon openssl dbus udev libGL fontconfig
     ];
     extraNativeBuildInputs = with pkgs; [
       pkgs.llvmPackages.clang cmake python3
