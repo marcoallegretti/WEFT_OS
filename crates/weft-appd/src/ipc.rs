@@ -9,6 +9,13 @@ pub enum Request {
     QueryRunning,
     QueryAppState { session_id: u64 },
     QueryInstalledApps,
+    IpcForward { session_id: u64, payload: String },
+    PanelGesture {
+        gesture_type: u32,
+        fingers: u32,
+        dx: f64,
+        dy: f64,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -44,6 +51,16 @@ pub enum Response {
     },
     InstalledApps {
         apps: Vec<AppInfo>,
+    },
+    IpcMessage {
+        session_id: u64,
+        payload: String,
+    },
+    NavigationGesture {
+        gesture_type: u32,
+        fingers: u32,
+        dx: f64,
+        dy: f64,
     },
     Error {
         code: u32,

@@ -60,13 +60,21 @@ impl ClientData for WeftClientState {
     fn disconnected(&self, _client_id: ClientId, _reason: DisconnectReason) {}
 }
 
-#[allow(dead_code)]
+/// Accumulated state for a multi-touch swipe gesture in progress.
+#[derive(Default)]
+pub struct GestureState {
+    pub in_progress: bool,
+    pub fingers: u32,
+    pub dx: f64,
+    pub dy: f64,
+}
+
 pub struct WeftCompositorState {
     pub display_handle: DisplayHandle,
     pub loop_signal: LoopSignal,
     pub loop_handle: LoopHandle<'static, WeftCompositorState>,
+    pub gesture_state: GestureState,
 
-    // Wayland protocol globals
     pub compositor_state: CompositorState,
     pub xdg_shell_state: XdgShellState,
     pub layer_shell_state: WlrLayerShellState,
@@ -79,26 +87,21 @@ pub struct WeftCompositorState {
     pub pointer_constraints_state: PointerConstraintsState,
     pub cursor_shape_state: CursorShapeManagerState,
 
-    // Desktop abstraction layer
     pub space: Space<Window>,
     pub popups: PopupManager,
 
-    // Seat and input state
     pub seat_state: SeatState<Self>,
     pub seat: Seat<Self>,
     pub pointer_location: Point<f64, Logical>,
     pub cursor_image_status: CursorImageStatus,
 
-    // Set by the backend after renderer initialisation when DMA-BUF is supported.
+    #[allow(dead_code)]
     pub dmabuf_global: Option<DmabufGlobal>,
 
-    // Set to false when the compositor should exit the event loop.
     pub running: bool,
 
-    // WEFT compositor–shell protocol global.
     pub weft_shell_state: WeftShellState,
 
-    // IPC channel with weft-appd (compositor is the server, appd is the client).
     #[cfg(unix)]
     pub appd_ipc: Option<WeftAppdIpc>,
 
@@ -159,6 +162,7 @@ impl WeftCompositorState {
             cursor_image_status: CursorImageStatus::Hidden,
             dmabuf_global: None,
             running: true,
+            gesture_state: GestureState::default(),
             #[cfg(unix)]
             appd_ipc: None,
             #[cfg(target_os = "linux")]
@@ -230,10 +234,8 @@ impl XdgShellHandler for WeftCompositorState {
     }
 
     fn new_toplevel(&mut self, surface: ToplevelSurface) {
-        // Send initial configure before wrapping — the toplevel needs a configure to map.
         surface.send_configure();
         let window = Window::new_wayland_window(surface);
-        // Map at origin; proper placement policy comes with the shell protocol wave.
         self.space.map_element(window, (0, 0), false);
     }
 
@@ -307,7 +309,21 @@ impl SeatHandler for WeftCompositorState {
         &mut self.seat_state
     }
 
-    fn focus_changed(&mut self, _seat: &Seat<Self>, _focused: Option<&WlSurface>) {}
+    fn focus_changed(&mut self, _seat: &Seat<Self>, focused: Option<&WlSurface>) {
+        let focused_id = focused.map(|s| s.id());
+        for panel in self.weft_shell_state.panels() {
+            if !panel.is_alive() {
+                continue;
+            }
+            let data = panel.data::<WeftShellWindowData>();
+            let is_focused = data
+                .and_then(|d| d.surface.as_ref())
+                .map(|s| Some(s.id()) == focused_id)
+                .unwrap_or(false);
+            panel.focus_changed(if is_focused { 1 } else { 0 });
+        }
+        self.weft_shell_state.retain_alive_panels();
+    }
 
     fn cursor_image(&mut self, _seat: &Seat<Self>, image: CursorImageStatus) {
         self.cursor_image_status = image;
@@ -439,7 +455,7 @@ impl GlobalDispatch<ZweftShellManagerV1, ()> for WeftCompositorState {
 
 impl Dispatch<ZweftShellManagerV1, ()> for WeftCompositorState {
     fn request(
-        _state: &mut Self,
+        state: &mut Self,
         _client: &Client,
         _resource: &ZweftShellManagerV1,
         request: zweft_shell_manager_v1::Request,
@@ -460,6 +476,7 @@ impl Dispatch<ZweftShellManagerV1, ()> for WeftCompositorState {
                 width,
                 height,
             } => {
+                let is_panel = role == "panel";
                 let window = data_init.init(
                     id,
                     WeftShellWindowData {
@@ -470,7 +487,25 @@ impl Dispatch<ZweftShellManagerV1, ()> for WeftCompositorState {
                         closed: std::sync::atomic::AtomicBool::new(false),
                     },
                 );
-                window.configure(x, y, width, height, 0);
+                if is_panel {
+                    let (ox, oy, ow, oh) = state
+                        .space
+                        .outputs()
+                        .next()
+                        .and_then(|o| state.space.output_geometry(o))
+                        .map(|g| (g.loc.x, g.loc.y, g.size.w, g.size.h))
+                        .unwrap_or((x, y, width, height));
+                    window.configure(
+                        ox,
+                        oy,
+                        ow,
+                        oh,
+                        crate::protocols::server::zweft_shell_window_v1::State::Maximized as u32,
+                    );
+                    state.weft_shell_state.add_panel(window);
+                } else {
+                    window.configure(x, y, width, height, 0);
+                }
             }
         }
     }

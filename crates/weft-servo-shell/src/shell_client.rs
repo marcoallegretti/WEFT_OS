@@ -23,10 +23,18 @@ pub struct ShellWindowState {
 
 // ── Internal Wayland dispatch state ──────────────────────────────────────────
 
+pub struct PendingGesture {
+    pub gesture_type: u32,
+    pub fingers: u32,
+    pub dx: f64,
+    pub dy: f64,
+}
+
 struct AppData {
     manager: Option<ZweftShellManagerV1>,
     window: Option<ZweftShellWindowV1>,
     window_state: ShellWindowState,
+    pending_gestures: Vec<PendingGesture>,
 }
 
 impl AppData {
@@ -43,6 +51,7 @@ impl AppData {
                 focused: false,
                 closed: false,
             },
+            pending_gestures: Vec::new(),
         }
     }
 }
@@ -63,7 +72,7 @@ impl Dispatch<wl_registry::WlRegistry, ()> for AppData {
         } = event
             && interface == "zweft_shell_manager_v1"
         {
-            let mgr = registry.bind::<ZweftShellManagerV1, _, _>(name, version.min(1), qh, ());
+            let mgr = registry.bind::<ZweftShellManagerV1, _, _>(name, version.min(2), qh, ());
             state.manager = Some(mgr);
         }
     }
@@ -122,13 +131,26 @@ impl Dispatch<ZweftShellWindowV1, ()> for AppData {
             } => {
                 tracing::trace!(tv_sec, tv_nsec, refresh, "shell presentation feedback");
             }
+            zweft_shell_window_v1::Event::NavigationGesture {
+                r#type,
+                fingers,
+                dx,
+                dy,
+            } => {
+                tracing::debug!(r#type, fingers, dx, dy, "navigation gesture from compositor");
+                state.pending_gestures.push(PendingGesture {
+                    gesture_type: r#type,
+                    fingers,
+                    dx,
+                    dy,
+                });
+            }
         }
     }
 }
 
 // ── Public client ─────────────────────────────────────────────────────────────
 
-#[allow(dead_code)]
 pub struct ShellClient {
     event_queue: EventQueue<AppData>,
     data: AppData,
@@ -185,7 +207,6 @@ impl ShellClient {
         Ok(Self { event_queue, data })
     }
 
-    #[allow(dead_code)]
     pub fn dispatch_pending(&mut self) -> anyhow::Result<bool> {
         self.event_queue
             .dispatch_pending(&mut self.data)
@@ -194,8 +215,11 @@ impl ShellClient {
         Ok(!self.data.window_state.closed)
     }
 
-    #[allow(dead_code)]
     pub fn window_state(&self) -> &ShellWindowState {
         &self.data.window_state
+    }
+
+    pub fn take_pending_gestures(&mut self) -> Vec<PendingGesture> {
+        std::mem::take(&mut self.data.pending_gestures)
     }
 }

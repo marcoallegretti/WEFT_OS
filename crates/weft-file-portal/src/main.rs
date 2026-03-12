@@ -1,6 +1,7 @@
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use anyhow::Context;
 use serde::{Deserialize, Serialize};
@@ -38,7 +39,7 @@ fn main() -> anyhow::Result<()> {
     }
 
     let socket_path = &args[1];
-    let allowed = parse_allowed(&args[2..]);
+    let allowed = Arc::new(parse_allowed(&args[2..]));
 
     if Path::new(socket_path).exists() {
         std::fs::remove_file(socket_path)
@@ -50,7 +51,10 @@ fn main() -> anyhow::Result<()> {
 
     for stream in listener.incoming() {
         match stream {
-            Ok(s) => handle_connection(s, &allowed),
+            Ok(s) => {
+                let allowed = Arc::clone(&allowed);
+                std::thread::spawn(move || handle_connection(s, &allowed));
+            }
             Err(e) => eprintln!("accept error: {e}"),
         }
     }

@@ -6,12 +6,12 @@ After=weft-compositor.service
 
 [Service]
 Type=simple
-ExecStart=/packages/system/servo-shell/active/bin/weft-servo-shell
+PassEnvironment=WAYLAND_DISPLAY XDG_RUNTIME_DIR DISPLAY
+Environment=WEFT_APPD_WS_PORT=7410
+ExecStart=/packages/system/weft-servo-shell/active/bin/weft-servo-shell \
+    /packages/system/weft-servo-shell/active/share/weft/shell/system-ui.html
 Restart=on-failure
 RestartSec=2
-# WAYLAND_DISPLAY is exported by weft-compositor after sd_notify(READY=1).
-# Downstream services that need the shell ready must declare
-# After=servo-shell.service and a suitable readiness mechanism.
 
 [Install]
 WantedBy=graphical.target

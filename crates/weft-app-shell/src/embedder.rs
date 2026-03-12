@@ -169,6 +169,9 @@ impl ApplicationHandler<ServoWake> for App {
         let rendering_context = build_rendering_ctx(event_loop, &window, size);
 
         let ucm = Rc::new(UserContentManager::new(&servo));
+        if let Some(kit_js) = load_ui_kit_script() {
+            ucm.add_script(Rc::new(UserScript::new(kit_js, None)));
+        }
         let bridge_js = format!(
             r#"(function(){{var ws=new WebSocket('ws://127.0.0.1:{p}');var sid={sid};var q=[];var r=false;ws.onopen=function(){{r=true;q.forEach(function(m){{ws.send(JSON.stringify(m))}});q.length=0}};window.weftSessionId=sid;window.weftIpc={{send:function(m){{if(r)ws.send(JSON.stringify(m));else q.push(m)}},onmessage:null}};ws.onmessage=function(e){{if(window.weftIpc.onmessage)window.weftIpc.onmessage(JSON.parse(e.data))}}}})()"#,
             p = self.ws_port,
@@ -326,14 +329,71 @@ fn build_rendering_ctx(
     ))
 }
 
-fn resolve_weft_app_url(app_id: &str) -> Option<ServoUrl> {
-    let url_str = format!("weft-app://{app_id}/index.html");
-    let raw = ServoUrl::parse(&url_str).ok()?;
-    let rel = raw.path().trim_start_matches('/');
-    let file_path = app_store_roots()
+fn ui_kit_path() -> std::path::PathBuf {
+    if let Ok(p) = std::env::var("WEFT_UI_KIT_JS") {
+        return std::path::PathBuf::from(p);
+    }
+    std::path::PathBuf::from("/usr/share/weft/system/weft-ui-kit.js")
+}
+
+fn load_ui_kit_script() -> Option<String> {
+    std::fs::read_to_string(ui_kit_path()).ok()
+}
+
+fn resolve_weft_system_url(url: &ServoUrl) -> Option<ServoUrl> {
+    if url.scheme() != "weft-system" { return None; }
+    let host = url.host_str().unwrap_or("");
+    let path = url.path().trim_start_matches('/');
+    let system_root = std::env::var("WEFT_SYSTEM_RESOURCES")
+        .unwrap_or_else(|_| "/usr/share/weft/system".to_owned());
+    let file = std::path::Path::new(&system_root).join(host).join(path);
+    ServoUrl::parse(&format!("file://{}", file.display())).ok()
+}
+
+fn read_ui_entry(app_id: &str) -> Option<String> {
+    #[derive(serde::Deserialize)]
+    struct Ui {
+        entry: String,
+    }
+    #[derive(serde::Deserialize)]
+    struct Manifest {
+        ui: Ui,
+    }
+
+    let erofs_manifest = std::path::Path::new("/run/weft/apps")
+        .join(app_id)
+        .join("merged")
+        .join("wapp.toml");
+    let toml_text = std::fs::read_to_string(&erofs_manifest)
+        .ok()
+        .or_else(|| {
+            app_store_roots()
+                .into_iter()
+                .find_map(|r| std::fs::read_to_string(r.join(app_id).join("wapp.toml")).ok())
+        })?;
+    let m: Manifest = toml::from_str(&toml_text).ok()?;
+    Some(m.ui.entry)
+}
+
+fn resolve_app_file_path(app_id: &str, rel: &str) -> Option<std::path::PathBuf> {
+    let erofs_root = std::path::Path::new("/run/weft/apps")
+        .join(app_id)
+        .join("merged");
+    if erofs_root.exists() {
+        let p = erofs_root.join(rel);
+        if p.exists() {
+            return Some(p);
+        }
+    }
+    app_store_roots()
         .into_iter()
-        .map(|r| r.join(app_id).join("ui").join(rel))
-        .find(|p| p.exists())?;
+        .map(|r| r.join(app_id).join(rel))
+        .find(|p| p.exists())
+}
+
+fn resolve_weft_app_url(app_id: &str) -> Option<ServoUrl> {
+    let entry = read_ui_entry(app_id).unwrap_or_else(|| "ui/index.html".to_owned());
+    let file_path = resolve_app_file_path(app_id, &entry)?;
     let s = format!("file://{}", file_path.display());
     ServoUrl::parse(&s).ok()
 }

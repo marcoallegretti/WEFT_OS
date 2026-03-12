@@ -98,6 +98,7 @@ fn run_module(
     ipc_socket: Option<&str>,
 ) -> anyhow::Result<()> {
     use cap_std::{ambient_authority, fs::Dir};
+    use std::sync::{Arc, Mutex};
     use wasmtime::{
         Config, Engine, Store,
         component::{Component, Linker},
@@ -107,9 +108,64 @@ fn run_module(
         bindings::sync::Command,
     };
 
+    struct IpcState {
+        socket: std::os::unix::net::UnixStream,
+        recv_buf: Vec<u8>,
+    }
+
+    impl IpcState {
+        fn connect(path: &str) -> Option<Self> {
+            let socket = std::os::unix::net::UnixStream::connect(path).ok()?;
+            socket.set_nonblocking(true).ok()?;
+            Some(Self {
+                socket,
+                recv_buf: Vec::new(),
+            })
+        }
+
+        fn send(&mut self, payload: &str) -> Result<(), String> {
+            use std::io::Write;
+            let _ = self.socket.set_nonblocking(false);
+            let mut line = payload.to_owned();
+            line.push('\n');
+            let result = self
+                .socket
+                .write_all(line.as_bytes())
+                .map_err(|e| e.to_string());
+            let _ = self.socket.set_nonblocking(true);
+            result
+        }
+
+        fn recv(&mut self) -> Option<String> {
+            use std::io::Read;
+            let mut chunk = [0u8; 4096];
+            loop {
+                match self.socket.read(&mut chunk) {
+                    Ok(0) => break,
+                    Ok(n) => self.recv_buf.extend_from_slice(&chunk[..n]),
+                    Err(e)
+                        if e.kind() == std::io::ErrorKind::WouldBlock
+                            || e.kind() == std::io::ErrorKind::TimedOut =>
+                    {
+                        break;
+                    }
+                    Err(_) => break,
+                }
+            }
+            if let Some(pos) = self.recv_buf.iter().position(|&b| b == b'\n') {
+                let raw: Vec<u8> = self.recv_buf.drain(..=pos).collect();
+                return String::from_utf8(raw)
+                    .ok()
+                    .map(|s| s.trim_end_matches('\n').trim_end_matches('\r').to_owned());
+            }
+            None
+        }
+    }
+
     struct State {
         ctx: WasiCtx,
         table: ResourceTable,
+        ipc: Arc<Mutex<Option<IpcState>>>,
     }
 
     impl WasiView for State {
@@ -130,20 +186,97 @@ fn run_module(
 
     let mut linker: Linker<State> = Linker::new(&engine);
     add_to_linker_sync(&mut linker).context("add WASI to linker")?;
+    let ipc_state: Arc<Mutex<Option<IpcState>>> = Arc::new(Mutex::new(None));
+
+    {
+        let ipc_send = Arc::clone(&ipc_state);
+        let ipc_recv = Arc::clone(&ipc_state);
+        linker
+            .instance("weft:app/notify@0.1.0")
+            .context("define weft:app/notify instance")?
+            .func_wrap("ready", |_: wasmtime::StoreContextMut<'_, State>, ()| {
+                println!("READY");
+                Ok::<(), wasmtime::Error>(())
+            })
+            .context("define weft:app/notify#ready")?;
+
+        let mut ipc_instance = linker
+            .instance("weft:app/ipc@0.1.0")
+            .context("define weft:app/ipc instance")?;
+
+        ipc_instance
+            .func_wrap(
+                "send",
+                move |_: wasmtime::StoreContextMut<'_, State>,
+                      (payload,): (String,)|
+                      -> wasmtime::Result<(Result<(), String>,)> {
+                    let mut guard = ipc_send.lock().unwrap();
+                    match guard.as_mut() {
+                        Some(ipc) => Ok((ipc.send(&payload),)),
+                        None => Ok((Err("IPC not connected".to_owned()),)),
+                    }
+                },
+            )
+            .context("define weft:app/ipc#send")?;
+
+        ipc_instance
+            .func_wrap(
+                "recv",
+                move |_: wasmtime::StoreContextMut<'_, State>,
+                      ()|
+                      -> wasmtime::Result<(Option<String>,)> {
+                    let mut guard = ipc_recv.lock().unwrap();
+                    Ok((guard.as_mut().and_then(|ipc| ipc.recv()),))
+                },
+            )
+            .context("define weft:app/ipc#recv")?;
+    }
+
     linker
-        .instance("weft:app/notify@0.1.0")
-        .context("define weft:app/notify instance")?
-        .func_wrap("ready", |_: wasmtime::StoreContextMut<'_, State>, ()| {
-            println!("READY");
-            Ok::<(), wasmtime::Error>(())
-        })
-        .context("define weft:app/notify#ready")?;
+        .instance("weft:app/fetch@0.1.0")
+        .context("define weft:app/fetch instance")?
+        .func_wrap(
+            "fetch",
+            |_: wasmtime::StoreContextMut<'_, State>,
+             (url, method, headers, body): (
+                String,
+                String,
+                Vec<(String, String)>,
+                Option<Vec<u8>>,
+            )|
+             -> wasmtime::Result<(
+                Result<(u16, String, Vec<u8>), String>,
+            )> {
+                let result = host_fetch(&url, &method, &headers, body.as_deref());
+                Ok((result,))
+            },
+        )
+        .context("define weft:app/fetch#fetch")?;
+
+    linker
+        .instance("weft:app/notifications@0.1.0")
+        .context("define weft:app/notifications instance")?
+        .func_wrap(
+            "notify",
+            |_: wasmtime::StoreContextMut<'_, State>,
+             (title, body, icon): (String, String, Option<String>)|
+             -> wasmtime::Result<(Result<(), String>,)> {
+                let result = host_notify(&title, &body, icon.as_deref());
+                Ok((result,))
+            },
+        )
+        .context("define weft:app/notifications#notify")?;
 
     let mut ctx_builder = WasiCtxBuilder::new();
     ctx_builder.inherit_stdout().inherit_stderr();
 
     if let Some(socket_path) = ipc_socket {
         ctx_builder.env("WEFT_IPC_SOCKET", socket_path);
+        if let Some(ipc) = IpcState::connect(socket_path) {
+            *ipc_state.lock().unwrap() = Some(ipc);
+        } else {
+            tracing::warn!("weft:app/ipc: could not connect to IPC socket {socket_path}");
+        }
     }
 
     if let Ok(portal_socket) = std::env::var("WEFT_FILE_PORTAL_SOCKET") {
@@ -162,6 +295,7 @@ fn run_module(
         State {
             ctx,
             table: ResourceTable::new(),
+            ipc: ipc_state,
         },
     );
 
@@ -173,6 +307,60 @@ fn run_module(
         .call_run(&mut store)
         .context("call run")?
         .map_err(|()| anyhow::anyhow!("wasm component run exited with error"))
+}
+
+#[cfg(feature = "net-fetch")]
+fn host_fetch(
+    url: &str,
+    method: &str,
+    headers: &[(String, String)],
+    body: Option<&[u8]>,
+) -> Result<(u16, String, Vec<u8>), String> {
+    use std::io::Read;
+    let mut req = ureq::request(method, url);
+    for (name, value) in headers {
+        req = req.set(name, value);
+    }
+    let response = match body {
+        Some(b) => req.send_bytes(b),
+        None => req.call(),
+    }
+    .map_err(|e| e.to_string())?;
+    let status = response.status();
+    let content_type = response.content_type().to_owned();
+    let mut body_bytes = Vec::new();
+    response
+        .into_reader()
+        .read_to_end(&mut body_bytes)
+        .map_err(|e| e.to_string())?;
+    Ok((status, content_type, body_bytes))
+}
+
+#[cfg(not(feature = "net-fetch"))]
+fn host_fetch(
+    _url: &str,
+    _method: &str,
+    _headers: &[(String, String)],
+    _body: Option<&[u8]>,
+) -> Result<(u16, String, Vec<u8>), String> {
+    Err("net-fetch capability not compiled in".to_owned())
+}
+
+fn host_notify(title: &str, body: &str, icon: Option<&str>) -> Result<(), String> {
+    let mut cmd = std::process::Command::new("notify-send");
+    if let Some(i) = icon {
+        cmd.arg("--icon").arg(i);
+    }
+    cmd.arg("--").arg(title).arg(body);
+    cmd.status()
+        .map_err(|e| e.to_string())
+        .and_then(|s| {
+            if s.success() {
+                Ok(())
+            } else {
+                Err(format!("notify-send exited with {s}"))
+            }
+        })
 }
 
 #[cfg(feature = "seccomp")]

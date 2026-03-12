@@ -25,9 +25,18 @@ jobs:
       - name: cargo fmt
         run: cargo fmt --all --check
       - name: cargo clippy (cross-platform crates)
-        run: cargo clippy --workspace --exclude weft-compositor --all-targets -- -D warnings
+        run: >
+          cargo clippy --workspace
+          --exclude weft-compositor
+          --exclude weft-servo-shell
+          --exclude weft-app-shell
+          --all-targets -- -D warnings
       - name: cargo test (cross-platform crates)
-        run: cargo test --workspace --exclude weft-compositor
+        run: >
+          cargo test --workspace
+          --exclude weft-compositor
+          --exclude weft-servo-shell
+          --exclude weft-app-shell
 
   # Wayland compositor and other Linux-only system crates.
   # These require libwayland-server and other Linux kernel interfaces.
@@ -52,8 +61,18 @@ jobs:
             libinput-dev \
             libseat-dev \
             libudev-dev \
+            libsystemd-dev \
             pkg-config
-      - name: cargo clippy (weft-compositor)
-        run: cargo clippy -p weft-compositor --all-targets -- -D warnings
-      - name: cargo test (weft-compositor)
-        run: cargo test -p weft-compositor
+      - name: cargo clippy (linux-only crates)
+        run: >
+          cargo clippy
+          -p weft-compositor
+          -p weft-servo-shell
+          -p weft-app-shell
+          --all-targets -- -D warnings
+      - name: cargo test (linux-only crates)
+        run: >
+          cargo test
+          -p weft-compositor
+          -p weft-servo-shell
+          -p weft-app-shell

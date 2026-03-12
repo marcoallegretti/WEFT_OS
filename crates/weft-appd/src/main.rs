@@ -26,7 +26,7 @@ struct SessionRegistry {
     broadcast: tokio::sync::broadcast::Sender<Response>,
     abort_senders: std::collections::HashMap<u64, tokio::sync::oneshot::Sender<()>>,
     compositor_tx: Option<compositor_client::CompositorSender>,
-    ipc_socket: Option<PathBuf>,
+    ipc_senders: std::collections::HashMap<u64, tokio::sync::mpsc::Sender<String>>,
 }
 
 impl Default for SessionRegistry {
@@ -38,7 +38,7 @@ impl Default for SessionRegistry {
             broadcast,
             abort_senders: std::collections::HashMap::new(),
             compositor_tx: None,
-            ipc_socket: None,
+            ipc_senders: std::collections::HashMap::new(),
         }
     }
 }
@@ -105,6 +105,25 @@ impl SessionRegistry {
         self.abort_senders.remove(&session_id);
     }
 
+    pub(crate) fn register_ipc_sender(
+        &mut self,
+        session_id: u64,
+        tx: tokio::sync::mpsc::Sender<String>,
+    ) {
+        self.ipc_senders.insert(session_id, tx);
+    }
+
+    pub(crate) fn ipc_sender_for(
+        &self,
+        session_id: u64,
+    ) -> Option<tokio::sync::mpsc::Sender<String>> {
+        self.ipc_senders.get(&session_id).cloned()
+    }
+
+    pub(crate) fn remove_ipc_sender(&mut self, session_id: u64) {
+        self.ipc_senders.remove(&session_id);
+    }
+
     pub(crate) fn subscribe(&self) -> tokio::sync::broadcast::Receiver<Response> {
         self.broadcast.subscribe()
     }
@@ -143,8 +162,6 @@ async fn run() -> anyhow::Result<()> {
     tracing::info!(path = %socket_path.display(), "IPC socket listening");
 
     let registry: Registry = Arc::new(Mutex::new(SessionRegistry::default()));
-    registry.lock().await.ipc_socket = Some(socket_path.clone());
-
     if let Some(path) = compositor_client::socket_path() {
         let tx = compositor_client::spawn(path);
         registry.lock().await.compositor_tx = Some(tx);
@@ -272,6 +289,17 @@ async fn handle_connection(
     stream: tokio::net::UnixStream,
     registry: Registry,
 ) -> anyhow::Result<()> {
+    #[cfg(unix)]
+    {
+        let cred = stream
+            .peer_cred()
+            .context("SO_PEERCRED")?;
+        let our_uid = unsafe { libc::getuid() };
+        if cred.uid() != our_uid {
+            anyhow::bail!("peer UID {} != process UID {}; connection rejected", cred.uid(), our_uid);
+        }
+    }
+
     let (reader, writer) = tokio::io::split(stream);
     let mut reader = tokio::io::BufReader::new(reader);
     let mut writer = tokio::io::BufWriter::new(writer);
@@ -285,6 +313,13 @@ async fn handle_connection(
     Ok(())
 }
 
+pub(crate) fn session_ipc_socket_path(session_id: u64) -> Option<PathBuf> {
+    let runtime_dir = std::env::var("XDG_RUNTIME_DIR").ok()?;
+    let dir = PathBuf::from(runtime_dir).join("weft");
+    std::fs::create_dir_all(&dir).ok()?;
+    Some(dir.join(format!("ipc-{session_id}.sock")))
+}
+
 pub(crate) async fn dispatch(req: Request, registry: &Registry) -> Response {
     match req {
         Request::LaunchApp {
@@ -295,7 +330,15 @@ pub(crate) async fn dispatch(req: Request, registry: &Registry) -> Response {
             tracing::info!(session_id, %app_id, "launched");
             let abort_rx = registry.lock().await.register_abort(session_id);
             let compositor_tx = registry.lock().await.compositor_tx.clone();
-            let ipc_socket = registry.lock().await.ipc_socket.clone();
+            let ipc_socket = session_ipc_socket_path(session_id);
+            let broadcast = registry.lock().await.broadcast().clone();
+            if let Some(ref sock_path) = ipc_socket {
+                if let Some(tx) =
+                    runtime::spawn_ipc_relay(session_id, sock_path.clone(), broadcast).await
+                {
+                    registry.lock().await.register_ipc_sender(session_id, tx);
+                }
+            }
             let reg = Arc::clone(registry);
             let aid = app_id.clone();
             tokio::spawn(async move {
@@ -338,6 +381,36 @@ pub(crate) async fn dispatch(req: Request, registry: &Registry) -> Response {
         Request::QueryInstalledApps => {
             let apps = scan_installed_apps();
             Response::InstalledApps { apps }
+        }
+        Request::IpcForward {
+            session_id,
+            payload,
+        } => {
+            if let Some(tx) = registry.lock().await.ipc_sender_for(session_id) {
+                if tx.send(payload).await.is_err() {
+                    tracing::warn!(session_id, "IPC relay sender closed");
+                    registry.lock().await.remove_ipc_sender(session_id);
+                }
+            }
+            Response::AppState {
+                session_id,
+                state: ipc::AppStateKind::Running,
+            }
+        }
+        Request::PanelGesture {
+            gesture_type,
+            fingers,
+            dx,
+            dy,
+        } => {
+            let msg = Response::NavigationGesture {
+                gesture_type,
+                fingers,
+                dx,
+                dy,
+            };
+            let _ = registry.lock().await.broadcast().send(msg.clone());
+            msg
         }
     }
 }

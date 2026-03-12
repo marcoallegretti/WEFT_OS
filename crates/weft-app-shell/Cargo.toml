@@ -13,7 +13,7 @@ path = "src/main.rs"
 # weft-servo-shell/SERVO_PIN.md to this file before building; they are not
 # included here to avoid pulling the Servo monorepo (~1 GB) into every
 # `cargo check` cycle.
-servo-embed = []
+servo-embed = ["dep:serde", "dep:toml"]
 
 [dependencies]
 anyhow = "1.0"
@@ -23,3 +23,5 @@ wayland-client = "0.31"
 wayland-backend = "0.3"
 wayland-scanner = "0.31"
 bitflags = "2"
+serde = { version = "1", features = ["derive"], optional = true }
+toml = { version = "0.8", optional = true }

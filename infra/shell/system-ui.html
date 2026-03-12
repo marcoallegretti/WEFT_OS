@@ -301,6 +301,15 @@
           });
         } else if (msg.type === 'LAUNCH_ACK') {
           ensureTaskbarEntry(msg.session_id, msg.app_id || null);
+        } else if (msg.type === 'NAVIGATION_GESTURE') {
+          document.dispatchEvent(new CustomEvent('weft:navigation-gesture', {
+            detail: {
+              gesture_type: msg.gesture_type,
+              fingers: msg.fingers,
+              dx: msg.dx,
+              dy: msg.dy,
+            },
+          }));
         } else if (msg.type === 'ERROR') {
           console.warn('appd error', msg.code, msg.message);
         }

@@ -17,13 +17,13 @@ pub mod server {
 pub use server::zweft_shell_manager_v1::ZweftShellManagerV1;
 pub use server::zweft_shell_window_v1::ZweftShellWindowV1;
 
-use wayland_server::{DisplayHandle, GlobalDispatch, backend::GlobalId};
+use wayland_server::{DisplayHandle, GlobalDispatch, Resource, backend::GlobalId};
 
 pub struct WeftShellState {
     _global: GlobalId,
+    panels: Vec<ZweftShellWindowV1>,
 }
 
-#[allow(dead_code)]
 pub struct WeftShellWindowData {
     pub app_id: String,
     pub title: String,
@@ -38,15 +38,51 @@ impl WeftShellState {
         D: GlobalDispatch<ZweftShellManagerV1, ()>,
         D: 'static,
     {
-        let global = display.create_global::<D, ZweftShellManagerV1, ()>(1, ());
-        Self { _global: global }
+        let global = display.create_global::<D, ZweftShellManagerV1, ()>(2, ());
+        Self {
+            _global: global,
+            panels: Vec::new(),
+        }
+    }
+
+    pub fn add_panel(&mut self, window: ZweftShellWindowV1) {
+        self.panels.push(window);
+    }
+
+    pub fn reconfigure_panels(&self, x: i32, y: i32, width: i32, height: i32) {
+        for panel in &self.panels {
+            if panel.is_alive() {
+                panel.configure(x, y, width, height, 0);
+            }
+        }
+    }
+
+    pub fn send_navigation_gesture_to_panels(
+        &self,
+        gesture_type: u32,
+        fingers: u32,
+        dx: f64,
+        dy: f64,
+    ) {
+        for panel in &self.panels {
+            if panel.is_alive() && panel.version() >= 2 {
+                panel.navigation_gesture(gesture_type, fingers, dx, dy);
+            }
+        }
+    }
+
+    pub fn retain_alive_panels(&mut self) {
+        self.panels.retain(|p| p.is_alive());
+    }
+
+    pub fn panels(&self) -> impl Iterator<Item = &ZweftShellWindowV1> {
+        self.panels.iter()
     }
 }
 
 #[cfg(test)]
 mod tests {
     use std::sync::atomic::Ordering;
-    use wayland_server::Resource;
 
     use super::*;
 
@@ -83,14 +119,14 @@ mod tests {
     fn manager_interface_name_and_version() {
         let iface = ZweftShellManagerV1::interface();
         assert_eq!(iface.name, "zweft_shell_manager_v1");
-        assert_eq!(iface.version, 1);
+        assert_eq!(iface.version, 2);
     }
 
     #[test]
     fn window_interface_name_and_version() {
         let iface = ZweftShellWindowV1::interface();
         assert_eq!(iface.name, "zweft_shell_window_v1");
-        assert_eq!(iface.version, 1);
+        assert_eq!(iface.version, 2);
     }
 
     #[test]

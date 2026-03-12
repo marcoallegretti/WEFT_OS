@@ -7,9 +7,16 @@ After=weft-compositor.service servo-shell.service
 [Service]
 Type=notify
 Environment=WEFT_RUNTIME_BIN=/packages/system/weft-runtime/active/bin/weft-runtime
+Environment=WEFT_APP_SHELL_BIN=/packages/system/weft-app-shell/active/bin/weft-app-shell
+Environment=WEFT_FILE_PORTAL_BIN=/packages/system/weft-file-portal/active/bin/weft-file-portal
+Environment=WEFT_MOUNT_HELPER=/packages/system/weft-mount-helper/active/bin/weft-mount-helper
+PassEnvironment=WAYLAND_DISPLAY XDG_RUNTIME_DIR DISPLAY
 ExecStart=/packages/system/weft-appd/active/bin/weft-appd
 Restart=on-failure
 RestartSec=1s
+ProtectSystem=strict
+PrivateTmp=true
+ReadWritePaths=%t
 
 [Install]
 WantedBy=graphical.target

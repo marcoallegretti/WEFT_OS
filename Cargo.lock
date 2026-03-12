@@ -3974,6 +3974,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "weft-app-shell"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "bitflags 2.11.0",
+ "serde",
+ "toml 0.8.23",
+ "tracing",
+ "tracing-subscriber",
+ "wayland-backend",
+ "wayland-client",
+ "wayland-scanner",
+]
+
+[[package]]
 name = "weft-appd"
 version = "0.1.0"
 dependencies = [

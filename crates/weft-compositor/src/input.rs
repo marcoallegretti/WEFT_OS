@@ -273,35 +273,48 @@ fn handle_touch_cancel<B: InputBackend>(
     }
 }
 
+const NAVIGATION_SWIPE_FINGERS: u32 = 3;
+const NAVIGATION_SWIPE_THRESHOLD: f64 = 100.0;
+
 fn handle_gesture_swipe_begin<B: InputBackend>(
     state: &mut WeftCompositorState,
     event: B::GestureSwipeBeginEvent,
 ) {
     let serial = SERIAL_COUNTER.next_serial();
+    let fingers = event.fingers();
     if let Some(pointer) = state.seat.get_pointer() {
         pointer.gesture_swipe_begin(
             state,
             &smithay::input::pointer::GestureSwipeBeginEvent {
                 serial,
                 time: event.time_msec(),
-                fingers: event.fingers(),
+                fingers,
             },
         );
     }
+    state.gesture_state.in_progress = true;
+    state.gesture_state.fingers = fingers;
+    state.gesture_state.dx = 0.0;
+    state.gesture_state.dy = 0.0;
 }
 
 fn handle_gesture_swipe_update<B: InputBackend>(
     state: &mut WeftCompositorState,
     event: B::GestureSwipeUpdateEvent,
 ) {
+    let delta = event.delta();
     if let Some(pointer) = state.seat.get_pointer() {
         pointer.gesture_swipe_update(
             state,
             &smithay::input::pointer::GestureSwipeUpdateEvent {
                 time: event.time_msec(),
-                delta: event.delta(),
+                delta,
             },
         );
+    }
+    if state.gesture_state.in_progress {
+        state.gesture_state.dx += delta.x;
+        state.gesture_state.dy += delta.y;
     }
 }
 
@@ -310,15 +323,27 @@ fn handle_gesture_swipe_end<B: InputBackend>(
     event: B::GestureSwipeEndEvent,
 ) {
     let serial = SERIAL_COUNTER.next_serial();
+    let cancelled = event.cancelled();
     if let Some(pointer) = state.seat.get_pointer() {
         pointer.gesture_swipe_end(
             state,
             &smithay::input::pointer::GestureSwipeEndEvent {
                 serial,
                 time: event.time_msec(),
-                cancelled: event.cancelled(),
+                cancelled,
             },
         );
+    }
+    let gs = std::mem::take(&mut state.gesture_state);
+    if !cancelled
+        && gs.in_progress
+        && gs.fingers >= NAVIGATION_SWIPE_FINGERS
+        && (gs.dx.abs() >= NAVIGATION_SWIPE_THRESHOLD
+            || gs.dy.abs() >= NAVIGATION_SWIPE_THRESHOLD)
+    {
+        state
+            .weft_shell_state
+            .send_navigation_gesture_to_panels(0, gs.fingers, gs.dx, gs.dy);
     }
 }
 

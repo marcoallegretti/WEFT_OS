@@ -173,6 +173,9 @@ impl ApplicationHandler<ServoWake> for App {
         let rendering_context = build_rendering_ctx(event_loop, &window, size);
 
         let user_content_manager = Rc::new(UserContentManager::new(&servo));
+        if let Some(kit_js) = load_ui_kit_script() {
+            user_content_manager.add_script(Rc::new(UserScript::new(kit_js, None)));
+        }
         let bridge_js = format!(
             r#"(function(){{var ws=new WebSocket('ws://127.0.0.1:{p}');var q=[];var r=false;ws.onopen=function(){{r=true;q.forEach(function(m){{ws.send(JSON.stringify(m))}});q.length=0}};window.weftIpc={{send:function(m){{if(r)ws.send(JSON.stringify(m));else q.push(m)}},onmessage:null}};ws.onmessage=function(e){{if(window.weftIpc.onmessage)window.weftIpc.onmessage(JSON.parse(e.data))}}}})()"#,
             p = self.ws_port
@@ -213,6 +216,13 @@ impl ApplicationHandler<ServoWake> for App {
                 }
                 Err(e) => tracing::warn!("shell client dispatch error: {e}"),
                 Ok(true) => {}
+            }
+            let gestures = sc.take_pending_gestures();
+            if !gestures.is_empty() {
+                let ws_port = self.ws_port;
+                std::thread::spawn(move || {
+                    forward_gestures_to_appd(ws_port, &gestures);
+                });
             }
         }
         if let Some(servo) = &self.servo {
@@ -340,6 +350,15 @@ fn resolve_weft_app_url(url: &ServoUrl) -> Option<ServoUrl> {
     ServoUrl::parse(&s).ok()
 }
 
+fn load_ui_kit_script() -> Option<String> {
+    let path = std::env::var("WEFT_UI_KIT_JS")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|_| {
+            std::path::PathBuf::from("/usr/share/weft/system/weft-ui-kit.js")
+        });
+    std::fs::read_to_string(path).ok()
+}
+
 fn app_store_roots() -> Vec<PathBuf> {
     if let Ok(v) = std::env::var("WEFT_APP_STORE") {
         return vec![PathBuf::from(v)];
@@ -380,4 +399,38 @@ pub fn run(
     event_loop
         .run_app(&mut app)
         .map_err(|e| anyhow::anyhow!("event loop run: {e}"))
+}
+
+fn forward_gestures_to_appd(
+    ws_port: u16,
+    gestures: &[crate::shell_client::PendingGesture],
+) {
+    use std::net::TcpStream;
+    let addr = format!("127.0.0.1:{ws_port}");
+    let stream = match TcpStream::connect(&addr) {
+        Ok(s) => s,
+        Err(e) => {
+            tracing::warn!("gesture forward: connect to {addr} failed: {e}");
+            return;
+        }
+    };
+    let url = format!("ws://{addr}/");
+    let (mut ws, _) = match tungstenite::client::client(url, stream) {
+        Ok(pair) => pair,
+        Err(e) => {
+            tracing::warn!("gesture forward: WebSocket handshake failed: {e}");
+            return;
+        }
+    };
+    for g in gestures {
+        let json = format!(
+            r#"{{"type":"PANEL_GESTURE","gesture_type":{},"fingers":{},"dx":{},"dy":{}}}"#,
+            g.gesture_type, g.fingers, g.dx, g.dy
+        );
+        if let Err(e) = ws.send(tungstenite::Message::Text(json)) {
+            tracing::warn!("gesture forward: send failed: {e}");
+            break;
+        }
+    }
+    let _ = ws.close(None);
 }

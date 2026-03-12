@@ -539,6 +539,9 @@ fn connector_connected(
 
     state.space.map_output(&output, (0, 0));
     tracing::info!(?name, "output connected");
+    let (pw, ph) = (wl_mode.size.w, wl_mode.size.h);
+    state.weft_shell_state.reconfigure_panels(0, 0, pw, ph);
+    state.weft_shell_state.retain_alive_panels();
     render_output(state, node, crtc);
 }
 
@@ -558,6 +561,15 @@ fn connector_disconnected(
     {
         state.space.unmap_output(&surface.output);
     }
+    let (pw, ph) = state
+        .space
+        .outputs()
+        .next()
+        .and_then(|o| state.space.output_geometry(o))
+        .map(|g| (g.size.w, g.size.h))
+        .unwrap_or((0, 0));
+    state.weft_shell_state.reconfigure_panels(0, 0, pw, ph);
+    state.weft_shell_state.retain_alive_panels();
 }
 
 #[cfg(target_os = "linux")]

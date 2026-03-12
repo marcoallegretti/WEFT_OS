@@ -43,7 +43,7 @@
 
   <!-- ───────────────────────────── Manager ───────────────────────────── -->
 
-  <interface name="zweft_shell_manager_v1" version="1">
+  <interface name="zweft_shell_manager_v1" version="2">
 
     <description summary="shell session manager">
       Bound once by weft-servo-shell. The manager owns the shell session.
@@ -90,7 +90,7 @@
 
   <!-- ───────────────────────────── Window ────────────────────────────── -->
 
-  <interface name="zweft_shell_window_v1" version="1">
+  <interface name="zweft_shell_window_v1" version="2">
 
     <description summary="a compositor-managed window slot">
       Represents one visual window. The compositor controls the effective
@@ -191,6 +191,24 @@
       <arg name="tv_sec"   type="uint" summary="seconds component of presentation time"/>
       <arg name="tv_nsec"  type="uint" summary="nanoseconds component of presentation time"/>
       <arg name="refresh"  type="uint" summary="output refresh interval in nanoseconds"/>
+    </event>
+
+    <event name="navigation_gesture" since="2">
+      <description summary="compositor-recognized navigation gesture">
+        Sent to panel windows only when the compositor recognizes a
+        multi-touch gesture as a navigation intent rather than a standard
+        pointer gesture. The shell uses this to present the launcher,
+        switch applications, or perform other system-level transitions.
+
+        type values: 0 = swipe, 1 = pinch, 2 = hold.
+        dx and dy are total displacement in logical pixels at gesture end.
+        The compositor only emits this after the gesture has ended and
+        met the recognition threshold.
+      </description>
+      <arg name="type"    type="uint"  summary="gesture type: 0=swipe 1=pinch 2=hold"/>
+      <arg name="fingers" type="uint"  summary="number of fingers"/>
+      <arg name="dx"      type="fixed" summary="horizontal displacement in logical pixels"/>
+      <arg name="dy"      type="fixed" summary="vertical displacement in logical pixels"/>
     </event>
 
   </interface>

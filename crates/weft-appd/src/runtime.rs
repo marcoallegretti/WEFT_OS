@@ -1,12 +1,62 @@
 use std::path::PathBuf;
 use std::time::Duration;
 
-use tokio::io::{AsyncBufReadExt, BufReader};
+use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader, BufWriter};
 use weft_ipc_types::AppdToCompositor;
 
 use crate::Registry;
 use crate::compositor_client::CompositorSender;
 use crate::ipc::{AppStateKind, Response};
+
+pub(crate) async fn spawn_ipc_relay(
+    session_id: u64,
+    socket_path: PathBuf,
+    broadcast: tokio::sync::broadcast::Sender<Response>,
+) -> Option<tokio::sync::mpsc::Sender<String>> {
+    let _ = std::fs::remove_file(&socket_path);
+    let listener = tokio::net::UnixListener::bind(&socket_path).ok()?;
+    let (html_to_wasm_tx, mut html_to_wasm_rx) = tokio::sync::mpsc::channel::<String>(64);
+    tokio::spawn(async move {
+        let Ok((stream, _)) = listener.accept().await else {
+            tracing::warn!(session_id, "IPC relay: failed to accept connection");
+            let _ = std::fs::remove_file(&socket_path);
+            return;
+        };
+        let (reader, writer) = tokio::io::split(stream);
+        let mut reader = BufReader::new(reader);
+        let mut writer = BufWriter::new(writer);
+        loop {
+            let mut line = String::new();
+            tokio::select! {
+                n = reader.read_line(&mut line) => {
+                    match n {
+                        Ok(0) | Err(_) => break,
+                        Ok(_) => {
+                            let payload = line.trim_end().to_owned();
+                            let _ = broadcast.send(Response::IpcMessage { session_id, payload });
+                        }
+                    }
+                }
+                msg = html_to_wasm_rx.recv() => {
+                    match msg {
+                        Some(payload) => {
+                            let mut data = payload;
+                            data.push('\n');
+                            if writer.write_all(data.as_bytes()).await.is_err()
+                                || writer.flush().await.is_err()
+                            {
+                                break;
+                            }
+                        }
+                        None => break,
+                    }
+                }
+            }
+        }
+        let _ = std::fs::remove_file(&socket_path);
+    });
+    Some(html_to_wasm_tx)
+}
 
 const READY_TIMEOUT: Duration = Duration::from_secs(30);
 

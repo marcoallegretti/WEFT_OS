@@ -8,3 +8,45 @@ interface notify {
     /// Running state.
     ready: func();
 }
+
+/// Host interface for bidirectional IPC between the Wasm component and the
+/// HTML front-end served by weft-app-shell.  Messages are JSON strings.
+interface ipc {
+    /// Send a payload to the HTML front-end.  Returns an error string if the
+    /// channel is not connected or the write fails.
+    send: func(payload: string) -> result<_, string>;
+
+    /// Return the next pending payload from the HTML front-end, or none if
+    /// no message is currently available.  Non-blocking.
+    recv: func() -> option<string>;
+}
+
+/// Host interface for outbound HTTP requests.  Requires the net:fetch
+/// capability to be declared in wapp.toml.
+interface fetch {
+    record response {
+        status: u16,
+        content-type: string,
+        body: list<u8>,
+    }
+
+    /// Perform a synchronous HTTP request.  method is GET, POST, etc.
+    /// headers is a list of (name, value) pairs.  body is the request body.
+    fetch: func(
+        url: string,
+        method: string,
+        headers: list<tuple<string, string>>,
+        body: option<list<u8>>,
+    ) -> result<response, string>;
+}
+
+/// Host interface for sending desktop notifications.  Requires the
+/// sys:notifications capability to be declared in wapp.toml.
+interface notifications {
+    /// Send a desktop notification.  icon is an optional XDG icon name.
+    notify: func(
+        title: string,
+        body: string,
+        icon: option<string>,
+    ) -> result<_, string>;
+}

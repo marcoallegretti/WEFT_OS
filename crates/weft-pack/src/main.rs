@@ -189,14 +189,8 @@ fn check_package(dir: &Path) -> anyhow::Result<String> {
             errors.push(format!("ui.entry '{}' not found", ui_path.display()));
         }
 
-        const KNOWN_CAPS: &[&str] = &[
-            "fs:rw:app-data",
-            "fs:read:app-data",
-            "fs:rw:xdg-documents",
-            "fs:read:xdg-documents",
-        ];
         for cap in m.package.capabilities.iter().flatten() {
-            if !KNOWN_CAPS.contains(&cap.as_str()) {
+            if !is_known_capability(cap) {
                 errors.push(format!("unknown capability '{cap}'"));
             }
         }
@@ -233,6 +227,28 @@ fn print_info(m: &Manifest) {
             println!("cap:     {cap}");
         }
     }
+}
+
+fn is_known_capability(cap: &str) -> bool {
+    const EXACT: &[&str] = &[
+        "fs:rw:app-data",
+        "fs:read:app-data",
+        "fs:rw:xdg-documents",
+        "fs:read:xdg-documents",
+        "net:fetch:*",
+        "hw:gpu:compute",
+        "hw:gpu:render",
+        "sys:notifications",
+        "sys:clipboard:read",
+        "sys:clipboard:write",
+    ];
+    if EXACT.contains(&cap) {
+        return true;
+    }
+    if let Some(domain) = cap.strip_prefix("net:fetch:") {
+        return !domain.is_empty() && domain != "*";
+    }
+    false
 }
 
 fn is_valid_app_id(id: &str) -> bool {

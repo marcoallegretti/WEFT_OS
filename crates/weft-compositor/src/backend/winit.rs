@@ -117,6 +117,13 @@ pub fn run() -> anyhow::Result<()> {
                 output.set_preferred(new_mode);
                 state.space.map_output(&output, (0, 0));
                 damage_tracker = OutputDamageTracker::from_output(&output);
+                state.weft_shell_state.reconfigure_panels(
+                    0,
+                    0,
+                    size.w,
+                    size.h,
+                );
+                state.weft_shell_state.retain_alive_panels();
             }
             WinitEvent::Input(input_event) => {
                 input::process_input_event(state, input_event);
