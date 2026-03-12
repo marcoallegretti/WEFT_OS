@@ -36,11 +36,11 @@ in {
   weft-compositor = mkWeftPkg {
     pname = "weft-compositor";
     extraBuildInputs = with pkgs; [
-      libdrm mesa wayland libxkbcommon seatd udev dbus libGL libdisplay-info libinput
+      libdrm mesa libgbm wayland libxkbcommon seatd udev dbus libGL libdisplay-info libinput
     ];
     extraNativeBuildInputs = with pkgs; [ wayland-scanner ];
     extraEnv = {
-      RUSTFLAGS = "-L${pkgs.mesa}/lib -L${pkgs.libinput}/lib";
+      RUSTFLAGS = "-L${pkgs.libgbm}/lib -L${pkgs.libinput}/lib";
     };
   };
 
