@@ -309,7 +309,7 @@ fn run_module(
         .map_err(|()| anyhow::anyhow!("wasm component run exited with error"))
 }
 
-#[cfg(feature = "net-fetch")]
+#[cfg(all(feature = "wasmtime-runtime", feature = "net-fetch"))]
 fn host_fetch(
     url: &str,
     method: &str,
@@ -336,7 +336,7 @@ fn host_fetch(
     Ok((status, content_type, body_bytes))
 }
 
-#[cfg(not(feature = "net-fetch"))]
+#[cfg(all(feature = "wasmtime-runtime", not(feature = "net-fetch")))]
 fn host_fetch(
     _url: &str,
     _method: &str,
@@ -346,6 +346,7 @@ fn host_fetch(
     Err("net-fetch capability not compiled in".to_owned())
 }
 
+#[cfg(feature = "wasmtime-runtime")]
 fn host_notify(title: &str, body: &str, icon: Option<&str>) -> Result<(), String> {
     let mut cmd = std::process::Command::new("notify-send");
     if let Some(i) = icon {

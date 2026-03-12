@@ -340,6 +340,7 @@ fn load_ui_kit_script() -> Option<String> {
     std::fs::read_to_string(ui_kit_path()).ok()
 }
 
+#[allow(dead_code)]
 fn resolve_weft_system_url(url: &ServoUrl) -> Option<ServoUrl> {
     if url.scheme() != "weft-system" { return None; }
     let host = url.host_str().unwrap_or("");
