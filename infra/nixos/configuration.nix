@@ -6,7 +6,7 @@
     "${modulesPath}/virtualisation/qemu-vm.nix"
   ];
 
-  system.stateVersion = "24.11";
+  system.stateVersion = "25.05";
 
   boot.loader.grub = {
     enable = true;
