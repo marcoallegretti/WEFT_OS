@@ -1,0 +1,6 @@
+package org:weft-demo-notes@0.1.0;
+
+world app {
+    import weft:app/notify@0.1.0;
+    import weft:app/ipc@0.1.0;
+}

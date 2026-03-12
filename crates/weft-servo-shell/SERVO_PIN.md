@@ -10,12 +10,14 @@
 | Crate   | `servo` (package name as of 2026-03-11; previously `libservo`)                    |
 | Feature | `servo-embed` (optional; off by default)                                           |
 
-## Adding the Cargo dependencies
+## Cargo dependencies
 
-The Servo deps are **not** in `Cargo.toml` by default to avoid pulling the
-Servo monorepo (~1 GB) into every `cargo check` cycle. To activate, add the
-following to `crates/weft-servo-shell/Cargo.toml` and change the `servo-embed`
-feature line to declare `dep:servo`, `dep:winit`, and `dep:softbuffer`:
+The Servo deps are wired in `crates/weft-servo-shell/Cargo.toml` and
+`crates/weft-app-shell/Cargo.toml` under the `servo-embed` optional feature.
+They are off by default to avoid pulling the Servo monorepo (~1 GB) into every
+`cargo check` cycle.
+
+Current `Cargo.toml` block (already committed):
 
 ```toml
 [features]
@@ -37,7 +39,7 @@ version = "0.4"
 optional = true
 ```
 
-Then build:
+To build:
 
 ```sh
 cargo build -p weft-servo-shell --features servo-embed
@@ -75,17 +77,15 @@ DMA-BUF buffer sharing with the compositor transparently.
 
 - **GAP-1**: ~~Wayland input events not forwarded to Servo~~ **Resolved** — keyboard and
   mouse events forwarded via `webview.notify_input_event`; key mapping in `keyutils.rs`.
-- **GAP-2**: EGL `WindowRenderingContext` path scaffolded (`WEFT_EGL_RENDERING=1`).
-  When EGL is active, Servo presents frames via surfman's `eglSwapBuffers`; Mesa handles
-  DMA-BUF buffer sharing with the compositor transparently — no explicit
-  `zwp_linux_dmabuf_v1` code is needed in the shell for basic rendering.
-  The `zweft_shell_manager_v1` event queue is now dispatched each frame so `configure`,
-  `focus_changed`, and `window_closed` events are processed; `window_closed` triggers a
-  clean Servo shutdown.
-  Remaining gap: the `ZweftShellWindowV1` is created with `surface = null`; the winit
-  `wl_surface` is not yet associated with the shell window slot (requires sharing a single
-  Wayland connection between winit and the shell client, which is not currently feasible
-  without significant refactoring).
+- **GAP-2**: ~~`ZweftShellWindowV1` created with `surface = null`~~ **Resolved** —
+  `ShellClient::connect_with_display(display_ptr, surface_ptr)` uses
+  `Backend::from_foreign_display` to share winit's `wl_display` connection; the winit
+  `wl_surface` pointer is passed directly to `create_window`, associating the compositor
+  shell slot with the actual rendered surface. `ShellClient` is now constructed inside
+  `resumed()` after the winit window exists, not before the event loop. EGL path and
+  per-frame event dispatch are unchanged.
+  Protocol note: `wayland-scanner 0.31` generates `_type` (not `r#type`) for the
+  `navigation_gesture` event arg named `type`.
 - **GAP-3**: WebGPU adapter on Mesa may fail CTS — validation task, requires Mesa GPU hardware.
 - **GAP-4**: ~~CSS Grid~~ **Grid resolved** (Taffy-backed, fully wired).
   ~~CSS `backdrop-filter` unimplemented~~ **`backdrop-filter` resolved** (servo/servo issue

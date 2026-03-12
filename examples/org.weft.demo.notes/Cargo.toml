@@ -1,0 +1,17 @@
+[package]
+name = "org-weft-demo-notes"
+version = "0.1.0"
+edition = "2024"
+
+[[bin]]
+name = "app"
+path = "src/main.rs"
+
+[dependencies]
+wit-bindgen = "0.53"
+serde_json = "1"
+
+[profile.release]
+opt-level = "z"
+strip = true
+lto = true

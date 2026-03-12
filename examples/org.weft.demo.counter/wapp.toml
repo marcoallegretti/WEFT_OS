@@ -1,0 +1,12 @@
+[package]
+id = "org.weft.demo.counter"
+name = "Counter"
+version = "0.1.0"
+description = "Stateless counter demonstrating weft:app/ipc"
+author = "WEFT OS"
+
+[runtime]
+module = "app.wasm"
+
+[ui]
+entry = "ui/index.html"

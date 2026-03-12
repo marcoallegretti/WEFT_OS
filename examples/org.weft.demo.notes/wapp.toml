@@ -1,0 +1,13 @@
+[package]
+id = "org.weft.demo.notes"
+name = "Notes"
+version = "0.1.0"
+description = "Persistent notes demonstrating fs:rw:app-data via weft:app/ipc"
+author = "WEFT OS"
+capabilities = ["fs:rw:app-data"]
+
+[runtime]
+module = "app.wasm"
+
+[ui]
+entry = "ui/index.html"

@@ -1,0 +1,164 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Notes</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    background: #0f0f0f;
+    color: #e8e8e8;
+    display: flex;
+    flex-direction: column;
+    height: 100vh;
+    padding: 24px;
+    gap: 16px;
+  }
+  header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    flex-shrink: 0;
+  }
+  h1 {
+    font-size: 14px;
+    font-weight: 500;
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
+    color: #666;
+  }
+  .actions {
+    display: flex;
+    gap: 8px;
+    align-items: center;
+  }
+  button {
+    height: 32px;
+    padding: 0 16px;
+    border-radius: 8px;
+    border: 1px solid #2a2a2a;
+    background: #1a1a1a;
+    color: #e8e8e8;
+    font-size: 13px;
+    font-weight: 500;
+    cursor: pointer;
+    transition: background 0.1s;
+  }
+  button:hover { background: #222; }
+  button:active { background: #2a2a2a; }
+  button.primary {
+    background: #2a2a2a;
+    border-color: #444;
+  }
+  button.primary:hover { background: #333; }
+  textarea {
+    flex: 1;
+    background: #1a1a1a;
+    border: 1px solid #2a2a2a;
+    border-radius: 12px;
+    color: #e8e8e8;
+    font-family: inherit;
+    font-size: 15px;
+    line-height: 1.6;
+    padding: 20px;
+    resize: none;
+    outline: none;
+    transition: border-color 0.15s;
+  }
+  textarea:focus { border-color: #444; }
+  textarea::placeholder { color: #444; }
+  footer {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    flex-shrink: 0;
+    height: 20px;
+  }
+  #status {
+    font-size: 12px;
+    color: #444;
+  }
+  #charcount {
+    font-size: 12px;
+    color: #444;
+    font-variant-numeric: tabular-nums;
+  }
+</style>
+</head>
+<body>
+<header>
+  <h1>Notes</h1>
+  <div class="actions">
+    <button id="discard">Discard</button>
+    <button class="primary" id="save">Save</button>
+  </div>
+</header>
+<textarea id="editor" placeholder="Start typing…" spellcheck="false"></textarea>
+<footer>
+  <span id="status">connecting…</span>
+  <span id="charcount">0 chars</span>
+</footer>
+
+<script>
+(function () {
+  var editor = document.getElementById('editor');
+  var statusEl = document.getElementById('status');
+  var charEl = document.getElementById('charcount');
+  var saved = '';
+
+  function setStatus(msg) { statusEl.textContent = msg; }
+
+  editor.addEventListener('input', function () {
+    charEl.textContent = editor.value.length + ' chars';
+  });
+
+  document.getElementById('save').addEventListener('click', function () {
+    if (!window.weftIpc) return;
+    var text = editor.value.replace(/\n/g, '\\n');
+    window.weftIpc.send('save:' + text);
+    setStatus('saving…');
+  });
+
+  document.getElementById('discard').addEventListener('click', function () {
+    editor.value = saved;
+    charEl.textContent = saved.length + ' chars';
+    setStatus('discarded');
+    setTimeout(function () { setStatus(''); }, 1500);
+  });
+
+  document.addEventListener('keydown', function (e) {
+    if ((e.ctrlKey || e.metaKey) && e.key === 's') {
+      e.preventDefault();
+      document.getElementById('save').click();
+    }
+  });
+
+  function setupIpc() {
+    if (!window.weftIpc) { setTimeout(setupIpc, 50); return; }
+    window.weftIpc.onmessage = function (raw) {
+      try {
+        var msg = typeof raw === 'string' ? JSON.parse(raw) : raw;
+        if (typeof msg.error === 'string') {
+          setStatus('error: ' + msg.error);
+          return;
+        }
+        if (typeof msg.text === 'string') {
+          var text = msg.text.replace(/\\n/g, '\n');
+          editor.value = text;
+          saved = text;
+          charEl.textContent = text.length + ' chars';
+          setStatus('');
+        }
+      } catch (_) {}
+    };
+    setStatus('');
+    window.weftIpc.send('load');
+  }
+
+  setupIpc();
+})();
+</script>
+</body>
+</html>

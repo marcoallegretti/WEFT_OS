@@ -11,6 +11,10 @@ members = [
     "crates/weft-runtime",
     "crates/weft-servo-shell",
 ]
+exclude = [
+    "examples/org.weft.demo.counter",
+    "examples/org.weft.demo.notes",
+]
 resolver = "2"
 
 [workspace.package]

@@ -1,0 +1,38 @@
+package weft:app@0.1.0;
+
+interface notify {
+    ready: func();
+}
+
+interface ipc {
+    send: func(payload: string) -> result<_, string>;
+    recv: func() -> option<string>;
+}
+
+interface fetch {
+    record response {
+        status: u16,
+        content-type: string,
+        body: list<u8>,
+    }
+
+    fetch: func(
+        url: string,
+        method: string,
+        headers: list<tuple<string, string>>,
+        body: option<list<u8>>,
+    ) -> result<response, string>;
+}
+
+interface notifications {
+    notify: func(
+        title: string,
+        body: string,
+        icon: option<string>,
+    ) -> result<_, string>;
+}
+
+interface clipboard {
+    read: func() -> result<string, string>;
+    write: func(text: string) -> result<_, string>;
+}
