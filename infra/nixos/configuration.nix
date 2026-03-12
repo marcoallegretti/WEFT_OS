@@ -3,6 +3,7 @@
 {
   imports = [
     "${modulesPath}/profiles/qemu-guest.nix"
+    "${modulesPath}/virtualisation/qemu-vm.nix"
   ];
 
   system.stateVersion = "24.11";
@@ -24,9 +25,8 @@
     diskSize = 20480;
   };
 
-  hardware.opengl = {
+  hardware.graphics = {
     enable = true;
-    driSupport = true;
     extraPackages = with pkgs; [ mesa.drivers virglrenderer ];
   };
 
@@ -60,6 +60,9 @@
     coreutils
     curl
     htop
+    pkgs.weft.weft-servo-shell
+    pkgs.weft.weft-app-shell
+    pkgs.weft.weft-pack
   ];
 
   nixpkgs.overlays = [
@@ -79,6 +82,22 @@
         ExecStart = "${pkgs.weft.weft-compositor}/bin/weft-compositor";
         Restart = "on-failure";
         RestartSec = "1";
+      };
+    };
+
+    weft-servo-shell = {
+      description = "WEFT OS System Shell";
+      requires = [ "weft-compositor.service" ];
+      after = [ "weft-compositor.service" ];
+      wantedBy = [ "graphical-session.target" ];
+      environment = {
+        WAYLAND_DISPLAY = "wayland-1";
+      };
+      serviceConfig = {
+        Type = "simple";
+        ExecStart = "${pkgs.weft.weft-servo-shell}/bin/weft-servo-shell";
+        Restart = "on-failure";
+        RestartSec = "2";
       };
     };
 

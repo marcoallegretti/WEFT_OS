@@ -2,30 +2,18 @@
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
-OUT="${1:-"${REPO_ROOT}/infra/vm/weft-vm.qcow2"}"
+OUT="${1:-"${REPO_ROOT}/infra/vm/weft-vm-result"}"
 
-if [ -f "$OUT" ]; then
+if [ -e "$OUT" ]; then
     echo "error: $OUT already exists; remove it before rebuilding" >&2
     exit 1
 fi
 
 cd "$REPO_ROOT"
 
-echo "building NixOS VM image..."
-nix build .#nixosConfigurations.weft-vm.config.system.build.qcow2 \
-    --out-link /tmp/weft-vm-result \
+echo "building NixOS VM..."
+nix build .#nixosConfigurations.weft-vm.config.system.build.vm \
+    --out-link "$OUT" \
     --print-build-logs
 
-SOURCE="$(readlink -f /tmp/weft-vm-result)"
-if [ ! -f "$SOURCE" ]; then
-    SOURCE="$(find /tmp/weft-vm-result -name '*.qcow2' | head -1)"
-fi
-
-if [ -z "$SOURCE" ]; then
-    echo "error: could not locate .qcow2 in build output" >&2
-    exit 1
-fi
-
-cp "$SOURCE" "$OUT"
-rm -f /tmp/weft-vm-result
-echo "image: $OUT"
+echo "VM script: $OUT/bin/run-weft-vm-vm"
