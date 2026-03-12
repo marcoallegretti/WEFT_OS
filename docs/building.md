@@ -4,13 +4,13 @@
 
 Linux (x86_64 or aarch64). Building on Windows is supported for workspace validation only; runtime components require Linux kernel interfaces.
 
-System packages (Ubuntu/Debian):
+System packages (openSUSE):
 
 ```sh
-sudo apt-get install -y \
-  libwayland-dev libxkbcommon-dev \
-  libegl-dev libgles2-mesa-dev libgbm-dev libdrm-dev \
-  libinput-dev libseat-dev libudev-dev libsystemd-dev \
+sudo zypper install -y \
+  libwayland-devel libxkbcommon-devel \
+  Mesa-libEGL-devel Mesa-libGLES-devel libgbm-devel libdrm-devel \
+  libinput-devel libseat-devel libudev-devel systemd-devel \
   pkg-config clang cmake python3
 ```
 

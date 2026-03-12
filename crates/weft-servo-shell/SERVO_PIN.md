@@ -52,14 +52,14 @@ The first build downloads and compiles Servo and its dependencies, which takes
 
 The following system packages are required when `servo-embed` is enabled:
 
-- `libgles2-mesa-dev` or equivalent OpenGL ES headers
-- `libssl-dev`
-- `libdbus-1-dev`
-- `libudev-dev`
-- `libxkbcommon-dev`
-- `libwayland-dev`
+- `Mesa-libGLES-devel`
+- `libopenssl-devel`
+- `dbus-1-devel`
+- `libudev-devel`
+- `libxkbcommon-devel`
+- `libwayland-devel`
 
-On Fedora/RHEL: `mesa-libGL-devel openssl-devel dbus-devel systemd-devel libxkbcommon-devel wayland-devel`
+Install with: `sudo zypper install -y Mesa-libGLES-devel libopenssl-devel dbus-1-devel libudev-devel libxkbcommon-devel libwayland-devel`
 
 ## Rendering approach
 
