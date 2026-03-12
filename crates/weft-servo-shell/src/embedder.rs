@@ -14,6 +14,7 @@ use winit::{
     event::{ElementState, MouseButton, WindowEvent},
     event_loop::{ActiveEventLoop, EventLoop, EventLoopProxy},
     keyboard::ModifiersState,
+    platform::wayland::{ActiveEventLoopExtWayland, WindowExtWayland},
     window::{Window, WindowAttributes, WindowId},
 };
 
@@ -102,7 +103,6 @@ impl App {
         url: ServoUrl,
         waker: WeftEventLoopWaker,
         ws_port: u16,
-        shell_client: Option<crate::shell_client::ShellClient>,
     ) -> Self {
         Self {
             url,
@@ -116,7 +116,7 @@ impl App {
             shutting_down: false,
             modifiers: ModifiersState::default(),
             cursor_pos: servo::euclid::default::Point2D::zero(),
-            shell_client,
+            shell_client: None,
         }
     }
 
@@ -163,6 +163,17 @@ impl ApplicationHandler<ServoWake> for App {
         );
         let size = window.inner_size();
         self.window = Some(Arc::clone(&window));
+
+        if self.shell_client.is_none() {
+            if let (Some(disp), Some(surf)) =
+                (event_loop.wayland_display(), window.wayland_surface())
+            {
+                match crate::shell_client::ShellClient::connect_with_display(disp, surf) {
+                    Ok(sc) => self.shell_client = Some(sc),
+                    Err(e) => tracing::warn!(error = %e, "shell protocol unavailable"),
+                }
+            }
+        }
 
         let servo = ServoBuilder::default()
             .event_loop_waker(Box::new(self.waker.clone()))
@@ -380,7 +391,6 @@ fn app_store_roots() -> Vec<PathBuf> {
 pub fn run(
     html_path: &Path,
     ws_port: u16,
-    shell_client: Option<crate::shell_client::ShellClient>,
 ) -> anyhow::Result<()> {
     let url_str = format!("file://{}", html_path.display());
     let raw_url =
@@ -395,7 +405,7 @@ pub fn run(
         proxy: Arc::new(Mutex::new(event_loop.create_proxy())),
     };
 
-    let mut app = App::new(url, waker, ws_port, shell_client);
+    let mut app = App::new(url, waker, ws_port);
     event_loop
         .run_app(&mut app)
         .map_err(|e| anyhow::anyhow!("event loop run: {e}"))

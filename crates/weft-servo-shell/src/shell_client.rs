@@ -132,14 +132,14 @@ impl Dispatch<ZweftShellWindowV1, ()> for AppData {
                 tracing::trace!(tv_sec, tv_nsec, refresh, "shell presentation feedback");
             }
             zweft_shell_window_v1::Event::NavigationGesture {
-                r#type,
+                _type,
                 fingers,
                 dx,
                 dy,
             } => {
-                tracing::debug!(r#type, fingers, dx, dy, "navigation gesture from compositor");
+                tracing::debug!(_type, fingers, dx, dy, "navigation gesture from compositor");
                 state.pending_gestures.push(PendingGesture {
-                    gesture_type: r#type,
+                    gesture_type: _type,
                     fingers,
                     dx,
                     dy,
@@ -157,9 +157,23 @@ pub struct ShellClient {
 }
 
 impl ShellClient {
-    pub fn connect() -> anyhow::Result<Self> {
-        let conn =
-            Connection::connect_to_env().context("failed to connect to Wayland compositor")?;
+    /// Connect to the compositor using winit's existing Wayland display handle.
+    ///
+    /// Using `Backend::from_foreign_display` shares winit's `wl_display` connection so
+    /// that `surface_ptr` (a `wl_surface*` owned by winit) is a valid object on the same
+    /// client, enabling the compositor to link the shell window to the actual surface.
+    #[cfg(feature = "servo-embed")]
+    pub fn connect_with_display(
+        display_ptr: *mut std::ffi::c_void,
+        surface_ptr: *mut std::ffi::c_void,
+    ) -> anyhow::Result<Self> {
+        use wayland_client::Proxy;
+        use wayland_client::backend::{Backend, ObjectId};
+
+        // Safety: display_ptr is winit's wl_display*, valid for the event loop lifetime.
+        let conn = unsafe {
+            Connection::from_backend(Backend::from_foreign_display(display_ptr as *mut _))
+        };
 
         let mut event_queue = conn.new_event_queue::<AppData>();
         let qh = event_queue.handle();
@@ -176,12 +190,19 @@ impl ShellClient {
             "zweft_shell_manager_v1 not advertised; WEFT compositor must be running"
         );
 
+        // Safety: surface_ptr is winit's wl_surface* on the same wl_display connection.
+        let surface = unsafe {
+            let id = ObjectId::from_ptr(WlSurface::interface(), surface_ptr as *mut _)
+                .context("wl_surface ObjectId import")?;
+            WlSurface::from_id(&conn, id).context("wl_surface from_id")?
+        };
+
         let manager = data.manager.as_ref().unwrap();
         let window = manager.create_window(
             "org.weft.system.shell".to_string(),
             "WEFT Shell".to_string(),
             "panel".to_string(),
-            None::<&WlSurface>,
+            Some(&surface),
             0,
             0,
             0,

@@ -14,6 +14,7 @@ use winit::{
     event::{ElementState, MouseButton, WindowEvent},
     event_loop::{ActiveEventLoop, EventLoop, EventLoopProxy},
     keyboard::ModifiersState,
+    platform::wayland::{ActiveEventLoopExtWayland, WindowExtWayland},
     window::{Window, WindowAttributes, WindowId},
 };
 
@@ -74,6 +75,7 @@ impl RenderingCtx {
 
 struct App {
     url: ServoUrl,
+    app_id: String,
     session_id: u64,
     ws_port: u16,
     window: Option<Arc<Window>>,
@@ -92,13 +94,14 @@ struct App {
 impl App {
     fn new(
         url: ServoUrl,
+        app_id: String,
         session_id: u64,
         ws_port: u16,
         waker: WeftEventLoopWaker,
-        shell_client: Option<crate::shell_client::ShellClient>,
     ) -> Self {
         Self {
             url,
+            app_id,
             session_id,
             ws_port,
             window: None,
@@ -111,7 +114,7 @@ impl App {
             ready_signalled: false,
             modifiers: ModifiersState::default(),
             cursor_pos: servo::euclid::default::Point2D::zero(),
-            shell_client,
+            shell_client: None,
         }
     }
 
@@ -159,6 +162,22 @@ impl ApplicationHandler<ServoWake> for App {
         );
         let size = window.inner_size();
         self.window = Some(Arc::clone(&window));
+
+        if self.shell_client.is_none() {
+            if let (Some(disp), Some(surf)) =
+                (event_loop.wayland_display(), window.wayland_surface())
+            {
+                match crate::shell_client::ShellClient::connect_as_app_with_display(
+                    &self.app_id,
+                    self.session_id,
+                    disp,
+                    surf,
+                ) {
+                    Ok(sc) => self.shell_client = Some(sc),
+                    Err(e) => tracing::warn!(error = %e, "shell protocol unavailable"),
+                }
+            }
+        }
 
         let servo = ServoBuilder::default()
             .event_loop_waker(Box::new(self.waker.clone()))
@@ -421,7 +440,6 @@ pub fn run(
     app_id: &str,
     session_id: u64,
     ws_port: u16,
-    shell_client: Option<crate::shell_client::ShellClient>,
 ) -> anyhow::Result<()> {
     let url = resolve_weft_app_url(app_id)
         .ok_or_else(|| anyhow::anyhow!("no ui/index.html found for app {app_id}"))?;
@@ -434,7 +452,7 @@ pub fn run(
         proxy: Arc::new(Mutex::new(event_loop.create_proxy())),
     };
 
-    let mut app = App::new(url, session_id, ws_port, waker, shell_client);
+    let mut app = App::new(url, app_id.to_owned(), session_id, ws_port, waker);
     event_loop
         .run_app(&mut app)
         .map_err(|e| anyhow::anyhow!("event loop run: {e}"))

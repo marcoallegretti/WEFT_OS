@@ -28,18 +28,7 @@ fn main() -> anyhow::Result<()> {
 
     let ws_port = appd_ws_port();
 
-    let shell = match shell_client::ShellClient::connect_as_app(&app_id, session_id) {
-        Ok(c) => {
-            tracing::info!("app shell window registered with compositor");
-            Some(c)
-        }
-        Err(e) => {
-            tracing::warn!(error = %e, "shell protocol unavailable; continuing without compositor registration");
-            None
-        }
-    };
-
-    embed_app(&app_id, session_id, ws_port, shell)
+    embed_app(&app_id, session_id, ws_port)
 }
 
 fn appd_ws_port() -> u16 {
@@ -63,14 +52,13 @@ fn embed_app(
     app_id: &str,
     session_id: u64,
     ws_port: u16,
-    shell_client: Option<shell_client::ShellClient>,
 ) -> anyhow::Result<()> {
     #[cfg(feature = "servo-embed")]
-    return embedder::run(app_id, session_id, ws_port, shell_client);
+    return embedder::run(app_id, session_id, ws_port);
 
     #[cfg(not(feature = "servo-embed"))]
     {
-        let _ = (app_id, session_id, ws_port, shell_client);
+        let _ = (app_id, session_id, ws_port);
         println!("READY");
         use std::io::Write;
         let _ = std::io::stdout().flush();

@@ -32,18 +32,7 @@ fn run() -> anyhow::Result<()> {
     let ws_port = appd_ws_port();
     tracing::info!(ws_port, "appd WebSocket port");
 
-    let shell = match shell_client::ShellClient::connect() {
-        Ok(c) => {
-            tracing::info!("shell window registered with compositor");
-            Some(c)
-        }
-        Err(e) => {
-            tracing::warn!(error = %e, "shell protocol unavailable; continuing without compositor registration");
-            None
-        }
-    };
-
-    embed_servo(&wayland_display, &html_path, ws_port, shell)
+    embed_servo(&wayland_display, &html_path, ws_port)
 }
 
 fn system_ui_html_path() -> anyhow::Result<PathBuf> {
@@ -84,14 +73,12 @@ fn embed_servo(
     _wayland_display: &str,
     html_path: &std::path::Path,
     ws_port: u16,
-    shell_client: Option<shell_client::ShellClient>,
 ) -> anyhow::Result<()> {
     #[cfg(feature = "servo-embed")]
-    return embedder::run(html_path, ws_port, shell_client);
+    return embedder::run(html_path, ws_port);
 
     #[cfg(not(feature = "servo-embed"))]
     {
-        let _ = shell_client;
         tracing::warn!(
             path = %html_path.display(),
             ws_port,

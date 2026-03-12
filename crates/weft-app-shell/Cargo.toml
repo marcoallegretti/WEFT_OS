@@ -9,11 +9,10 @@ name = "weft-app-shell"
 path = "src/main.rs"
 
 [features]
-# Enable actual Servo rendering. Requires manually adding the deps listed in
-# weft-servo-shell/SERVO_PIN.md to this file before building; they are not
-# included here to avoid pulling the Servo monorepo (~1 GB) into every
-# `cargo check` cycle.
-servo-embed = ["dep:serde", "dep:toml"]
+# Enable actual Servo rendering. Deps are declared as optional below and only
+# fetched when this feature is active. The Servo monorepo (~1 GB) is not
+# downloaded during a plain `cargo check` or `cargo build` without this feature.
+servo-embed = ["dep:servo", "dep:winit", "dep:softbuffer", "dep:serde", "dep:toml"]
 
 [dependencies]
 anyhow = "1.0"
@@ -25,3 +24,18 @@ wayland-scanner = "0.31"
 bitflags = "2"
 serde = { version = "1", features = ["derive"], optional = true }
 toml = { version = "0.8", optional = true }
+
+[dependencies.servo]
+git = "https://github.com/marcoallegretti/servo"
+branch = "servo-weft"
+optional = true
+default-features = false
+
+[dependencies.winit]
+version = "0.30"
+optional = true
+features = ["wayland"]
+
+[dependencies.softbuffer]
+version = "0.4"
+optional = true

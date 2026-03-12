@@ -129,9 +129,26 @@ pub struct ShellClient {
 }
 
 impl ShellClient {
-    pub fn connect_as_app(app_id: &str, session_id: u64) -> anyhow::Result<Self> {
-        let conn =
-            Connection::connect_to_env().context("failed to connect to Wayland compositor")?;
+    /// Connect using winit's existing Wayland display handle.
+    ///
+    /// See `weft-servo-shell/src/shell_client.rs` for the rationale on
+    /// `Backend::from_foreign_display`. The `surface_ptr` is the `wl_surface*`
+    /// from the same winit connection, enabling the compositor to associate the
+    /// application window with the rendered surface.
+    #[cfg(feature = "servo-embed")]
+    pub fn connect_as_app_with_display(
+        app_id: &str,
+        session_id: u64,
+        display_ptr: *mut std::ffi::c_void,
+        surface_ptr: *mut std::ffi::c_void,
+    ) -> anyhow::Result<Self> {
+        use wayland_client::Proxy;
+        use wayland_client::backend::{Backend, ObjectId};
+
+        // Safety: display_ptr is winit's wl_display*, valid for the event loop lifetime.
+        let conn = unsafe {
+            Connection::from_backend(Backend::from_foreign_display(display_ptr as *mut _))
+        };
 
         let mut event_queue = conn.new_event_queue::<AppData>();
         let qh = event_queue.handle();
@@ -148,13 +165,20 @@ impl ShellClient {
             "zweft_shell_manager_v1 not advertised; WEFT compositor must be running"
         );
 
+        // Safety: surface_ptr is winit's wl_surface* on the same wl_display connection.
+        let surface = unsafe {
+            let id = ObjectId::from_ptr(WlSurface::interface(), surface_ptr as *mut _)
+                .context("wl_surface ObjectId import")?;
+            WlSurface::from_id(&conn, id).context("wl_surface from_id")?
+        };
+
         let manager = data.manager.as_ref().unwrap();
         let title = format!("{app_id}/{session_id}");
         let window = manager.create_window(
             app_id.to_string(),
             title,
             "application".to_string(),
-            None::<&WlSurface>,
+            Some(&surface),
             0,
             0,
             0,
