@@ -500,7 +500,7 @@ impl Dispatch<ZweftShellManagerV1, ()> for WeftCompositorState {
                         oy,
                         ow,
                         oh,
-                        crate::protocols::server::zweft_shell_window_v1::State::Maximized as u32,
+                        u32::from(crate::protocols::server::zweft_shell_window_v1::State::Maximized),
                     );
                     state.weft_shell_state.add_panel(window);
                 } else {
@@ -523,7 +523,7 @@ impl Dispatch<ZweftShellWindowV1, WeftShellWindowData> for WeftCompositorState {
     ) {
         if data.closed.load(std::sync::atomic::Ordering::Relaxed) {
             resource.post_error(
-                crate::protocols::server::zweft_shell_window_v1::Error::DefunctWindow as u32,
+                u32::from(crate::protocols::server::zweft_shell_window_v1::Error::DefunctWindow),
                 "request on closed window",
             );
             return;
