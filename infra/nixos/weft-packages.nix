@@ -22,8 +22,8 @@ let
     nativeBuildInputs = with pkgs; [ pkg-config ];
   };
 
-  mkWeftPkg = { pname, extraBuildInputs ? [], extraNativeBuildInputs ? [], cargoFlags ? [], extraEnv ? {} }: rustPlatform.buildRustPackage (commonArgs // {
-    inherit pname;
+  mkWeftPkg = { pname, extraBuildInputs ? [], extraNativeBuildInputs ? [], cargoFlags ? [], extraEnv ? {}, preBuild ? "" }: rustPlatform.buildRustPackage (commonArgs // {
+    inherit pname preBuild;
     cargoBuildFlags = [ "--package" pname ] ++ cargoFlags;
     cargoTestFlags = [ "--package" pname ];
     buildInputs = extraBuildInputs;
@@ -39,9 +39,9 @@ in {
       libdrm mesa wayland libxkbcommon seatd udev dbus libGL libdisplay-info libinput
     ];
     extraNativeBuildInputs = with pkgs; [ wayland-scanner ];
-    extraEnv = {
-      NIX_LDFLAGS = "-L${pkgs.mesa}/lib -L${pkgs.libinput}/lib";
-    };
+    preBuild = ''
+      export NIX_LDFLAGS="$NIX_LDFLAGS $(pkg-config --libs-only-L gbm 2>/dev/null || echo) $(pkg-config --libs-only-L libinput 2>/dev/null || echo)"
+    '';
   };
 
   weft-servo-shell = mkWeftPkg {
