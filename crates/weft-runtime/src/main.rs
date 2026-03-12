@@ -97,15 +97,14 @@ fn run_module(
     preopen: &[(String, String)],
     ipc_socket: Option<&str>,
 ) -> anyhow::Result<()> {
-    use cap_std::{ambient_authority, fs::Dir};
     use std::sync::{Arc, Mutex};
     use wasmtime::{
         Config, Engine, Store,
         component::{Component, Linker},
     };
     use wasmtime_wasi::{
-        DirPerms, FilePerms, ResourceTable, WasiCtx, WasiCtxBuilder, WasiView, add_to_linker_sync,
-        bindings::sync::Command,
+        DirPerms, FilePerms, IoView, ResourceTable, WasiCtx, WasiCtxBuilder, WasiView,
+        add_to_linker_sync, bindings::sync::Command,
     };
 
     struct IpcState {
@@ -168,12 +167,15 @@ fn run_module(
         ipc: Arc<Mutex<Option<IpcState>>>,
     }
 
+    impl IoView for State {
+        fn table(&mut self) -> &mut ResourceTable {
+            &mut self.table
+        }
+    }
+
     impl WasiView for State {
         fn ctx(&mut self) -> &mut WasiCtx {
             &mut self.ctx
-        }
-        fn table(&mut self) -> &mut ResourceTable {
-            &mut self.table
         }
     }
 
@@ -267,27 +269,31 @@ fn run_module(
         )
         .context("define weft:app/notifications#notify")?;
 
-    linker
-        .instance("weft:app/clipboard@0.1.0")
-        .context("define weft:app/clipboard instance")?
-        .func_wrap(
-            "read",
-            |_: wasmtime::StoreContextMut<'_, State>,
-             ()|
-             -> wasmtime::Result<(Result<String, String>,)> {
-                Ok((host_clipboard_read(),))
-            },
-        )
-        .context("define weft:app/clipboard#read")?
-        .func_wrap(
-            "write",
-            |_: wasmtime::StoreContextMut<'_, State>,
-             (text,): (String,)|
-             -> wasmtime::Result<(Result<(), String>,)> {
-                Ok((host_clipboard_write(&text),))
-            },
-        )
-        .context("define weft:app/clipboard#write")?;
+    {
+        let mut clipboard = linker
+            .instance("weft:app/clipboard@0.1.0")
+            .context("define weft:app/clipboard instance")?;
+        clipboard
+            .func_wrap(
+                "read",
+                |_: wasmtime::StoreContextMut<'_, State>,
+                 ()|
+                 -> wasmtime::Result<(Result<String, String>,)> {
+                    Ok((host_clipboard_read(),))
+                },
+            )
+            .context("define weft:app/clipboard#read")?;
+        clipboard
+            .func_wrap(
+                "write",
+                |_: wasmtime::StoreContextMut<'_, State>,
+                 (text,): (String,)|
+                 -> wasmtime::Result<(Result<(), String>,)> {
+                    Ok((host_clipboard_write(&text),))
+                },
+            )
+            .context("define weft:app/clipboard#write")?;
+    }
 
     let mut ctx_builder = WasiCtxBuilder::new();
     ctx_builder.inherit_stdout().inherit_stderr();
@@ -306,9 +312,9 @@ fn run_module(
     }
 
     for (host_path, guest_path) in preopen {
-        let dir = Dir::open_ambient_dir(host_path, ambient_authority())
-            .with_context(|| format!("open preopen dir {host_path}"))?;
-        ctx_builder.preopened_dir(dir, DirPerms::all(), FilePerms::all(), guest_path);
+        ctx_builder
+            .preopened_dir(host_path, guest_path, DirPerms::all(), FilePerms::all())
+            .with_context(|| format!("preopen dir {host_path}"))?;
     }
 
     let ctx = ctx_builder.build();
@@ -456,7 +462,7 @@ fn apply_seccomp_filter() -> anyhow::Result<()> {
 
     let mut rules: BTreeMap<i64, Vec<SeccompRule>> = BTreeMap::new();
     for &syscall in blocked {
-        rules.insert(syscall, vec![SeccompRule::new(vec![])?]);
+        rules.insert(syscall, vec![]);
     }
 
     let filter = SeccompFilter::new(
@@ -466,6 +472,8 @@ fn apply_seccomp_filter() -> anyhow::Result<()> {
         arch,
     )?;
     let bpf: BpfProgram = filter.try_into()?;
+    let ret = unsafe { libc::prctl(libc::PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) };
+    anyhow::ensure!(ret == 0, "prctl PR_SET_NO_NEW_PRIVS failed: {}", std::io::Error::last_os_error());
     seccompiler::apply_filter(&bpf)?;
     Ok(())
 }
