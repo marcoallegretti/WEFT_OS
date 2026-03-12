@@ -1,223 +1,100 @@
 # WEFT OS
 
-WEFT OS is an operating system project that treats **authority boundaries** as the primary design problem.
+WEFT OS is a Wayland compositor and application runtime where every app is a WebAssembly component rendered in an isolated Servo WebView. No capability is granted by default; all resource access is declared in a per-app manifest and enforced at runtime.
 
-At a high level, the system is organized around three roles:
+## What is implemented
 
-- a **Wayland compositor** (Rust + Smithay) that owns surfaces, stacking, and input routing
-- a **system shell renderer** that aims to render the desktop UI from HTML/CSS via Servo (as a Wayland client)
-- an **application supervisor** that owns app lifecycle and brokers app sessions
+**Compositor** — `weft-compositor` is a Smithay-based Wayland compositor with DRM/KMS and winit backends. It implements the `zweft-shell-unstable-v1` protocol extension, which typed shell slots (panel, application) register against.
 
-The thesis is not “the desktop is a web page.”
+**System shell** — `weft-servo-shell` embeds Servo (feature-gated, `--features servo-embed`) and renders `system-ui.html` as a Wayland panel. Without `servo-embed`, the binary builds as a no-op stub. Navigation gestures from the compositor are forwarded to `weft-appd` over WebSocket.
 
-The thesis is:
+**App shell** — `weft-app-shell` is a per-process Servo host for application WebViews. It resolves `weft-app://<id>/ui/index.html`, injects a `weftIpc` WebSocket bridge into the page, and registers with the compositor as an application surface. Also feature-gated behind `servo-embed`.
 
-- a system UI can be rendered using web technologies
-- without collapsing the OS into a single privileged UI process
-- if the compositor and runtime boundaries remain explicit and enforced
+**App daemon** — `weft-appd` supervises sessions: spawns `weft-runtime`, waits for READY, spawns `weft-app-shell`, manages the per-session IPC relay between the Wasm component and the WebView, and handles session teardown. Wraps processes in systemd scopes (`CPUQuota=200%`, `MemoryMax=512M`) when available.
 
-This repository is intentionally rigorous about distinguishing:
+**Runtime** — `weft-runtime` runs WASI Component Model binaries under Wasmtime 30 (`--features wasmtime-runtime`). Provides `weft:app/notify`, `weft:app/ipc`, `weft:app/fetch`, `weft:app/notifications`, and `weft:app/clipboard` host imports. Preopens filesystem paths according to declared capabilities.
 
-- what is **implemented today**
-- what is the **design direction**
+**Package management** — `weft-pack` handles check, sign, verify, install, uninstall, list, build-image (EROFS dm-verity), and info. Validates capability strings at check time.
 
-That distinction is critical for meaningful community contribution.
+**File portal** — `weft-file-portal` is a per-session file proxy with a path allowlist and `..` blocking.
 
-## Current status (verifiable from source)
+**Mount helper** — `weft-mount-helper` is a setuid helper for EROFS dm-verity mount/umount via `veritysetup`.
 
-This repo is a Rust workspace (edition **2024**) with `unsafe_code` **forbidden** at the workspace lint level.
+**Demo apps** — `examples/org.weft.demo.counter` and `examples/org.weft.demo.notes` are pre-built Wasm Component binaries (`wasm32-wasip2`, wit-bindgen 0.53) with HTML UIs, signed with a committed demo keypair.
 
-It contains working scaffolding and partial implementations for:
+## Repository layout
 
-- `weft-compositor`
-  - starts with a **winit** backend when `--winit` is passed or when a display environment is detected
-  - includes a Linux-only path for a **DRM/KMS** backend
-  - integrates a custom Wayland protocol XML under `protocol/` and generates server bindings
-- `weft-servo-shell`
-  - connects to a Wayland compositor and locates `system-ui.html`
-  - **Servo embedding is not yet implemented** (the entry point currently errors intentionally)
-- `weft-appd`
-  - listens on a Unix socket for IPC
-  - exposes a local WebSocket endpoint (127.0.0.1) for clients
-  - maintains a simple app session registry and supervises a runtime process
-- `weft-runtime`
-  - resolves an app “package” directory and expects an `app.wasm` file
-  - prints `READY` and exits cleanly as a placeholder
-  - **Wasmtime integration is not yet implemented**
-
-Public engineering documentation lives under `docs/architecture/`.
-
-## What WEFT OS is trying to build (in-depth architecture)
-
-WEFT OS is best understood as a set of promises. Those promises are implemented as explicit boundaries.
-
-### 1) The compositor is the authority
-
-In WEFT, the compositor is not “the thing that draws windows.”
-
-It is the component that answers (consistently) the questions that become security and reliability properties:
-
-- which surfaces exist
-- which surfaces are visible, and where
-- which surface receives input
-- what happens when a client misbehaves or dies
-
-Wayland’s model makes this boundary practical: clients do not get global visibility by default.
-
-Smithay is used to build this compositor because it provides structured protocol handling and a place for centralized state, which makes it easier to express policy explicitly.
-
-### 2) The shell is a document, but not a sovereign
-
-WEFT’s system shell is intended to be an HTML/CSS UI rendered via Servo, running as a Wayland client.
-
-This choice is not about using “web UI” for novelty.
-
-It is about:
-
-- treating layout and animation as a disciplined constraint system
-- leveraging a widely understood UI language
-- while keeping system authority out of the UI runtime
-
-The shell must be able to crash without automatically taking the whole session with it.
-
-That requires the compositor to remain authoritative.
-
-### 3) Apps are supervised sessions, not ambient processes
-
-WEFT treats application launch as the moment where the system can be honest about authority.
-
-The intended model is:
-
-- the OS creates an app session
-- the OS launches the app’s runtime participant
-- the OS launches the app’s UI participant
-- the OS brokers their relationship
-
-In this repo today, `weft-appd` provides the session registry and launch/supervision skeleton.
-
-### 4) WebAssembly is an OS runtime model (not a browser feature)
-
-WebAssembly is used in WEFT as a way to make “no ambient authority” plausible.
-
-The core idea is capability-shaped access:
-
-- a path string is not permission
-- holding a handle is permission
-
-This repo does not yet integrate Wasmtime, but it includes a runtime placeholder (`weft-runtime`) designed to evolve into a host-controlled Wasmtime embedder.
-
-### 5) The core/UI channel is brokered (and must stay that way)
-
-WEFT’s app model assumes the app has two isolated parts:
-
-- a Wasm core
-- an HTML UI
-
-Those two still need to exchange events and state.
-
-The direction documented in `docs/architecture/wasm-servo-channel.md` is:
-
-- a brokered message channel owned by `weft-appd`
-- structured, validated messages
-- explicit backpressure and bounded payloads
-- session teardown on process death
-
-The channel is explicitly not treated as a capability transport.
-
-### 6) Storage and packages are integrity and authority problems
-
-WEFT’s storage stance is shaped by two goals:
-
-- the OS should be able to answer “what is running?”
-- apps should not get filesystem traversal by default
-
-The design direction emphasizes immutable payloads, separation of code and writable data, and mediated user-intent file access (portal-style) rather than ambient path access.
-
-Not all of this is implemented in this repository today.
-
-It is included here because it defines what “substantial contribution” means: work that preserves explicit boundaries.
-
-## Collaboration: let’s find the hard answers together
-
-If you want to contribute, don’t start by asking “what feature should we add.”
-
-Start by asking:
-
-- what promise are we trying to make?
-- what would count as evidence that we can keep it?
-
-### High-value open problems
-
-These are the areas where contribution has the highest leverage:
-
-- **Servo embedding for a shell-grade Wayland client**
-  - input correctness, event loop integration, stable embedding surface
-- **Shell/compositor boundary**
-  - the smallest protocol surface that keeps authority correct
-  - object lifecycle and stale identifier rejection
-- **Wasm ↔ UI channel implementation**
-  - brokered transport, validation, backpressure, observability
-- **Wasmtime integration in `weft-runtime`**
-  - host-controlled execution, resource limits, and capability-shaped IO
-- **Failure and recovery behavior**
-  - compositor restart behavior
-  - shell restart behavior
-  - app crash containment
-
-If you disagree with the premises, that’s also useful.
-
-The most valuable criticism is the one that points at a boundary and says:
-
-- “this is where the promise will break”
-
-## Runtime knobs (verifiable from source)
-
-This repo is early, but some runtime configuration already exists in code. These values are listed here so contributors can run components consistently and so future work doesn’t accidentally break the contract.
-
-### `weft-servo-shell`
-
-- `WEFT_SYSTEM_UI_HTML`
-  - If set, `weft-servo-shell` will use this path as the `system-ui.html` entry point.
-- `WAYLAND_DISPLAY`
-  - Must be set; `weft-servo-shell` uses it to connect to the running compositor.
-
-### `weft-appd`
-
-- `WEFT_APPD_SOCKET`
-  - If set, overrides the Unix socket path used for IPC.
-- `WEFT_APPD_WS_PORT`
-  - If set, overrides the local WebSocket port (defaults to `7410`).
-- `XDG_RUNTIME_DIR`
-  - Required; used to place runtime files such as the default Unix socket location.
-
-### `weft-runtime`
-
-- `WEFT_APP_STORE`
-  - If set, overrides the app package store root.
-
-## Development and validation
-
-### Validation
-
-On Windows PowerShell:
-
-```powershell
-./infra/scripts/check.ps1
+```
+crates/           Rust workspace members
+examples/         Demo app packages (wasm32-wasip2, not workspace members)
+  keys/           Demo Ed25519 keypair
+protocol/         zweft-shell-unstable-v1 Wayland protocol XML
+infra/
+  nixos/          NixOS VM configuration and package derivations
+  scripts/        check.ps1, check.sh
+  shell/          system-ui.html, weft-ui-kit.js
+  systemd/        service unit files
+  vm/             build.sh, run.sh (QEMU)
+docs/
+  architecture.md Component map, IPC, capability table, env vars
+  security.md     Capability model, process isolation, GAP-6 statement
+  building.md     Build instructions for all targets
 ```
 
-On Linux:
+## Building
 
-```bash
-./infra/scripts/check.sh
+Linux system packages required (Ubuntu/Debian):
+
+```sh
+sudo apt-get install -y \
+  libwayland-dev libxkbcommon-dev libegl-dev libgles2-mesa-dev \
+  libgbm-dev libdrm-dev libinput-dev libseat-dev libudev-dev \
+  libsystemd-dev pkg-config clang cmake python3
 ```
 
-These scripts run formatting, clippy, and workspace tests (with `weft-compositor` excluded on non-Linux hosts).
+Build non-Servo crates:
 
-### Repository layout
-
-```text
-crates/      Rust workspace members
-docs/        Public engineering documentation
-infra/       Validation scripts and VM workflow material
-protocol/    Wayland protocol XML definitions
+```sh
+cargo build --workspace --exclude weft-servo-shell --exclude weft-app-shell
 ```
+
+Build Linux-only crates (no Servo):
+
+```sh
+cargo build -p weft-compositor -p weft-servo-shell -p weft-app-shell
+```
+
+Build with Servo embedding (30–60 min, requires clang + python3):
+
+```sh
+cargo build -p weft-servo-shell --features servo-embed
+cargo build -p weft-app-shell --features servo-embed
+```
+
+See `docs/building.md` for full instructions including Wasm component builds, NixOS VM, and signing.
+
+## CI
+
+Three jobs on every push and pull request:
+
+- `cross-platform` — fmt, clippy, tests on Ubuntu and Windows
+- `linux-only` — clippy and tests for compositor and shell crates
+- `servo-embed-linux` — `cargo check --features servo-embed` for both servo crates
+
+## Security
+
+See `docs/security.md`. Key points:
+
+- Capabilities declared in `wapp.toml`, validated at install, enforced at runtime
+- Per-app OS processes with systemd cgroup limits
+- WASI filesystem isolation via preopened directories
+- Ed25519 package signing; optional EROFS dm-verity
+- Optional seccomp BPF blocklist in `weft-runtime`
+- SpiderMonkey is not sandbox-isolated beyond process-level isolation (GAP-6; see `docs/security.md`)
+
+## Servo fork
+
+- Repository: `https://github.com/marcoallegretti/servo`, branch `servo-weft`
+- Base revision: `04ca254f`
+- Patches: keyboard input (GAP-1), backdrop-filter stylo (GAP-4)
+- See `crates/weft-servo-shell/SERVO_PIN.md` for full gap status

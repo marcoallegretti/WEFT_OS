@@ -76,3 +76,35 @@ jobs:
           -p weft-compositor
           -p weft-servo-shell
           -p weft-app-shell
+
+  # Type-check the servo-embed feature gate.
+  # Full Servo compilation (30-60 min) is not run in CI; this job checks
+  # that the feature-gated code at least type-checks against the declared deps.
+  servo-embed-linux:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.93.0
+      - name: install Linux system dependencies
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y --no-install-recommends \
+            libwayland-dev \
+            libxkbcommon-dev \
+            libegl-dev \
+            libgles2-mesa-dev \
+            libgbm-dev \
+            libdrm-dev \
+            pkg-config
+      - name: cargo check servo-embed (weft-servo-shell)
+        run: >
+          cargo check
+          -p weft-servo-shell
+          --features servo-embed
+      - name: cargo check servo-embed (weft-app-shell)
+        run: >
+          cargo check
+          -p weft-app-shell
+          --features servo-embed

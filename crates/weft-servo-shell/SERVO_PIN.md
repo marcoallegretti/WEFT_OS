@@ -98,7 +98,13 @@ DMA-BUF buffer sharing with the compositor transparently.
     WebRender stacking-context early-return on `backdrop_filter.0.is_empty()`; `display_list/mod.rs`
     adds `BuilderForBoxFragment::build_backdrop_filter` calling `push_backdrop_filter` before
     background paint.
-- **GAP-5**: Per-app process isolation — requires Servo multi-process (constellation) architecture.
+- **GAP-5**: ~~Per-app process isolation~~ **Resolved** — each app runs in a separate
+  `weft-app-shell` and `weft-runtime` OS process pair supervised by `weft-appd`. OS-level
+  isolation does not require Servo's multi-process constellation architecture.
+- **GAP-6**: SpiderMonkey is not sandbox-isolated beyond process-level isolation. JIT-compiled JS
+  runs with the same memory permissions as the Servo process. WEFT relies on SpiderMonkey's own
+  security properties for the JavaScript execution boundary. See `docs/security.md` for the full
+  bounded statement. Not addressed.
 
 ## Update policy
 
@@ -136,5 +142,5 @@ selectors = { git = "https://github.com/marcoallegretti/stylo", branch = "servo-
 servo_arc = { git = "https://github.com/marcoallegretti/stylo", branch = "servo-weft" }
 ```
 
-4. Run `cargo update` to resolve the new stylo deps.
-5. Commit both the `Cargo.toml` and `Cargo.lock` changes to `servo-weft`.
+1. Run `cargo update` to resolve the new stylo deps.
+2. Commit both the `Cargo.toml` and `Cargo.lock` changes to `servo-weft`.
