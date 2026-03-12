@@ -1,0 +1,25 @@
+[package]
+name = "weft-app-shell"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[[bin]]
+name = "weft-app-shell"
+path = "src/main.rs"
+
+[features]
+# Enable actual Servo rendering. Requires manually adding the deps listed in
+# weft-servo-shell/SERVO_PIN.md to this file before building; they are not
+# included here to avoid pulling the Servo monorepo (~1 GB) into every
+# `cargo check` cycle.
+servo-embed = []
+
+[dependencies]
+anyhow = "1.0"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+wayland-client = "0.31"
+wayland-backend = "0.3"
+wayland-scanner = "0.31"
+bitflags = "2"

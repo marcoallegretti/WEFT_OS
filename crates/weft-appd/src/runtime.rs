@@ -95,6 +95,36 @@ async fn kill_portal(portal: Option<(PathBuf, tokio::process::Child)>) {
     }
 }
 
+async fn spawn_app_shell(
+    session_id: u64,
+    app_id: &str,
+) -> Option<tokio::process::Child> {
+    let bin = std::env::var("WEFT_APP_SHELL_BIN").ok()?;
+    let mut cmd = tokio::process::Command::new(&bin);
+    cmd.arg(app_id)
+        .arg(session_id.to_string())
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null());
+    match cmd.spawn() {
+        Ok(child) => {
+            tracing::info!(session_id, %app_id, bin = %bin, "app shell spawned");
+            Some(child)
+        }
+        Err(e) => {
+            tracing::warn!(session_id, %app_id, error = %e, "failed to spawn app shell");
+            None
+        }
+    }
+}
+
+async fn kill_app_shell(child: Option<tokio::process::Child>) {
+    if let Some(mut c) = child {
+        let _ = c.kill().await;
+        let _ = c.wait().await;
+    }
+}
+
 fn portal_socket_path(session_id: u64) -> Option<PathBuf> {
     let runtime_dir = std::env::var("XDG_RUNTIME_DIR").ok()?;
     let dir = PathBuf::from(runtime_dir).join("weft");
@@ -226,6 +256,7 @@ pub(crate) async fn supervise(
         _ = &mut abort_rx => None,
     };
 
+    let mut app_shell: Option<tokio::process::Child> = None;
     match ready_result {
         Some(Ok(Ok(remaining_stdout))) => {
             registry
@@ -238,6 +269,7 @@ pub(crate) async fn supervise(
             });
             tracing::info!(session_id, %app_id, "app ready");
             tokio::spawn(drain_stdout(remaining_stdout, session_id));
+            app_shell = spawn_app_shell(session_id, app_id).await;
         }
         Some(Ok(Err(e))) => {
             tracing::warn!(session_id, %app_id, error = %e, "stdout read error before READY");
@@ -280,6 +312,8 @@ pub(crate) async fn supervise(
             let _ = child.kill().await;
         }
     }
+
+    kill_app_shell(app_shell).await;
 
     if let Some(tx) = &compositor_tx {
         let _ = tx
