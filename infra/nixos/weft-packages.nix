@@ -47,7 +47,7 @@ in {
       mesa wayland libxkbcommon openssl dbus udev libGL fontconfig
     ];
     extraNativeBuildInputs = with pkgs; [
-      pkgs.llvmPackages.clang cmake python3
+      pkgs.llvmPackages.clang pkgs.llvmPackages.llvm cmake python3 nasm
     ];
     cargoFlags = [ "--features" "servo-embed" ];
     extraEnv = {
@@ -61,7 +61,7 @@ in {
       mesa wayland libxkbcommon openssl dbus udev libGL fontconfig
     ];
     extraNativeBuildInputs = with pkgs; [
-      pkgs.llvmPackages.clang cmake python3
+      pkgs.llvmPackages.clang pkgs.llvmPackages.llvm cmake python3 nasm
     ];
     cargoFlags = [ "--features" "servo-embed" ];
     extraEnv = {
