@@ -39,9 +39,9 @@ in {
       libdrm mesa wayland libxkbcommon seatd udev dbus libGL libdisplay-info libinput
     ];
     extraNativeBuildInputs = with pkgs; [ wayland-scanner ];
-    preBuild = ''
-      export NIX_LDFLAGS="$NIX_LDFLAGS $(pkg-config --libs-only-L gbm 2>/dev/null || echo) $(pkg-config --libs-only-L libinput 2>/dev/null || echo)"
-    '';
+    extraEnv = {
+      RUSTFLAGS = "-L${pkgs.mesa}/lib -L${pkgs.libinput}/lib";
+    };
   };
 
   weft-servo-shell = mkWeftPkg {
