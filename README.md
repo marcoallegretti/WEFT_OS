@@ -37,7 +37,7 @@ infra/
   vm/             build.sh, run.sh (QEMU)
 docs/
   architecture.md Component map, IPC, capability table, env vars
-  security.md     Capability model, process isolation, GAP-6 statement
+  security.md     Capability model, process isolation, SpiderMonkey security boundary
   building.md     Build instructions for all targets
 ```
 
@@ -90,11 +90,11 @@ See `docs/security.md`. Key points:
 - WASI filesystem isolation via preopened directories
 - Ed25519 package signing; optional EROFS dm-verity
 - Optional seccomp BPF blocklist in `weft-runtime`
-- SpiderMonkey is not sandbox-isolated beyond process-level isolation (GAP-6; see `docs/security.md`)
+- SpiderMonkey is not sandbox-isolated beyond process-level isolation (see `docs/security.md`)
 
 ## Servo fork
 
 - Repository: `https://github.com/marcoallegretti/servo`, branch `servo-weft`
 - Base revision: `04ca254f`
-- Patches: keyboard input (GAP-1), backdrop-filter stylo (GAP-4)
-- See `crates/weft-servo-shell/SERVO_PIN.md` for full gap status
+- Patches: keyboard input, backdrop-filter in stylo
+- See `crates/weft-servo-shell/SERVO_PIN.md` for Servo integration status and known limitations

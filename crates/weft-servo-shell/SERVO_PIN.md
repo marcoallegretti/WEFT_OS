@@ -73,11 +73,11 @@ When the EGL path is active Servo presents directly to the EGL surface via
 surfman's `eglSwapBuffers`; the softbuffer blit is skipped. Mesa handles
 DMA-BUF buffer sharing with the compositor transparently.
 
-## Known gaps at this pin
+## Known limitations at this pin
 
-- **GAP-1**: ~~Wayland input events not forwarded to Servo~~ **Resolved** — keyboard and
+- **Wayland input events**: ~~not forwarded to Servo~~ **Resolved** — keyboard and
   mouse events forwarded via `webview.notify_input_event`; key mapping in `keyutils.rs`.
-- **GAP-2**: ~~`ZweftShellWindowV1` created with `surface = null`~~ **Resolved** —
+- **Wayland surface sharing**: ~~`ZweftShellWindowV1` created with `surface = null`~~ **Resolved** —
   `ShellClient::connect_with_display(display_ptr, surface_ptr)` uses
   `Backend::from_foreign_display` to share winit's `wl_display` connection; the winit
   `wl_surface` pointer is passed directly to `create_window`, associating the compositor
@@ -86,8 +86,8 @@ DMA-BUF buffer sharing with the compositor transparently.
   per-frame event dispatch are unchanged.
   Protocol note: `wayland-scanner 0.31` generates `_type` (not `r#type`) for the
   `navigation_gesture` event arg named `type`.
-- **GAP-3**: WebGPU adapter on Mesa may fail CTS — validation task, requires Mesa GPU hardware.
-- **GAP-4**: ~~CSS Grid~~ **Grid resolved** (Taffy-backed, fully wired).
+- **WebGPU on Mesa**: adapter may fail CTS — validation task, requires Mesa GPU hardware.
+- **CSS layout features**: ~~CSS Grid~~ **Grid resolved** (Taffy-backed, fully wired).
   ~~CSS `backdrop-filter` unimplemented~~ **`backdrop-filter` resolved** (servo/servo issue
   [#41567](https://github.com/servo/servo/issues/41567)). Implemented across two commits:
   - `marcoallegretti/stylo` `servo-weft` `f1ba496`: removed `servo_pref = "layout.unimplemented"`
@@ -98,13 +98,13 @@ DMA-BUF buffer sharing with the compositor transparently.
     WebRender stacking-context early-return on `backdrop_filter.0.is_empty()`; `display_list/mod.rs`
     adds `BuilderForBoxFragment::build_backdrop_filter` calling `push_backdrop_filter` before
     background paint.
-- **GAP-5**: ~~Per-app process isolation~~ **Resolved** — each app runs in a separate
+- **Per-app process isolation**: ~~not implemented~~ **Resolved** — each app runs in a separate
   `weft-app-shell` and `weft-runtime` OS process pair supervised by `weft-appd`. OS-level
   isolation does not require Servo's multi-process constellation architecture.
-- **GAP-6**: SpiderMonkey is not sandbox-isolated beyond process-level isolation. JIT-compiled JS
-  runs with the same memory permissions as the Servo process. WEFT relies on SpiderMonkey's own
-  security properties for the JavaScript execution boundary. See `docs/security.md` for the full
-  bounded statement. Not addressed.
+- **SpiderMonkey sandbox**: SpiderMonkey is not sandbox-isolated beyond process-level isolation.
+  JIT-compiled JS runs with the same memory permissions as the Servo process. WEFT relies on
+  SpiderMonkey's own security properties for the JavaScript execution boundary. See
+  `docs/security.md` for the full bounded statement. Not addressed.
 
 ## Update policy
 
