@@ -19,7 +19,7 @@
   };
 
   virtualisation = {
-    qemu.options = [ "-vga virtio" "-display gtk,gl=on" ];
+    graphics = false;
     memorySize = 4096;
     cores = 4;
     diskSize = 20480;
