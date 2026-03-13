@@ -96,6 +96,7 @@ struct App {
     modifiers: ModifiersState,
     cursor_pos: servo::euclid::default::Point2D<f32>,
     shell_client: Option<crate::shell_client::ShellClient>,
+    gesture_thread: Option<std::thread::JoinHandle<()>>,
 }
 
 impl App {
@@ -113,6 +114,7 @@ impl App {
             modifiers: ModifiersState::default(),
             cursor_pos: servo::euclid::default::Point2D::zero(),
             shell_client: None,
+            gesture_thread: None,
         }
     }
 
@@ -128,12 +130,17 @@ impl App {
         let Some(pixels) = rendering_context.read_pixels() else {
             return;
         };
-        let ctx = softbuffer::Context::new(Arc::clone(window)).expect("softbuffer context");
-        let mut surface =
-            softbuffer::Surface::new(&ctx, Arc::clone(window)).expect("softbuffer surface");
+        let Ok(ctx) = softbuffer::Context::new(Arc::clone(window)) else {
+            tracing::warn!("softbuffer context creation failed; skipping frame");
+            return;
+        };
+        let Ok(mut surface) = softbuffer::Surface::new(&ctx, Arc::clone(window)) else {
+            tracing::warn!("softbuffer surface creation failed; skipping frame");
+            return;
+        };
         let _ = surface.resize(
-            std::num::NonZeroU32::new(size.width).unwrap_or(std::num::NonZeroU32::new(1).unwrap()),
-            std::num::NonZeroU32::new(size.height).unwrap_or(std::num::NonZeroU32::new(1).unwrap()),
+            std::num::NonZeroU32::new(size.width).unwrap_or(std::num::NonZeroU32::MIN),
+            std::num::NonZeroU32::new(size.height).unwrap_or(std::num::NonZeroU32::MIN),
         );
         let Ok(mut buf) = surface.buffer_mut() else {
             return;
@@ -152,11 +159,14 @@ impl ApplicationHandler<ServoWake> for App {
         }
 
         let attrs = WindowAttributes::default().with_title("WEFT Shell");
-        let window = Arc::new(
-            event_loop
-                .create_window(attrs)
-                .expect("failed to create shell window"),
-        );
+        let window = match event_loop.create_window(attrs) {
+            Ok(w) => Arc::new(w),
+            Err(e) => {
+                tracing::error!(error = %e, "failed to create shell window; exiting");
+                event_loop.exit();
+                return;
+            }
+        };
         let size = window.inner_size();
         self.window = Some(Arc::clone(&window));
 
@@ -177,7 +187,11 @@ impl ApplicationHandler<ServoWake> for App {
 
         servo.set_delegate(Rc::new(WeftServoDelegate));
 
-        let rendering_context = build_rendering_ctx(event_loop, &window, size);
+        let Some(rendering_context) = build_rendering_ctx(event_loop, &window, size) else {
+            tracing::error!("no rendering context available; shell cannot start");
+            event_loop.exit();
+            return;
+        };
 
         let user_content_manager = Rc::new(UserContentManager::new(&servo));
         if let Some(kit_js) = load_ui_kit_script() {
@@ -226,10 +240,22 @@ impl ApplicationHandler<ServoWake> for App {
             }
             let gestures = sc.take_pending_gestures();
             if !gestures.is_empty() {
-                let ws_port = self.ws_port;
-                std::thread::spawn(move || {
-                    forward_gestures_to_appd(ws_port, &gestures);
-                });
+                let prev_done = self
+                    .gesture_thread
+                    .as_ref()
+                    .map(|h| h.is_finished())
+                    .unwrap_or(true);
+                if prev_done {
+                    let ws_port = self.ws_port;
+                    self.gesture_thread = Some(std::thread::spawn(move || {
+                        forward_gestures_to_appd(ws_port, &gestures);
+                    }));
+                } else {
+                    tracing::debug!(
+                        count = gestures.len(),
+                        "gesture forwarding in progress; dropping batch"
+                    );
+                }
             }
         }
         if let Some(servo) = &self.servo {
@@ -319,7 +345,7 @@ fn build_rendering_ctx(
     event_loop: &ActiveEventLoop,
     window: &Arc<Window>,
     size: winit::dpi::PhysicalSize<u32>,
-) -> RenderingCtx {
+) -> Option<RenderingCtx> {
     if std::env::var_os("WEFT_EGL_RENDERING").is_some() {
         let display_handle = event_loop.display_handle();
         let window_handle = window.window_handle();
@@ -327,7 +353,7 @@ fn build_rendering_ctx(
             match servo::WindowRenderingContext::new(dh, wh, size) {
                 Ok(rc) => {
                     tracing::info!("using EGL rendering context");
-                    return RenderingCtx::Egl(Rc::new(rc));
+                    return Some(RenderingCtx::Egl(Rc::new(rc)));
                 }
                 Err(e) => {
                     tracing::warn!("EGL rendering context failed ({e}), falling back to software");
@@ -335,10 +361,14 @@ fn build_rendering_ctx(
             }
         }
     }
-    RenderingCtx::Software(Rc::new(
-        servo::SoftwareRenderingContext::new(servo::euclid::Size2D::new(size.width, size.height))
-            .expect("SoftwareRenderingContext"),
-    ))
+    match servo::SoftwareRenderingContext::new(servo::euclid::Size2D::new(size.width, size.height))
+    {
+        Ok(rc) => Some(RenderingCtx::Software(Rc::new(rc))),
+        Err(e) => {
+            tracing::error!("SoftwareRenderingContext failed: {e}");
+            None
+        }
+    }
 }
 
 // ── Public entry point ────────────────────────────────────────────────────────

@@ -130,12 +130,17 @@ impl App {
         let Some(pixels) = rendering_context.read_pixels() else {
             return;
         };
-        let ctx = softbuffer::Context::new(Arc::clone(window)).expect("softbuffer context");
-        let mut surface =
-            softbuffer::Surface::new(&ctx, Arc::clone(window)).expect("softbuffer surface");
+        let Ok(ctx) = softbuffer::Context::new(Arc::clone(window)) else {
+            tracing::warn!("softbuffer context creation failed; skipping frame");
+            return;
+        };
+        let Ok(mut surface) = softbuffer::Surface::new(&ctx, Arc::clone(window)) else {
+            tracing::warn!("softbuffer surface creation failed; skipping frame");
+            return;
+        };
         let _ = surface.resize(
-            std::num::NonZeroU32::new(size.width).unwrap_or(std::num::NonZeroU32::new(1).unwrap()),
-            std::num::NonZeroU32::new(size.height).unwrap_or(std::num::NonZeroU32::new(1).unwrap()),
+            std::num::NonZeroU32::new(size.width).unwrap_or(std::num::NonZeroU32::MIN),
+            std::num::NonZeroU32::new(size.height).unwrap_or(std::num::NonZeroU32::MIN),
         );
         let Ok(mut buf) = surface.buffer_mut() else {
             return;
@@ -155,11 +160,14 @@ impl ApplicationHandler<ServoWake> for App {
 
         let title = format!("WEFT App — {}", self.url.host_str().unwrap_or("app"));
         let attrs = WindowAttributes::default().with_title(title);
-        let window = Arc::new(
-            event_loop
-                .create_window(attrs)
-                .expect("failed to create app window"),
-        );
+        let window = match event_loop.create_window(attrs) {
+            Ok(w) => Arc::new(w),
+            Err(e) => {
+                tracing::error!(error = %e, "failed to create app window; exiting");
+                event_loop.exit();
+                return;
+            }
+        };
         let size = window.inner_size();
         self.window = Some(Arc::clone(&window));
 
@@ -185,7 +193,11 @@ impl ApplicationHandler<ServoWake> for App {
 
         servo.set_delegate(Rc::new(WeftServoDelegate));
 
-        let rendering_context = build_rendering_ctx(event_loop, &window, size);
+        let Some(rendering_context) = build_rendering_ctx(event_loop, &window, size) else {
+            tracing::error!("no rendering context available; exiting without READY signal");
+            event_loop.exit();
+            return;
+        };
 
         let ucm = Rc::new(UserContentManager::new(&servo));
         if let Some(kit_js) = load_ui_kit_script() {
@@ -326,7 +338,7 @@ fn build_rendering_ctx(
     event_loop: &ActiveEventLoop,
     window: &Arc<Window>,
     size: winit::dpi::PhysicalSize<u32>,
-) -> RenderingCtx {
+) -> Option<RenderingCtx> {
     if std::env::var_os("WEFT_EGL_RENDERING").is_some() {
         let display_handle = event_loop.display_handle();
         let window_handle = window.window_handle();
@@ -334,7 +346,7 @@ fn build_rendering_ctx(
             match servo::WindowRenderingContext::new(dh, wh, size) {
                 Ok(rc) => {
                     tracing::info!("using EGL rendering context");
-                    return RenderingCtx::Egl(Rc::new(rc));
+                    return Some(RenderingCtx::Egl(Rc::new(rc)));
                 }
                 Err(e) => {
                     tracing::warn!("EGL rendering context failed ({e}), falling back to software");
@@ -342,10 +354,14 @@ fn build_rendering_ctx(
             }
         }
     }
-    RenderingCtx::Software(Rc::new(
-        servo::SoftwareRenderingContext::new(servo::euclid::Size2D::new(size.width, size.height))
-            .expect("SoftwareRenderingContext"),
-    ))
+    match servo::SoftwareRenderingContext::new(servo::euclid::Size2D::new(size.width, size.height))
+    {
+        Ok(rc) => Some(RenderingCtx::Software(Rc::new(rc))),
+        Err(e) => {
+            tracing::error!("SoftwareRenderingContext failed: {e}");
+            None
+        }
+    }
 }
 
 fn ui_kit_path() -> std::path::PathBuf {
