@@ -1,4 +1,6 @@
+#[cfg(feature = "servo-embed")]
 mod protocols;
+#[cfg(feature = "servo-embed")]
 mod shell_client;
 
 #[cfg(feature = "servo-embed")]
@@ -34,16 +36,16 @@ fn main() -> anyhow::Result<()> {
 fn appd_ws_port() -> u16 {
     if let Ok(runtime_dir) = std::env::var("XDG_RUNTIME_DIR") {
         let port_file = std::path::PathBuf::from(runtime_dir).join("weft/appd.wsport");
-        if let Ok(s) = std::fs::read_to_string(port_file) {
-            if let Ok(n) = s.trim().parse() {
-                return n;
-            }
-        }
-    }
-    if let Ok(s) = std::env::var("WEFT_APPD_WS_PORT") {
-        if let Ok(n) = s.parse() {
+        if let Ok(s) = std::fs::read_to_string(port_file)
+            && let Ok(n) = s.trim().parse()
+        {
             return n;
         }
+    }
+    if let Ok(s) = std::env::var("WEFT_APPD_WS_PORT")
+        && let Ok(n) = s.parse()
+    {
+        return n;
     }
     7410
 }

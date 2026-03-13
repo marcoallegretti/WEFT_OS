@@ -6,7 +6,9 @@ use anyhow::Context;
 mod embedder;
 #[cfg(feature = "servo-embed")]
 mod keyutils;
+#[cfg(feature = "servo-embed")]
 mod protocols;
+#[cfg(feature = "servo-embed")]
 mod shell_client;
 
 fn main() -> anyhow::Result<()> {
