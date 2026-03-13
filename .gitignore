@@ -2,4 +2,7 @@
 /.windsurf/
 /docu_dev/
 
+/infra/vm/weft-vm-result*
+/infra/vm/*.qcow2
+
 Thumbs.db
