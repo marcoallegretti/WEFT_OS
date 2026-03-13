@@ -99,6 +99,7 @@ jobs:
             libgbm-dev \
             libdrm-dev \
             libfontconfig-dev \
+            llvm \
             pkg-config
       - name: cargo check servo-embed (weft-servo-shell)
         run: >
