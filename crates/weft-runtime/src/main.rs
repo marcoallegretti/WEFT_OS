@@ -212,7 +212,7 @@ fn run_module(
                 move |_: wasmtime::StoreContextMut<'_, State>,
                       (payload,): (String,)|
                       -> wasmtime::Result<(Result<(), String>,)> {
-                    let mut guard = ipc_send.lock().unwrap();
+                    let mut guard = ipc_send.lock().unwrap_or_else(|p| p.into_inner());
                     match guard.as_mut() {
                         Some(ipc) => Ok((ipc.send(&payload),)),
                         None => Ok((Err("IPC not connected".to_owned()),)),
@@ -227,7 +227,7 @@ fn run_module(
                 move |_: wasmtime::StoreContextMut<'_, State>,
                       ()|
                       -> wasmtime::Result<(Option<String>,)> {
-                    let mut guard = ipc_recv.lock().unwrap();
+                    let mut guard = ipc_recv.lock().unwrap_or_else(|p| p.into_inner());
                     Ok((guard.as_mut().and_then(|ipc| ipc.recv()),))
                 },
             )
@@ -299,7 +299,7 @@ fn run_module(
     if let Some(socket_path) = ipc_socket {
         ctx_builder.env("WEFT_IPC_SOCKET", socket_path);
         if let Some(ipc) = IpcState::connect(socket_path) {
-            *ipc_state.lock().unwrap() = Some(ipc);
+            *ipc_state.lock().unwrap_or_else(|p| p.into_inner()) = Some(ipc);
         } else {
             tracing::warn!("weft:app/ipc: could not connect to IPC socket {socket_path}");
         }

@@ -294,9 +294,13 @@ impl WlrLayerShellHandler for WeftCompositorState {
     ) {
         let desktop_surface = DesktopLayerSurface::new(surface, namespace);
         if let Some(output) = self.space.outputs().next().cloned() {
-            layer_map_for_output(&output)
+            if layer_map_for_output(&output)
                 .map_layer(&desktop_surface)
-                .expect("layer surface must not already be mapped");
+                .is_err()
+            {
+                tracing::warn!("received duplicate layer surface mapping; ignoring");
+                return;
+            }
             layer_map_for_output(&output).arrange();
         }
     }

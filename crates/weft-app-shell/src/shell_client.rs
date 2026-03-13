@@ -172,7 +172,10 @@ impl ShellClient {
             WlSurface::from_id(&conn, id).context("wl_surface from_id")?
         };
 
-        let manager = data.manager.as_ref().unwrap();
+        let manager = data
+            .manager
+            .as_ref()
+            .expect("manager is Some; guaranteed by ensure! above");
         let title = format!("{app_id}/{session_id}");
         let window = manager.create_window(
             app_id.to_string(),

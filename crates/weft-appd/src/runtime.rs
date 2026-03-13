@@ -313,23 +313,32 @@ pub(crate) async fn supervise(
         _ = &mut abort_rx => None,
     };
 
-    let mut app_shell: Option<tokio::process::Child> = None;
-    match ready_result {
+    let app_shell = match ready_result {
         Some(Ok(Ok(remaining_stdout))) => {
-            registry
-                .lock()
-                .await
-                .set_state(session_id, AppStateKind::Running);
-            let _ = registry.lock().await.broadcast().send(Response::AppReady {
-                session_id,
-                app_id: app_id.to_owned(),
-            });
+            {
+                let mut reg = registry.lock().await;
+                reg.set_state(session_id, AppStateKind::Running);
+                let _ = reg.broadcast().send(Response::AppReady {
+                    session_id,
+                    app_id: app_id.to_owned(),
+                });
+            }
             tracing::info!(session_id, %app_id, "app ready");
             tokio::spawn(drain_stdout(remaining_stdout, session_id));
-            app_shell = spawn_app_shell(session_id, app_id).await;
+            spawn_app_shell(session_id, app_id).await
         }
         Some(Ok(Err(e))) => {
-            tracing::warn!(session_id, %app_id, error = %e, "stdout read error before READY");
+            tracing::warn!(session_id, %app_id, error = %e, "stdout read error before READY; killing process");
+            let _ = child.kill().await;
+            kill_portal(portal).await;
+            let mut reg = registry.lock().await;
+            reg.set_state(session_id, AppStateKind::Stopped);
+            reg.remove_abort_sender(session_id);
+            let _ = reg.broadcast().send(Response::AppState {
+                session_id,
+                state: AppStateKind::Stopped,
+            });
+            return Ok(());
         }
         Some(Err(_elapsed)) => {
             tracing::warn!(session_id, %app_id, "READY timeout after 30s; killing process");
@@ -356,7 +365,7 @@ pub(crate) async fn supervise(
             });
             return Ok(());
         }
-    }
+    };
 
     tokio::spawn(drain_stderr(stderr, session_id));
 
