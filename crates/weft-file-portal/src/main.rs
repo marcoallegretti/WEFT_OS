@@ -1,10 +1,17 @@
+#[cfg(unix)]
 use std::io::{BufRead, BufReader, Write};
-use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
+
+use serde::{Deserialize, Serialize};
+
+#[cfg(unix)]
 use std::sync::Arc;
 
+#[cfg(unix)]
 use anyhow::Context;
-use serde::{Deserialize, Serialize};
+
+#[cfg(unix)]
+use std::os::unix::net::{UnixListener, UnixStream};
 
 #[derive(Deserialize)]
 #[serde(tag = "op", rename_all = "snake_case")]
@@ -31,6 +38,7 @@ impl Response {
     }
 }
 
+#[cfg(unix)]
 fn main() -> anyhow::Result<()> {
     let args: Vec<String> = std::env::args().collect();
     if args.len() < 2 {
@@ -62,6 +70,12 @@ fn main() -> anyhow::Result<()> {
     Ok(())
 }
 
+#[cfg(not(unix))]
+fn main() -> anyhow::Result<()> {
+    anyhow::bail!("weft-file-portal requires a Unix platform")
+}
+
+#[cfg_attr(not(any(unix, test)), allow(dead_code))]
 fn parse_allowed(args: &[String]) -> Vec<PathBuf> {
     let mut allowed = Vec::new();
     let mut i = 0;
@@ -78,6 +92,7 @@ fn parse_allowed(args: &[String]) -> Vec<PathBuf> {
     allowed
 }
 
+#[cfg_attr(not(any(unix, test)), allow(dead_code))]
 fn normalize_path(path: &Path) -> PathBuf {
     use std::path::Component;
     let mut out = PathBuf::new();
@@ -101,6 +116,7 @@ fn is_allowed(path: &Path, allowed: &[PathBuf]) -> bool {
     allowed.iter().any(|a| norm.starts_with(a))
 }
 
+#[cfg(unix)]
 fn handle_connection(stream: UnixStream, allowed: &[PathBuf]) {
     let mut writer = match stream.try_clone() {
         Ok(s) => s,
@@ -134,6 +150,7 @@ fn handle_connection(stream: UnixStream, allowed: &[PathBuf]) {
     }
 }
 
+#[cfg_attr(not(any(unix, test)), allow(dead_code))]
 fn handle_request(req: Request, allowed: &[PathBuf]) -> Response {
     match req {
         Request::Read { path } => {

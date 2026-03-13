@@ -25,8 +25,11 @@ pub struct WeftShellState {
 }
 
 pub struct WeftShellWindowData {
+    #[allow(dead_code)]
     pub app_id: String,
+    #[allow(dead_code)]
     pub title: String,
+    #[allow(dead_code)]
     pub role: String,
     pub surface: Option<wayland_server::protocol::wl_surface::WlSurface>,
     pub closed: std::sync::atomic::AtomicBool,

@@ -1,11 +1,22 @@
+#![cfg_attr(not(unix), allow(dead_code, unused_imports))]
+
 use std::path::PathBuf;
 use std::sync::Arc;
 
 use anyhow::Context;
+#[cfg(unix)]
 use tokio::io::AsyncWriteExt;
 use tokio::sync::Mutex;
 
+#[cfg(unix)]
 mod compositor_client;
+#[cfg(not(unix))]
+mod compositor_client {
+    use tokio::sync::mpsc;
+    use weft_ipc_types::AppdToCompositor;
+
+    pub type CompositorSender = mpsc::Sender<AppdToCompositor>;
+}
 mod ipc;
 mod mount;
 mod runtime;
@@ -149,6 +160,7 @@ async fn main() -> anyhow::Result<()> {
     run().await
 }
 
+#[cfg(unix)]
 async fn run() -> anyhow::Result<()> {
     let socket_path = appd_socket_path()?;
 
@@ -247,11 +259,18 @@ async fn run() -> anyhow::Result<()> {
     Ok(())
 }
 
+#[cfg(not(unix))]
+async fn run() -> anyhow::Result<()> {
+    anyhow::bail!("weft-appd requires a Unix platform")
+}
+
+#[cfg_attr(not(any(unix, test)), allow(dead_code))]
 fn session_file_path() -> Option<std::path::PathBuf> {
     let runtime_dir = std::env::var("XDG_RUNTIME_DIR").ok()?;
     Some(PathBuf::from(runtime_dir).join("weft/last-session.json"))
 }
 
+#[cfg_attr(not(any(unix, test)), allow(dead_code))]
 async fn save_session(app_ids: Vec<String>) {
     let Some(path) = session_file_path() else {
         return;
@@ -278,6 +297,7 @@ fn ws_port() -> u16 {
         .unwrap_or(7410)
 }
 
+#[cfg_attr(not(any(unix, test)), allow(dead_code))]
 fn write_ws_port(port: u16) -> anyhow::Result<()> {
     let runtime_dir = std::env::var("XDG_RUNTIME_DIR").context("XDG_RUNTIME_DIR not set")?;
     let path = PathBuf::from(runtime_dir).join("weft/appd.wsport");
@@ -288,6 +308,7 @@ fn write_ws_port(port: u16) -> anyhow::Result<()> {
     Ok(())
 }
 
+#[cfg(unix)]
 async fn handle_connection(
     stream: tokio::net::UnixStream,
     registry: Registry,
@@ -493,6 +514,7 @@ fn scan_installed_apps() -> Vec<AppInfo> {
     apps
 }
 
+#[cfg_attr(not(any(unix, test)), allow(dead_code))]
 fn appd_socket_path() -> anyhow::Result<PathBuf> {
     if let Ok(p) = std::env::var("WEFT_APPD_SOCKET") {
         return Ok(PathBuf::from(p));

@@ -80,11 +80,17 @@ pub struct WeftCompositorState {
     pub layer_shell_state: WlrLayerShellState,
     pub shm_state: ShmState,
     pub dmabuf_state: DmabufState,
+    #[allow(dead_code)]
     pub output_manager_state: OutputManagerState,
+    #[allow(dead_code)]
     pub presentation_state: PresentationState,
+    #[allow(dead_code)]
     pub text_input_state: TextInputManagerState,
+    #[allow(dead_code)]
     pub input_method_state: InputMethodManagerState,
+    #[allow(dead_code)]
     pub pointer_constraints_state: PointerConstraintsState,
+    #[allow(dead_code)]
     pub cursor_shape_state: CursorShapeManagerState,
 
     pub space: Space<Window>,

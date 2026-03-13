@@ -8,6 +8,7 @@ use crate::Registry;
 use crate::compositor_client::CompositorSender;
 use crate::ipc::{AppStateKind, Response};
 
+#[cfg(unix)]
 pub(crate) async fn spawn_ipc_relay(
     session_id: u64,
     socket_path: PathBuf,
@@ -56,6 +57,15 @@ pub(crate) async fn spawn_ipc_relay(
         let _ = std::fs::remove_file(&socket_path);
     });
     Some(html_to_wasm_tx)
+}
+
+#[cfg(not(unix))]
+pub(crate) async fn spawn_ipc_relay(
+    _session_id: u64,
+    _socket_path: PathBuf,
+    _broadcast: tokio::sync::broadcast::Sender<Response>,
+) -> Option<tokio::sync::mpsc::Sender<String>> {
+    None
 }
 
 const READY_TIMEOUT: Duration = Duration::from_secs(30);
