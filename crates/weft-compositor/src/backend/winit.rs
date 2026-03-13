@@ -63,10 +63,12 @@ pub fn run() -> anyhow::Result<()> {
 
     loop_handle
         .insert_source(listening_socket, |client_stream, _, state| {
-            state
+            if let Err(e) = state
                 .display_handle
                 .insert_client(client_stream, Arc::new(WeftClientState::default()))
-                .unwrap();
+            {
+                tracing::warn!(?e, "failed to insert Wayland client");
+            }
         })
         .map_err(|e| anyhow::anyhow!("socket source insertion failed: {e}"))?;
 
@@ -78,7 +80,9 @@ pub fn run() -> anyhow::Result<()> {
                 // Safety: the display is owned by this Generic source and is never dropped
                 // while the event loop runs.
                 unsafe {
-                    display.get_mut().dispatch_clients(state).unwrap();
+                    if let Err(e) = display.get_mut().dispatch_clients(state) {
+                        tracing::warn!(?e, "Wayland dispatch error");
+                    }
                 }
                 Ok(PostAction::Continue)
             },
@@ -129,9 +133,8 @@ pub fn run() -> anyhow::Result<()> {
                 let size = backend.window_size();
                 let full_damage = Rectangle::from_size(size);
 
-                {
-                    let (renderer, mut framebuffer) = backend.bind().unwrap();
-                    smithay::desktop::space::render_output::<
+                let render_ok = match backend.bind() {
+                    Ok((renderer, mut framebuffer)) => smithay::desktop::space::render_output::<
                         _,
                         WaylandSurfaceRenderElement<GlesRenderer>,
                         _,
@@ -147,9 +150,18 @@ pub fn run() -> anyhow::Result<()> {
                         &mut damage_tracker,
                         [0.1_f32, 0.1, 0.1, 1.0],
                     )
-                    .unwrap();
+                    .map_err(|e| tracing::warn!(?e, "render_output failed"))
+                    .is_ok(),
+                    Err(e) => {
+                        tracing::warn!(?e, "backend bind failed");
+                        false
+                    }
+                };
+                if render_ok {
+                    if let Err(e) = backend.submit(Some(&[full_damage])) {
+                        tracing::warn!(?e, "backend submit failed");
+                    }
                 }
-                backend.submit(Some(&[full_damage])).unwrap();
 
                 state.space.elements().for_each(|window| {
                     window.send_frame(

@@ -137,10 +137,12 @@ pub fn run() -> anyhow::Result<()> {
 
     loop_handle
         .insert_source(listening_socket, |stream, _, state| {
-            state
+            if let Err(e) = state
                 .display_handle
                 .insert_client(stream, Arc::new(WeftClientState::default()))
-                .unwrap();
+            {
+                tracing::warn!(?e, "failed to insert Wayland client");
+            }
         })
         .map_err(|e| anyhow::anyhow!("socket source: {e}"))?;
 
@@ -150,7 +152,9 @@ pub fn run() -> anyhow::Result<()> {
             |_, display, state| {
                 // Safety: Display is owned by this Generic source and outlives the event loop.
                 unsafe {
-                    display.get_mut().dispatch_clients(state).unwrap();
+                    if let Err(e) = display.get_mut().dispatch_clients(state) {
+                        tracing::warn!(?e, "Wayland dispatch error");
+                    }
                 }
                 Ok(PostAction::Continue)
             },
@@ -375,16 +379,21 @@ fn device_added(state: &mut WeftCompositorState, node: DrmNode, path: &Path) -> 
         )
         .map_err(|e| anyhow::anyhow!("DRM notifier: {e}"))?;
 
-    state.drm.as_mut().unwrap().devices.insert(
-        node,
-        WeftDrmDevice {
-            drm_output_manager,
-            drm_scanner: DrmScanner::new(),
-            surfaces: HashMap::new(),
-            render_node,
-            registration_token,
-        },
-    );
+    state
+        .drm
+        .as_mut()
+        .context("DRM data missing after initialization")?
+        .devices
+        .insert(
+            node,
+            WeftDrmDevice {
+                drm_output_manager,
+                drm_scanner: DrmScanner::new(),
+                surfaces: HashMap::new(),
+                render_node,
+                registration_token,
+            },
+        );
 
     device_changed(state, node);
     Ok(())
@@ -604,7 +613,7 @@ fn render_output(state: &mut WeftCompositorState, node: DrmNode, crtc: crtc::Han
     };
 
     let render_node = {
-        let d = state.drm.as_ref().unwrap();
+        let Some(d) = state.drm.as_ref() else { return };
         d.devices
             .get(&node)
             .and_then(|d| d.render_node)
