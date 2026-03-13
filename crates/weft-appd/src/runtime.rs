@@ -315,14 +315,14 @@ pub(crate) async fn supervise(
 
     let app_shell = match ready_result {
         Some(Ok(Ok(remaining_stdout))) => {
-            registry
-                .lock()
-                .await
-                .set_state(session_id, AppStateKind::Running);
-            let _ = registry.lock().await.broadcast().send(Response::AppReady {
-                session_id,
-                app_id: app_id.to_owned(),
-            });
+            {
+                let mut reg = registry.lock().await;
+                reg.set_state(session_id, AppStateKind::Running);
+                let _ = reg.broadcast().send(Response::AppReady {
+                    session_id,
+                    app_id: app_id.to_owned(),
+                });
+            }
             tracing::info!(session_id, %app_id, "app ready");
             tokio::spawn(drain_stdout(remaining_stdout, session_id));
             spawn_app_shell(session_id, app_id).await
