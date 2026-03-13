@@ -99,11 +99,7 @@ struct App {
 }
 
 impl App {
-    fn new(
-        url: ServoUrl,
-        waker: WeftEventLoopWaker,
-        ws_port: u16,
-    ) -> Self {
+    fn new(url: ServoUrl, waker: WeftEventLoopWaker, ws_port: u16) -> Self {
         Self {
             url,
             ws_port,
@@ -364,9 +360,7 @@ fn resolve_weft_app_url(url: &ServoUrl) -> Option<ServoUrl> {
 fn load_ui_kit_script() -> Option<String> {
     let path = std::env::var("WEFT_UI_KIT_JS")
         .map(std::path::PathBuf::from)
-        .unwrap_or_else(|_| {
-            std::path::PathBuf::from("/usr/share/weft/system/weft-ui-kit.js")
-        });
+        .unwrap_or_else(|_| std::path::PathBuf::from("/usr/share/weft/system/weft-ui-kit.js"));
     std::fs::read_to_string(path).ok()
 }
 
@@ -388,10 +382,7 @@ fn app_store_roots() -> Vec<PathBuf> {
     roots
 }
 
-pub fn run(
-    html_path: &Path,
-    ws_port: u16,
-) -> anyhow::Result<()> {
+pub fn run(html_path: &Path, ws_port: u16) -> anyhow::Result<()> {
     let url_str = format!("file://{}", html_path.display());
     let raw_url =
         ServoUrl::parse(&url_str).map_err(|e| anyhow::anyhow!("invalid URL {url_str}: {e}"))?;
@@ -411,10 +402,7 @@ pub fn run(
         .map_err(|e| anyhow::anyhow!("event loop run: {e}"))
 }
 
-fn forward_gestures_to_appd(
-    ws_port: u16,
-    gestures: &[crate::shell_client::PendingGesture],
-) {
+fn forward_gestures_to_appd(ws_port: u16, gestures: &[crate::shell_client::PendingGesture]) {
     use std::net::TcpStream;
     let addr = format!("127.0.0.1:{ws_port}");
     let stream = match TcpStream::connect(&addr) {

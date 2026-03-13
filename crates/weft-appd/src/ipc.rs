@@ -4,12 +4,22 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "SCREAMING_SNAKE_CASE")]
 pub enum Request {
-    LaunchApp { app_id: String, surface_id: u64 },
-    TerminateApp { session_id: u64 },
+    LaunchApp {
+        app_id: String,
+        surface_id: u64,
+    },
+    TerminateApp {
+        session_id: u64,
+    },
     QueryRunning,
-    QueryAppState { session_id: u64 },
+    QueryAppState {
+        session_id: u64,
+    },
     QueryInstalledApps,
-    IpcForward { session_id: u64, payload: String },
+    IpcForward {
+        session_id: u64,
+        payload: String,
+    },
     PanelGesture {
         gesture_type: u32,
         fingers: u32,

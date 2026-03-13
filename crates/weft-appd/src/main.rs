@@ -291,12 +291,14 @@ async fn handle_connection(
 ) -> anyhow::Result<()> {
     #[cfg(unix)]
     {
-        let cred = stream
-            .peer_cred()
-            .context("SO_PEERCRED")?;
+        let cred = stream.peer_cred().context("SO_PEERCRED")?;
         let our_uid = unsafe { libc::getuid() };
         if cred.uid() != our_uid {
-            anyhow::bail!("peer UID {} != process UID {}; connection rejected", cred.uid(), our_uid);
+            anyhow::bail!(
+                "peer UID {} != process UID {}; connection rejected",
+                cred.uid(),
+                our_uid
+            );
         }
     }
 

@@ -246,9 +246,7 @@ fn run_module(
                 Vec<(String, String)>,
                 Option<Vec<u8>>,
             )|
-             -> wasmtime::Result<(
-                Result<(u16, String, Vec<u8>), String>,
-            )> {
+             -> wasmtime::Result<(Result<(u16, String, Vec<u8>), String>,)> {
                 let result = host_fetch(&url, &method, &headers, body.as_deref());
                 Ok((result,))
             },
@@ -395,7 +393,9 @@ fn host_clipboard_write(text: &str) -> Result<(), String> {
         .spawn()
         .map_err(|e| e.to_string())?;
     if let Some(stdin) = child.stdin.as_mut() {
-        stdin.write_all(text.as_bytes()).map_err(|e| e.to_string())?;
+        stdin
+            .write_all(text.as_bytes())
+            .map_err(|e| e.to_string())?;
     }
     let status = child.wait().map_err(|e| e.to_string())?;
     if status.success() {
@@ -412,15 +412,13 @@ fn host_notify(title: &str, body: &str, icon: Option<&str>) -> Result<(), String
         cmd.arg("--icon").arg(i);
     }
     cmd.arg("--").arg(title).arg(body);
-    cmd.status()
-        .map_err(|e| e.to_string())
-        .and_then(|s| {
-            if s.success() {
-                Ok(())
-            } else {
-                Err(format!("notify-send exited with {s}"))
-            }
-        })
+    cmd.status().map_err(|e| e.to_string()).and_then(|s| {
+        if s.success() {
+            Ok(())
+        } else {
+            Err(format!("notify-send exited with {s}"))
+        }
+    })
 }
 
 #[cfg(feature = "seccomp")]
@@ -473,7 +471,11 @@ fn apply_seccomp_filter() -> anyhow::Result<()> {
     )?;
     let bpf: BpfProgram = filter.try_into()?;
     let ret = unsafe { libc::prctl(libc::PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) };
-    anyhow::ensure!(ret == 0, "prctl PR_SET_NO_NEW_PRIVS failed: {}", std::io::Error::last_os_error());
+    anyhow::ensure!(
+        ret == 0,
+        "prctl PR_SET_NO_NEW_PRIVS failed: {}",
+        std::io::Error::last_os_error()
+    );
     seccompiler::apply_filter(&bpf)?;
     Ok(())
 }

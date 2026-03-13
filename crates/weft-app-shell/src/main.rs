@@ -48,11 +48,7 @@ fn appd_ws_port() -> u16 {
     7410
 }
 
-fn embed_app(
-    app_id: &str,
-    session_id: u64,
-    ws_port: u16,
-) -> anyhow::Result<()> {
+fn embed_app(app_id: &str, session_id: u64, ws_port: u16) -> anyhow::Result<()> {
     #[cfg(feature = "servo-embed")]
     return embedder::run(app_id, session_id, ws_port);
 

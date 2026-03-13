@@ -338,8 +338,7 @@ fn handle_gesture_swipe_end<B: InputBackend>(
     if !cancelled
         && gs.in_progress
         && gs.fingers >= NAVIGATION_SWIPE_FINGERS
-        && (gs.dx.abs() >= NAVIGATION_SWIPE_THRESHOLD
-            || gs.dy.abs() >= NAVIGATION_SWIPE_THRESHOLD)
+        && (gs.dx.abs() >= NAVIGATION_SWIPE_THRESHOLD || gs.dy.abs() >= NAVIGATION_SWIPE_THRESHOLD)
     {
         state
             .weft_shell_state

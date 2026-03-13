@@ -500,7 +500,9 @@ impl Dispatch<ZweftShellManagerV1, ()> for WeftCompositorState {
                         oy,
                         ow,
                         oh,
-                        u32::from(crate::protocols::server::zweft_shell_window_v1::State::Maximized),
+                        u32::from(
+                            crate::protocols::server::zweft_shell_window_v1::State::Maximized,
+                        ),
                     );
                     state.weft_shell_state.add_panel(window);
                 } else {

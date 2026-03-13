@@ -361,7 +361,9 @@ fn load_ui_kit_script() -> Option<String> {
 
 #[allow(dead_code)]
 fn resolve_weft_system_url(url: &ServoUrl) -> Option<ServoUrl> {
-    if url.scheme() != "weft-system" { return None; }
+    if url.scheme() != "weft-system" {
+        return None;
+    }
     let host = url.host_str().unwrap_or("");
     let path = url.path().trim_start_matches('/');
     let system_root = std::env::var("WEFT_SYSTEM_RESOURCES")
@@ -384,13 +386,11 @@ fn read_ui_entry(app_id: &str) -> Option<String> {
         .join(app_id)
         .join("merged")
         .join("wapp.toml");
-    let toml_text = std::fs::read_to_string(&erofs_manifest)
-        .ok()
-        .or_else(|| {
-            app_store_roots()
-                .into_iter()
-                .find_map(|r| std::fs::read_to_string(r.join(app_id).join("wapp.toml")).ok())
-        })?;
+    let toml_text = std::fs::read_to_string(&erofs_manifest).ok().or_else(|| {
+        app_store_roots()
+            .into_iter()
+            .find_map(|r| std::fs::read_to_string(r.join(app_id).join("wapp.toml")).ok())
+    })?;
     let m: Manifest = toml::from_str(&toml_text).ok()?;
     Some(m.ui.entry)
 }
@@ -436,11 +436,7 @@ fn app_store_roots() -> Vec<PathBuf> {
     roots
 }
 
-pub fn run(
-    app_id: &str,
-    session_id: u64,
-    ws_port: u16,
-) -> anyhow::Result<()> {
+pub fn run(app_id: &str, session_id: u64, ws_port: u16) -> anyhow::Result<()> {
     let url = resolve_weft_app_url(app_id)
         .ok_or_else(|| anyhow::anyhow!("no ui/index.html found for app {app_id}"))?;
 

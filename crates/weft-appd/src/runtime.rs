@@ -145,10 +145,7 @@ async fn kill_portal(portal: Option<(PathBuf, tokio::process::Child)>) {
     }
 }
 
-async fn spawn_app_shell(
-    session_id: u64,
-    app_id: &str,
-) -> Option<tokio::process::Child> {
+async fn spawn_app_shell(session_id: u64, app_id: &str) -> Option<tokio::process::Child> {
     let bin = std::env::var("WEFT_APP_SHELL_BIN").ok()?;
     let mut cmd = tokio::process::Command::new(&bin);
     cmd.arg(app_id)
