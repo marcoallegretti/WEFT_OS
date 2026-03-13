@@ -21,3 +21,6 @@ futures-util = { version = "0.3", default-features = false, features = ["sink", 
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 libc = "0.2"
+
+[target.'cfg(unix)'.dependencies]
+sd-notify = "0.4"
