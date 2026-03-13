@@ -62,6 +62,7 @@ jobs:
             libseat-dev \
             libudev-dev \
             libsystemd-dev \
+            libdisplay-info-dev \
             pkg-config
       - name: cargo clippy (linux-only crates)
         run: >
@@ -97,6 +98,7 @@ jobs:
             libgles2-mesa-dev \
             libgbm-dev \
             libdrm-dev \
+            libfontconfig-dev \
             pkg-config
       - name: cargo check servo-embed (weft-servo-shell)
         run: >

@@ -334,12 +334,11 @@ pub(crate) async fn dispatch(req: Request, registry: &Registry) -> Response {
             let compositor_tx = registry.lock().await.compositor_tx.clone();
             let ipc_socket = session_ipc_socket_path(session_id);
             let broadcast = registry.lock().await.broadcast().clone();
-            if let Some(ref sock_path) = ipc_socket {
-                if let Some(tx) =
+            if let Some(ref sock_path) = ipc_socket
+                && let Some(tx) =
                     runtime::spawn_ipc_relay(session_id, sock_path.clone(), broadcast).await
-                {
-                    registry.lock().await.register_ipc_sender(session_id, tx);
-                }
+            {
+                registry.lock().await.register_ipc_sender(session_id, tx);
             }
             let reg = Arc::clone(registry);
             let aid = app_id.clone();
@@ -388,11 +387,11 @@ pub(crate) async fn dispatch(req: Request, registry: &Registry) -> Response {
             session_id,
             payload,
         } => {
-            if let Some(tx) = registry.lock().await.ipc_sender_for(session_id) {
-                if tx.send(payload).await.is_err() {
-                    tracing::warn!(session_id, "IPC relay sender closed");
-                    registry.lock().await.remove_ipc_sender(session_id);
-                }
+            if let Some(tx) = registry.lock().await.ipc_sender_for(session_id)
+                && tx.send(payload).await.is_err()
+            {
+                tracing::warn!(session_id, "IPC relay sender closed");
+                registry.lock().await.remove_ipc_sender(session_id);
             }
             Response::AppState {
                 session_id,
@@ -499,9 +498,8 @@ mod tests {
         unsafe { std::env::remove_var("WEFT_APPD_WS_PORT") };
         let port = ws_port();
         unsafe {
-            match prior {
-                Some(v) => std::env::set_var("WEFT_APPD_WS_PORT", v),
-                None => {}
+            if let Some(v) = prior {
+                std::env::set_var("WEFT_APPD_WS_PORT", v)
             }
         }
         assert_eq!(port, 7410);
@@ -545,13 +543,11 @@ mod tests {
         }
         let result = appd_socket_path();
         unsafe {
-            match prior_sock {
-                Some(v) => std::env::set_var("WEFT_APPD_SOCKET", v),
-                None => {}
+            if let Some(v) = prior_sock {
+                std::env::set_var("WEFT_APPD_SOCKET", v)
             }
-            match prior_xdg {
-                Some(v) => std::env::set_var("XDG_RUNTIME_DIR", v),
-                None => {}
+            if let Some(v) = prior_xdg {
+                std::env::set_var("XDG_RUNTIME_DIR", v)
             }
         }
         assert!(result.is_err());
