@@ -41,14 +41,18 @@ if [ -d "$SERVO_DIR" ]; then
     --profile minimal -c clippy,rustfmt,llvm-tools,rustc-dev,rust-src
 fi
 
-# WEFT pins servo's `servo-weft` branch; make sure it is available locally.
-if [ -d "$SERVO_DIR/.git" ]; then
-  git -C "$SERVO_DIR" rev-parse --verify -q origin/servo-weft >/dev/null ||
-    git -C "$SERVO_DIR" fetch --depth=50 origin servo-weft:refs/remotes/origin/servo-weft || true
-fi
+# WEFT pins servo's `servo-weft` branch, which in turn uses stylo's
+# `servo-weft` branch; make sure both are available locally.
+for repo in "$SERVO_DIR" "$STYLO_DIR"; do
+  if [ -d "$repo/.git" ]; then
+    git -C "$repo" rev-parse --verify -q origin/servo-weft >/dev/null ||
+      git -C "$repo" fetch --depth=50 origin servo-weft:refs/remotes/origin/servo-weft || true
+  fi
+done
 
 # Point WEFT at the local servo fork and WEFT + servo at the local stylo fork.
 # These patches rewrite Cargo.lock `source` lines; don't commit those hunks.
+# Check out the `servo-weft` work in both forks before building servo-embed.
 if [ -d "$SERVO_DIR" ] && [ -d "$STYLO_DIR" ]; then
   mkdir -p "$PARENT_DIR/.cargo"
   cat > "$PARENT_DIR/.cargo/config.toml" <<CFG
