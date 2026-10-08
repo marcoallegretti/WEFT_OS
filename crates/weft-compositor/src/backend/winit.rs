@@ -157,10 +157,8 @@ pub fn run() -> anyhow::Result<()> {
                         false
                     }
                 };
-                if render_ok {
-                    if let Err(e) = backend.submit(Some(&[full_damage])) {
-                        tracing::warn!(?e, "backend submit failed");
-                    }
+                if render_ok && let Err(e) = backend.submit(Some(&[full_damage])) {
+                    tracing::warn!(?e, "backend submit failed");
                 }
 
                 state.space.elements().for_each(|window| {
