@@ -75,7 +75,7 @@ See `docs/building.md` for full instructions including Wasm component builds, Ni
 
 ## CI
 
-Four jobs on every push and pull request:
+Four jobs on every push to `main` and on pull requests:
 
 - `cross-platform` — fmt, clippy, tests on Ubuntu and Windows
 - `linux-only` — clippy and tests for compositor and shell crates

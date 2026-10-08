@@ -5,12 +5,16 @@ The runner stops at the first failing command and returns its exit status.
 """
 
 import argparse
+import os
 import subprocess
 import sys
 from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[2]
+
+# Stop rustup from installing the pinned toolchain or its components on demand.
+ENVIRONMENT = {**os.environ, "RUSTUP_AUTO_INSTALL": "0"}
 
 LINUX_CRATES = ["weft-compositor", "weft-servo-shell", "weft-app-shell"]
 DEMOS = ["examples/org.weft.demo.counter", "examples/org.weft.demo.notes"]
@@ -110,7 +114,7 @@ def main(argv=None):
             if args.dry_run:
                 continue
             try:
-                result = subprocess.run(command, cwd=ROOT, check=False)
+                result = subprocess.run(command, cwd=ROOT, env=ENVIRONMENT, check=False)
             except OSError as error:
                 print(f"[{profile}] cannot run {command[0]}: {error}", file=sys.stderr)
                 return 1

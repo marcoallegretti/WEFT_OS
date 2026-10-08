@@ -1,5 +1,5 @@
 name: Maintenance
-description: Report one present duplication, structural or misleading-fallback problem that is independent of active development.
+description: Report one present ownership, boundary, enforcement or structural problem that is independent of active development.
 body:
   - type: markdown
     attributes:
@@ -11,7 +11,7 @@ body:
     id: observed
     attributes:
       label: Observed
-      description: One concrete duplicated decision, unnecessary state, misleading fallback, coupling or obsolete path, and who or what it affects today.
+      description: One concrete problem (responsibility held by the wrong owner, authority taken from untrusted input, a grant declared but not enforced, a duplicated decision, unnecessary state, a misleading fallback, coupling or an obsolete path) and who or what it affects today.
     validations:
       required: true
   - type: textarea
