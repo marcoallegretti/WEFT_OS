@@ -1,0 +1,58 @@
+name: Decision
+description: Request a maintainer decision on a material change of direction, compatibility, trust boundaries, support scope or data policy.
+body:
+  - type: markdown
+    attributes:
+      value: |
+        This form requests a decision before implementation; opening it does not approve the change.
+        Ordinary implementation of an accepted BLUEPRINT.md boundary does not need this form.
+        Search existing decisions and issues first.
+  - type: textarea
+    id: observed
+    attributes:
+      label: Observed
+      description: The current problem and the concrete affected user, caller or contract.
+    validations:
+      required: true
+  - type: textarea
+    id: direction
+    attributes:
+      label: Accepted direction affected
+      description: The BLUEPRINT.md section, public contract or support promise this would change, and how.
+    validations:
+      required: true
+  - type: textarea
+    id: evidence
+    attributes:
+      label: Evidence
+      description: Commit, source references, executed checks and the selected dependency revisions that establish the problem. Separate verified facts from assumptions.
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives and trade-offs
+      description: Viable options including keeping the current direction, with their costs for ownership, security, data, compatibility and schedule.
+    validations:
+      required: true
+  - type: textarea
+    id: decision
+    attributes:
+      label: Decision requested
+      description: The specific decision needed and the work it unblocks. Independent authorized work continues meanwhile.
+    validations:
+      required: true
+  - type: textarea
+    id: acceptance
+    attributes:
+      label: Acceptance criterion
+      description: The independently evaluable outcome an accepted option must satisfy.
+    validations:
+      required: true
+  - type: textarea
+    id: proof
+    attributes:
+      label: Expected proof
+      description: The fixtures, measurements or integration evidence that will show the chosen option works.
+    validations:
+      required: true
