@@ -16,7 +16,7 @@ pull requests first, then open a
 
 - **Defect or change** for a concrete problem or ordinary work within accepted
   architecture.
-- **Maintenance** for one present duplication, structural or misleading-fallback
+- **Maintenance** for one present ownership, boundary, enforcement or structural
   problem outside active development.
 - **Decision** for a material change of product direction, public compatibility,
   trust boundaries, support scope or data policy. Opening it does not approve the

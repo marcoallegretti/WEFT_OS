@@ -66,7 +66,9 @@ profiles. It needs Python 3.10 or newer. It works from any directory, runs fixed
 argument arrays from the repository root without a shell, stops at the first
 failure and returns its status. It never formats files, installs packages or
 toolchain targets, regenerates expectations, signs packages, commits or
-publishes.
+publishes. It sets `RUSTUP_AUTO_INSTALL=0`, so a missing pinned toolchain or
+component fails the check instead of being downloaded; install it with
+`rustup show` or `rustup component add`.
 
 ```sh
 python .agents/scripts/verify.py --help

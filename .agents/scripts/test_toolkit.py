@@ -175,6 +175,7 @@ class Runner(unittest.TestCase):
         self.assertEqual(run.call_count, 2)
         for call in run.call_args_list:
             self.assertEqual(call.kwargs["cwd"], ROOT)
+            self.assertEqual(call.kwargs["env"]["RUSTUP_AUTO_INSTALL"], "0")
             self.assertIsInstance(call.args[0], list)
 
     def test_failure_stops_remaining_checks_and_keeps_status(self):
