@@ -1,0 +1,58 @@
+name: Maintenance
+description: Report one present duplication, structural or misleading-fallback problem that is independent of active development.
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Search existing issues and pull requests for the same underlying problem first. Maintenance
+        preserves accepted behavior, public contracts and ownership; use the Decision form if
+        resolving the problem changes them. One problem maps to one branch and one pull request.
+  - type: textarea
+    id: observed
+    attributes:
+      label: Observed
+      description: One concrete duplicated decision, unnecessary state, misleading fallback, coupling or obsolete path, and who or what it affects today.
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected
+      description: The intended structure and the behavior, contracts and ownership that must stay unchanged.
+    validations:
+      required: true
+  - type: textarea
+    id: evidence
+    attributes:
+      label: Evidence
+      description: Commit and file and line references that demonstrate the problem and its present cost.
+    validations:
+      required: true
+  - type: textarea
+    id: owner
+    attributes:
+      label: Owner and boundary
+      description: The owning component and why the problem can be resolved without a decision of direction.
+    validations:
+      required: true
+  - type: textarea
+    id: impact
+    attributes:
+      label: Why it matters now
+      description: The observable present cost. Generic cleanup wishes and speculative abstractions do not qualify.
+    validations:
+      required: true
+  - type: textarea
+    id: acceptance
+    attributes:
+      label: Acceptance criterion
+      description: One independently verifiable outcome.
+    validations:
+      required: true
+  - type: textarea
+    id: proof
+    attributes:
+      label: Expected proof
+      description: The checks or fixtures that show the problem is resolved and the accepted behavior is preserved.
+    validations:
+      required: true

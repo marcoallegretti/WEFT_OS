@@ -75,11 +75,12 @@ See `docs/building.md` for full instructions including Wasm component builds, Ni
 
 ## CI
 
-Three jobs on every push and pull request:
+Four jobs on every push and pull request:
 
 - `cross-platform` — fmt, clippy, tests on Ubuntu and Windows
 - `linux-only` — clippy and tests for compositor and shell crates
 - `servo-embed-linux` — `cargo check --features servo-embed` for both servo crates
+- `contributor-toolkit` — links, metadata and catalog of the contributor toolkit, and runner tests
 
 ## Security
 
@@ -98,3 +99,7 @@ See `docs/security.md`. Key points:
 - Base revision: `04ca254f`
 - Patches: keyboard input, backdrop-filter in stylo
 - See `crates/weft-servo-shell/SERVO_PIN.md` for Servo integration status and known limitations
+
+## Contributing
+
+See [CONTRIBUTING.md](CONTRIBUTING.md). [AGENTS.md](AGENTS.md) is the engineering contract and [BLUEPRINT.md](BLUEPRINT.md) the accepted direction toward `0.1.0`.
