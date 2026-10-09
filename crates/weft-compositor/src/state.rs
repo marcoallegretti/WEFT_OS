@@ -101,6 +101,9 @@ pub struct WeftCompositorState {
     /// Keycodes whose press a compositor shortcut took, so their release is
     /// taken as well and no client sees half of a key.
     pub suppressed_keys: Vec<u32>,
+    /// The Super key held down while no other key was pressed since; its
+    /// release is a tap that opens the shell.
+    pub super_tap: Option<u32>,
 
     pub compositor_state: CompositorState,
     pub xdg_shell_state: XdgShellState,
@@ -200,6 +203,7 @@ impl WeftCompositorState {
             running: true,
             gesture_state: GestureState::default(),
             suppressed_keys: Vec::new(),
+            super_tap: None,
             #[cfg(unix)]
             appd_ipc: None,
             #[cfg(target_os = "linux")]
