@@ -62,7 +62,7 @@ cargo build --release
 cargo build -p weft-runtime --features wasmtime-runtime,net-fetch
 ```
 
-Without `--features wasmtime-runtime`, the runtime prints READY and exits (stub mode, used in CI on platforms without Linux system dependencies).
+Without `--features wasmtime-runtime`, the runtime compiles for type, lint and unit checks (the portable CI configuration) but exits with an error when asked to run a component; it never reports readiness.
 
 ## Signing packages
 

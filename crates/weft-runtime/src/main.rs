@@ -87,8 +87,9 @@ fn run_module(
     _preopen: &[(String, String)],
     _ipc_socket: Option<&str>,
 ) -> anyhow::Result<()> {
-    println!("READY");
-    Ok(())
+    anyhow::bail!(
+        "weft-runtime was built without the wasmtime-runtime feature and cannot execute components"
+    )
 }
 
 #[cfg(feature = "wasmtime-runtime")]
@@ -505,6 +506,14 @@ fn package_store_roots() -> Vec<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(not(feature = "wasmtime-runtime"))]
+    #[test]
+    fn engine_disabled_build_refuses_to_run_components() {
+        let err = run_module(std::path::Path::new("app.wasm"), &[], None)
+            .expect_err("a build without wasmtime-runtime must not report success");
+        assert!(err.to_string().contains("wasmtime-runtime"));
+    }
 
     #[test]
     fn package_store_roots_includes_system_path() {
