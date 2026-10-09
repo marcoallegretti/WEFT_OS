@@ -308,8 +308,9 @@ fn install_into(
 
 /// Creates the store and any missing parents at 0755 whatever the umask, so
 /// a store created by a root install is readable by every user. Each new
-/// directory is created private and its mode set through a descriptor that
-/// does not follow links, so only the directory just created is changed.
+/// directory is created private and its mode set through a descriptor opened
+/// without following a link in its last component; a directory whose mode
+/// cannot be set is removed again rather than left private.
 fn create_store(store_root: &Path) -> anyhow::Result<()> {
     let mut missing: Vec<&Path> = store_root
         .ancestors()
@@ -328,15 +329,18 @@ fn create_store(store_root: &Path) -> anyhow::Result<()> {
         #[cfg(unix)]
         {
             use rustix::fs::{CWD, Mode, OFlags};
-            let created = rustix::fs::openat(
+            let opened = rustix::fs::openat(
                 CWD,
                 dir,
                 OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
                 Mode::empty(),
-            )
-            .with_context(|| format!("open {}", dir.display()))?;
-            rustix::fs::fchmod(&created, Mode::from_raw_mode(0o755))
-                .with_context(|| format!("set the mode of {}", dir.display()))?;
+            );
+            if let Err(e) =
+                opened.and_then(|created| rustix::fs::fchmod(&created, Mode::from_raw_mode(0o755)))
+            {
+                let _ = std::fs::remove_dir(dir);
+                return Err(e).with_context(|| format!("set the mode of {}", dir.display()));
+            }
         }
     }
     anyhow::ensure!(
@@ -1371,12 +1375,23 @@ mod tests {
         for dir in [home.join("a"), home.join("a/b"), absolute.clone()] {
             assert_eq!(mode(&dir), 0o755, "{}", dir.display());
         }
-        // A relative store none of whose components exist yet.
-        let relative = PathBuf::from(format!("weft-pack-store-{}/sub", std::process::id()));
-        let _ = std::fs::remove_dir_all(relative.parent().unwrap());
+        // A relative store none of whose components exist yet, removed even
+        // if an assertion fails.
+        struct Removed(PathBuf);
+        impl Drop for Removed {
+            fn drop(&mut self) {
+                let _ = std::fs::remove_dir_all(&self.0);
+            }
+        }
+        let top = Removed(PathBuf::from(format!(
+            "weft-pack-store-{}",
+            std::process::id()
+        )));
+        let _ = std::fs::remove_dir_all(&top.0);
+        let relative = top.0.join("sub");
         create_store(&relative).unwrap();
         assert_eq!(mode(&relative), 0o755);
-        std::fs::remove_dir_all(relative.parent().unwrap()).unwrap();
+        drop(top);
         // An existing store is left as it is.
         std::fs::set_permissions(&absolute, std::fs::Permissions::from_mode(0o750)).unwrap();
         create_store(&absolute).unwrap();
