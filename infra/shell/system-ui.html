@@ -382,6 +382,7 @@
       // Longer than weft-appd's close timeout, so an app that neither closes
       // nor declines has already been terminated.
       var FORCE_QUIT_DELAY = 6000;
+      var FORCE_QUIT_OFFER = 20000;
 
       function ensureTaskbarEntry(sessionId, appId) {
         var id = 'task-' + sessionId;
@@ -401,6 +402,7 @@
         // The first click asks the app to close; it may decline, for example
         // to offer saving. An app still running once it has had time to
         // answer can then be force quit, losing what it has not saved.
+        var closeTimer = null;
         close.addEventListener('click', function (e) {
           e.stopPropagation();
           if (!ws || ws.readyState !== WebSocket.OPEN) { return; }
@@ -408,19 +410,32 @@
           ws.send(JSON.stringify({ type: 'TERMINATE_APP', session_id: sessionId, force: force }));
           if (force || close.dataset.asked) { return; }
           close.dataset.asked = '1';
-          setTimeout(function () {
+          closeTimer = setTimeout(function () {
             if (!document.getElementById(el.id) || el.dataset.closing) { return; }
             close.dataset.force = '1';
             close.textContent = 'Force quit';
             close.title = 'Force quit: changes the app has not saved are lost';
             close.style.color = '#ff6b6b';
+            // Offered only for a while: an app that declined to let the user
+            // keep working is closed normally next time.
+            closeTimer = setTimeout(resetClose, FORCE_QUIT_OFFER);
           }, FORCE_QUIT_DELAY);
         });
+        function resetClose() {
+          clearTimeout(closeTimer);
+          closeTimer = null;
+          delete close.dataset.asked;
+          delete close.dataset.force;
+          close.textContent = '×';
+          close.title = 'Close';
+          close.style.color = '';
+        }
         el.appendChild(span);
         el.appendChild(close);
         // Choosing the entry brings the app's window to the front.
         el.addEventListener('click', function () {
           if (el.dataset.closing) { return; }
+          resetClose();
           if (ws && ws.readyState === WebSocket.OPEN) {
             ws.send(JSON.stringify({ type: 'ACTIVATE_APP', session_id: sessionId }));
           }

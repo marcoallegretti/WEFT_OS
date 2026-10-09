@@ -117,8 +117,17 @@ impl SessionRegistry {
     fn terminate(&mut self, session_id: u64, force: bool) -> Option<AppStateKind> {
         let state = self.state(session_id);
         match self.abort_senders.get(&session_id) {
+            // Already ending; a forced request still ends it without waiting.
+            Some(sender) if matches!(state, AppStateKind::Stopping) => {
+                if force {
+                    let _ = sender.try_send(runtime::Stop::Force);
+                }
+                Some(AppStateKind::Stopping)
+            }
             Some(sender) => {
-                let _ = sender.send(if force {
+                // A full queue already holds a request; a forced one that
+                // does not fit is preceded by one the supervisor acts on.
+                let _ = sender.try_send(if force {
                     runtime::Stop::Force
                 } else {
                     runtime::Stop::Close
@@ -138,7 +147,7 @@ impl SessionRegistry {
     }
 
     pub(crate) fn register_abort(&mut self, session_id: u64) -> runtime::StopReceiver {
-        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        let (tx, rx) = tokio::sync::mpsc::channel(runtime::STOP_QUEUE);
         self.abort_senders.insert(session_id, tx);
         rx
     }
@@ -579,8 +588,11 @@ pub(crate) async fn dispatch(req: Request, registry: &Registry) -> Response {
         Request::TerminateApp { session_id, force } => {
             let state = {
                 let mut reg = registry.lock().await;
+                let before = reg.state(session_id);
                 let state = reg.terminate(session_id, force);
-                if matches!(state, Some(AppStateKind::Stopping)) {
+                if matches!(state, Some(AppStateKind::Stopping))
+                    && !matches!(before, AppStateKind::Stopping)
+                {
                     let _ = reg.broadcast().send(Response::AppState {
                         session_id,
                         state: AppStateKind::Stopping,
@@ -1746,6 +1758,117 @@ mod tests {
             elapsed < runtime::CLOSE_TIMEOUT + std::time::Duration::from_secs(5),
             "{elapsed:?}"
         );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_forced_stop_ends_a_close_in_progress() {
+        use std::os::unix::fs::PermissionsExt;
+        let _env = env_lock().lock().await;
+        use_test_runtime_dir();
+        let dir = std::env::temp_dir().join(format!("weft_test_force_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let app = dir.join("store/org.example.force");
+        write_test_package(&app, "org.example.force", "");
+        // Both children report ready and then ignore everything.
+        let child = dir.join("child.sh");
+        std::fs::write(
+            &child,
+            "#!/bin/sh\necho READY $WEFT_READY_TOKEN\nexec sleep 30\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&child, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let vars = [
+            ("WEFT_RUNTIME_BIN", child.clone().into_os_string()),
+            ("WEFT_APP_SHELL_BIN", child.clone().into_os_string()),
+            ("WEFT_DISABLE_CGROUP", "1".into()),
+            ("WEFT_APP_STORE", dir.join("store").into_os_string()),
+        ];
+        let prior: Vec<_> = vars
+            .iter()
+            .map(|(k, _)| (*k, std::env::var_os(k)))
+            .collect();
+        for (key, value) in &vars {
+            // SAFETY: env_lock is held on a current_thread runtime.
+            unsafe { std::env::set_var(key, value) };
+        }
+
+        let registry = make_registry();
+        let (tx, compositor) = tokio::sync::mpsc::channel(8);
+        registry.lock().await.compositor_tx = Some(compositor_client::CompositorSender::new(
+            tx,
+            std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true)),
+        ));
+        let mut rx = registry.lock().await.subscribe();
+        let ack = dispatch(
+            Request::LaunchApp {
+                app_id: "org.example.force".into(),
+                surface_id: 0,
+            },
+            &registry,
+        )
+        .await;
+        let Response::LaunchAck { session_id, .. } = ack else {
+            panic!("{ack:?}");
+        };
+        let ready = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            while !matches!(rx.recv().await, Ok(Response::AppReady { .. })) {}
+        })
+        .await;
+        dispatch(
+            Request::TerminateApp {
+                session_id,
+                force: false,
+            },
+            &registry,
+        )
+        .await;
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+        let forced_at = std::time::Instant::now();
+        let reply = dispatch(
+            Request::TerminateApp {
+                session_id,
+                force: true,
+            },
+            &registry,
+        )
+        .await;
+        let stopped = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            while !matches!(
+                rx.recv().await,
+                Ok(Response::AppState {
+                    state: AppStateKind::Stopped,
+                    ..
+                })
+            ) {}
+        })
+        .await;
+        let elapsed = forced_at.elapsed();
+        drop(compositor);
+
+        for (key, value) in prior {
+            // SAFETY: as above.
+            unsafe {
+                match value {
+                    Some(v) => std::env::set_var(key, v),
+                    None => std::env::remove_var(key),
+                }
+            }
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(ready.is_ok(), "the session did not become ready");
+        assert!(
+            matches!(
+                reply,
+                Response::AppState {
+                    state: AppStateKind::Stopping,
+                    ..
+                }
+            ),
+            "{reply:?}"
+        );
+        assert!(stopped.is_ok(), "the forced stop did not stop the session");
+        // The forced stop does not wait out the close timeout.
+        assert!(elapsed < std::time::Duration::from_secs(3), "{elapsed:?}");
     }
 
     #[test]

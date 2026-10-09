@@ -272,9 +272,11 @@ pub(crate) enum Stop {
     Force,
 }
 
-pub(crate) type StopSender = tokio::sync::mpsc::UnboundedSender<Stop>;
+/// Repeated requests carry nothing new, so a few queued ones are enough.
+pub(crate) const STOP_QUEUE: usize = 2;
+pub(crate) type StopSender = tokio::sync::mpsc::Sender<Stop>;
 /// Ends when appd shuts down and drops the sender.
-pub(crate) type StopReceiver = tokio::sync::mpsc::UnboundedReceiver<Stop>;
+pub(crate) type StopReceiver = tokio::sync::mpsc::Receiver<Stop>;
 
 pub(crate) async fn supervise(
     session_id: u64,
@@ -456,6 +458,12 @@ pub(crate) async fn supervise(
 
     {
         let mut reg = registry.lock().await;
+        // A stop requested while starting can still be queued here, or lose
+        // the race with READY; the session is then stopped, not shown.
+        if matches!(reg.state(session_id), AppStateKind::Stopping) || abort_rx.try_recv().is_ok() {
+            drop(reg);
+            return session.settle(&registry, "startup aborted").await;
+        }
         reg.set_state(session_id, AppStateKind::Running);
         let _ = reg.broadcast().send(Response::AppReady {
             session_id,
