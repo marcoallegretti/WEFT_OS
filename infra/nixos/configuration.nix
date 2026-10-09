@@ -75,15 +75,28 @@
     })
   ];
 
+  # graphical-session.target refuses a manual start; the login shell starts
+  # this target, which binds it, as Wayland compositors' session targets do.
+  systemd.user.targets.weft-session = {
+    description = "WEFT OS session";
+    bindsTo = [ "graphical-session.target" ];
+    wants = [ "graphical-session-pre.target" ];
+    after = [ "graphical-session-pre.target" ];
+  };
+
   systemd.user.services = {
     weft-compositor = {
       description = "WEFT OS Wayland Compositor";
-      after = [ "graphical-session.target" ];
+      before = [ "graphical-session.target" ];
       partOf = [ "graphical-session.target" ];
-      wantedBy = [ "graphical-session.target" ];
+      wantedBy = [ "weft-session.target" ];
       serviceConfig = {
         Type = "notify";
         ExecStart = "${pkgs.weft.weft-compositor}/bin/weft-compositor";
+        # The compositor publishes WAYLAND_DISPLAY to the user manager for the
+        # units after it; a restarted compositor must not inherit it, or an
+        # X11 DISPLAY, or it would pick the nested backend.
+        UnsetEnvironment = "WAYLAND_DISPLAY DISPLAY";
         Restart = "on-failure";
         RestartSec = "1";
       };
@@ -93,9 +106,9 @@
       description = "WEFT OS System Shell";
       requires = [ "weft-compositor.service" ];
       after = [ "weft-compositor.service" ];
-      wantedBy = [ "graphical-session.target" ];
+      partOf = [ "graphical-session.target" ];
+      wantedBy = [ "weft-session.target" ];
       environment = {
-        WAYLAND_DISPLAY = "wayland-1";
         WEFT_SYSTEM_UI_HTML = "${pkgs.weft.weft-servo-shell}/share/weft/shell/system-ui.html";
       };
       serviceConfig = {
@@ -110,7 +123,8 @@
       description = "WEFT Application Daemon";
       requires = [ "weft-compositor.service" ];
       after = [ "weft-compositor.service" "weft-servo-shell.service" ];
-      wantedBy = [ "graphical-session.target" ];
+      partOf = [ "graphical-session.target" ];
+      wantedBy = [ "weft-session.target" ];
       serviceConfig = {
         Type = "notify";
         ExecStart = "${pkgs.weft.weft-appd}/bin/weft-appd";
@@ -128,7 +142,7 @@
 
   programs.bash.loginShellInit = ''
     if [ -z "$DISPLAY" ] && [ -z "$WAYLAND_DISPLAY" ] && [ "$(tty)" = "/dev/tty1" ]; then
-      systemctl --user start graphical-session.target
+      systemctl --user start weft-session.target
     fi
   '';
 

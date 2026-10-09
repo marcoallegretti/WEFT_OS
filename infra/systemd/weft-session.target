@@ -1,0 +1,10 @@
+[Unit]
+Description=WEFT OS session
+Documentation=https://github.com/weft-os/weft
+# These are user units: install them in the user manager
+# (systemctl --user enable weft-compositor servo-shell weft-appd) and start
+# the session with systemctl --user start weft-session.target, as the NixOS
+# image's login shell does. graphical-session.target refuses a manual start.
+BindsTo=graphical-session.target
+Wants=graphical-session-pre.target
+After=graphical-session-pre.target

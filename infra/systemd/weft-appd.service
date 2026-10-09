@@ -3,6 +3,7 @@ Description=WEFT Application Daemon
 Documentation=https://github.com/weft-os/weft
 Requires=weft-compositor.service
 After=weft-compositor.service servo-shell.service
+PartOf=graphical-session.target
 
 [Service]
 Type=notify
@@ -10,15 +11,12 @@ Environment=WEFT_RUNTIME_BIN=/packages/system/weft-runtime/active/bin/weft-runti
 Environment=WEFT_APP_SHELL_BIN=/packages/system/weft-app-shell/active/bin/weft-app-shell
 Environment=WEFT_FILE_PORTAL_BIN=/packages/system/weft-file-portal/active/bin/weft-file-portal
 Environment=WEFT_MOUNT_HELPER=/packages/system/weft-mount-helper/active/bin/weft-mount-helper
-PassEnvironment=WAYLAND_DISPLAY XDG_RUNTIME_DIR DISPLAY
 ExecStart=/packages/system/weft-appd/active/bin/weft-appd
 Restart=on-failure
 RestartSec=1s
-ProtectSystem=strict
-PrivateTmp=true
-# App data and the user package store, where earlier versions kept app data.
-# %h is the home of the user the unit runs as; run it as the session user.
-ReadWritePaths=%t -%h/.local/share/weft
+# No ProtectSystem= or PrivateTmp=: in the user manager they imply
+# PrivateUsers=yes, under which the setuid weft-mount-helper cannot mount
+# verified images. Each session's runtime runs in its own systemd scope.
 
 [Install]
-WantedBy=graphical.target
+WantedBy=weft-session.target

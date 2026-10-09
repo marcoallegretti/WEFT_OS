@@ -141,11 +141,12 @@ bash infra/vm/run.sh
 
 See `infra/nixos/weft-packages.nix` for the package derivations. Its `outputHashes` hold one hash per git source in `Cargo.lock` (the Servo and Stylo forks); every package vendors them, so they must match the pinned revisions for any Nix package to build.
 
-The VM's user session starts `weft-compositor`, `weft-servo-shell` with the system UI page its package installs, and `weft-appd` with the runtime, app shell, file portal and mount helper packages. The image is not yet bootable to a working desktop:
+Logging in on tty1 starts the user target `weft-session.target`, which binds `graphical-session.target` (that one refuses a manual start) and wants `weft-compositor`, then `weft-servo-shell` with the system UI page its package installs, and `weft-appd` with the runtime, app shell, file portal and mount helper packages. Run as a systemd user service, the compositor publishes its socket as `WAYLAND_DISPLAY` to the user manager before reporting readiness, so the units after it, and the app shells weft-appd starts, connect to it. The units in `infra/systemd/` are the same session for an installation outside Nix, as user units under `weft-session.target`. The image is not yet bootable to a working desktop:
 
 - the Servo source hash in `outputHashes` is still a placeholder, so no package builds until a Nix build reports it;
 - the shell packages do not enable `servo-embed`, so `weft-servo-shell` and `weft-app-shell` exit at startup;
-- the shell's service names the compositor's socket `wayland-1`, the first name the compositor tries, rather than learning it.
+- the VM runs without graphics (`virtualisation.graphics = false` in `infra/nixos/configuration.nix`, for a serial console), so the session's output is not shown;
+- `WEFT_MOUNT_HELPER` names the mount helper's store path, which cannot be setuid, so verified images cannot be mounted; a setuid wrapper would be needed.
 
 ## CI
 
