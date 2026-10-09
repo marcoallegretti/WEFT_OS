@@ -30,7 +30,18 @@ impl Limits {
 }
 
 /// Accounts a growth from `current` to `desired` against `used` of `max`.
-fn grow(used: &mut usize, max: usize, current: usize, desired: usize) -> bool {
+/// A growth past the memory's or table's own `maximum` fails anyway, so it
+/// is refused without being counted.
+fn grow(
+    used: &mut usize,
+    max: usize,
+    current: usize,
+    desired: usize,
+    maximum: Option<usize>,
+) -> bool {
+    if maximum.is_some_and(|m| desired > m) {
+        return false;
+    }
     let added = desired.saturating_sub(current);
     match used.checked_add(added) {
         Some(total) if total <= max => {
@@ -46,22 +57,29 @@ impl wasmtime::ResourceLimiter for Limits {
         &mut self,
         current: usize,
         desired: usize,
-        _maximum: Option<usize>,
+        maximum: Option<usize>,
     ) -> anyhow::Result<bool> {
-        Ok(grow(&mut self.memory, self.max_memory, current, desired))
+        Ok(grow(
+            &mut self.memory,
+            self.max_memory,
+            current,
+            desired,
+            maximum,
+        ))
     }
 
     fn table_growing(
         &mut self,
         current: usize,
         desired: usize,
-        _maximum: Option<usize>,
+        maximum: Option<usize>,
     ) -> anyhow::Result<bool> {
         Ok(grow(
             &mut self.table_elements,
             MAX_TABLE_ELEMENTS,
             current,
             desired,
+            maximum,
         ))
     }
 
@@ -101,5 +119,9 @@ mod tests {
         assert!(!limits.memory_growing(0, 101, None).unwrap());
         assert!(limits.memory_growing(0, 100, None).unwrap());
         assert!(!limits.memory_growing(0, usize::MAX, None).unwrap());
+        // Past a memory's own maximum: refused and not counted.
+        let mut limits = Limits::new(100);
+        assert!(!limits.memory_growing(0, 50, Some(40)).unwrap());
+        assert!(limits.memory_growing(0, 100, None).unwrap());
     }
 }

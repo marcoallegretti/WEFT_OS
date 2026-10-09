@@ -11,8 +11,8 @@ use std::os::unix::net::UnixStream;
 
 /// The longest message in either direction, in bytes.
 pub const MAX_MESSAGE: usize = 64 * 1024;
-/// How long sending one message may block before the connection is given
-/// up.
+/// How long one write of a message may block before the connection is
+/// given up.
 const SEND_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 
 /// Checks a message the component wants to send.
@@ -108,9 +108,12 @@ impl IpcState {
         self.take_line()
     }
 
+    /// Ends the connection for both sides: weft-appd sees it close and
+    /// ends the session, as it does when the component closes it.
     fn close(&mut self, reason: &'static str) {
         tracing::warn!(reason, "IPC connection ended");
         self.closed = Some(reason);
+        let _ = self.socket.shutdown(std::net::Shutdown::Both);
     }
 
     fn overlong(&mut self) {
@@ -179,6 +182,9 @@ mod tests {
         }
         assert!(ipc.recv_buf.len() <= MAX_MESSAGE + 4096);
         assert!(ipc.send("after").is_err());
+        // The peer sees the connection end.
+        let mut rest = Vec::new();
+        assert_eq!(peer.read_to_end(&mut rest).unwrap(), 0);
     }
 
     #[test]
