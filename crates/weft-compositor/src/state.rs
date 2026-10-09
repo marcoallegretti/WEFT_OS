@@ -577,7 +577,11 @@ impl Dispatch<ZweftShellManagerV1, ()> for WeftCompositorState {
                     state.weft_shell_state.add_panel(window);
                     state.fit_panels();
                 } else {
-                    window.configure(x, y, width, height, 0);
+                    // The compositor decides application geometry: the work
+                    // area, whatever was requested.
+                    let _ = (x, y, width, height);
+                    let (x, y, w, h) = state.app_geometry();
+                    window.configure(x, y, w, h, 0);
                 }
             }
         }
@@ -606,13 +610,24 @@ impl Dispatch<ZweftShellWindowV1, WeftShellWindowData> for WeftCompositorState {
             zweft_shell_window_v1::Request::UpdateMetadata { title, role } => {
                 let _ = (title, role);
             }
-            zweft_shell_window_v1::Request::SetGeometry {
-                x,
-                y,
-                width,
-                height,
-            } => {
-                resource.configure(x, y, width, height, 0);
+            zweft_shell_window_v1::Request::SetGeometry { .. } => {
+                // The request is advisory: the configure reports the
+                // geometry the compositor's layout gives the window.
+                let is_panel = state
+                    .weft_shell_state
+                    .panels()
+                    .any(|panel| panel == resource);
+                let (x, y, w, h) = if is_panel {
+                    state.output_geometry()
+                } else {
+                    state.app_geometry()
+                };
+                let flags = if is_panel {
+                    u32::from(crate::protocols::server::zweft_shell_window_v1::State::Maximized)
+                } else {
+                    0
+                };
+                resource.configure(x, y, w, h, flags);
             }
             zweft_shell_window_v1::Request::SetExclusiveZone { edge, size } => {
                 let is_panel = state
@@ -635,6 +650,19 @@ impl Dispatch<ZweftShellWindowV1, WeftShellWindowData> for WeftCompositorState {
                     ),
                 }
             }
+        }
+    }
+
+    fn destroyed(
+        state: &mut Self,
+        _client: wayland_server::backend::ClientId,
+        resource: &ZweftShellWindowV1,
+        _data: &WeftShellWindowData,
+    ) {
+        // A panel that goes away, by destroy or with its client, releases
+        // its reserved strip; applications take the space back.
+        if state.weft_shell_state.remove_panel(resource) {
+            state.layout_app_windows();
         }
     }
 }

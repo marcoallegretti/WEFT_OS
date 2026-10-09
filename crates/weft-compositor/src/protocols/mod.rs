@@ -54,6 +54,13 @@ impl WeftShellState {
         self.panels.push(window);
     }
 
+    /// Forgets a panel; returns whether it was one.
+    pub fn remove_panel(&mut self, window: &ZweftShellWindowV1) -> bool {
+        let before = self.panels.len();
+        self.panels.retain(|panel| panel != window);
+        self.panels.len() != before
+    }
+
     pub fn reconfigure_panels(&self, x: i32, y: i32, width: i32, height: i32) {
         for panel in &self.panels {
             if panel.is_alive() {

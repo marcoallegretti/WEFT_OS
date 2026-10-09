@@ -12,6 +12,8 @@ colour and a lighter shade on every key press. In the presented pixels:
 - each newly launched application is shown on top and receives keys;
 - ACTIVATE_APP, the request the taskbar sends, brings the other session's
   window back to the front with keyboard focus;
+- clicking the taskbar strip brings the panel, the shell's home, over the
+  applications, and activating an application brings it back;
 - when the focused application ends, the remaining one gets keyboard focus;
 - ACTIVATE_APP for a session that is not running is refused.
 
@@ -179,6 +181,25 @@ def run(args, desktop, store, home):
     shown(red)
     key("a")
     shown(red, pressed=True)
+    activate(blue)
+    shown(blue, pressed=True)
+
+    # A click on the taskbar strip shows the shell's home over the
+    # applications; activating one brings it back.
+    x, y = (panel[0] + panel[2]) // 2, panel[3] - TASKBAR // 2
+    subprocess.run([args.xdotool, "mousemove", "--sync", str(x), str(y)],
+                   env={"DISPLAY": desktop.display}, check=True, timeout=20)
+    subprocess.run([args.xdotool, "click", "1"], env={"DISPLAY": desktop.display},
+                   check=True, timeout=20)
+    deadline = time.monotonic() + 20
+    while True:
+        shot = desktop.capture()
+        if area(shot, GREEN)[0] == panel and all(
+                area(shot, c)[0] is None for cs in APPS.values() for c in cs):
+            break
+        if time.monotonic() > deadline:
+            raise AssertionError("clicking the taskbar did not show the shell over the apps")
+        time.sleep(0.3)
     activate(blue)
     shown(blue, pressed=True)
 

@@ -60,7 +60,8 @@ ROOT_COLOUR = (0, 0, 0)
 
 def page_rows(width, height, pixels):
     """The first and last rows the app window's page covers at PAGE_X: the
-    compositor gives the application its whole work area."""
+    compositor gives the application its whole work area. No shell runs in
+    this check, so every row of the output that is not the X root is page."""
     rows = [y for y in range(height) if pixel(width, pixels, PAGE_X, y) != ROOT_COLOUR]
     return (rows[0], rows[-1]) if rows else None
 

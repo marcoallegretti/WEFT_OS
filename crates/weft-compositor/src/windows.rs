@@ -1,10 +1,13 @@
 //! Stacking, focus and activation of toplevel windows.
 //!
-//! The compositor decides the order: the trusted shell's panel, which
-//! fills the output, stays beneath every application window; a session's
-//! first window, a clicked window and one appd asks to activate is raised to
-//! the top, marked activated and given keyboard focus. When the focused
-//! window closes, the topmost remaining application window gets focus.
+//! The compositor decides the order and the geometry. The trusted shell's
+//! panel fills the output and starts beneath every application window;
+//! application windows fill the work area, the output less the strips the
+//! panel reserves. A session's first window, a clicked window (the panel
+//! included, which then shows the shell's home over the applications) and
+//! one appd asks to activate is raised to the top, marked activated and
+//! given keyboard focus. When the focused window closes, the topmost
+//! remaining application window gets focus.
 
 use smithay::desktop::Window;
 use smithay::reexports::wayland_protocols::xdg::shell::server::xdg_toplevel;
@@ -20,12 +23,15 @@ impl WeftCompositorState {
     /// Whether `surface` backs a window the trusted shell registered as its
     /// panel.
     pub fn is_panel_surface(&self, surface: &WlSurface) -> bool {
-        self.weft_shell_state.panels().any(|panel| {
-            panel
-                .data::<WeftShellWindowData>()
-                .and_then(|data| data.surface.as_ref())
-                .is_some_and(|s| s == surface)
-        })
+        self.weft_shell_state
+            .panels()
+            .filter(|p| p.is_alive())
+            .any(|panel| {
+                panel
+                    .data::<WeftShellWindowData>()
+                    .and_then(|data| data.surface.as_ref())
+                    .is_some_and(|s| s == surface)
+            })
     }
 
     fn is_panel(&self, window: &Window) -> bool {
@@ -34,19 +40,11 @@ impl WeftCompositorState {
             .is_some_and(|surface| self.is_panel_surface(&surface))
     }
 
-    /// Raises `window` above the other application windows, marks it
-    /// activated and gives it keyboard focus. A panel is focused but stays
-    /// beneath the applications.
+    /// Raises `window` to the top, marks it activated and gives it keyboard
+    /// focus. Activating the panel shows the shell's home, with its launcher,
+    /// over the applications until one is activated again.
     pub fn activate_window(&mut self, window: &Window) {
-        if self.is_panel(window) {
-            // The panel takes focus without rising; no application window
-            // stays marked activated.
-            for other in self.space.elements() {
-                other.set_activated(false);
-            }
-        } else {
-            self.space.raise_element(window, true);
-        }
+        self.space.raise_element(window, true);
         self.send_pending_configures();
         if let (Some(keyboard), Some(surface)) = (self.seat.get_keyboard(), window.wl_surface()) {
             keyboard.set_focus(
@@ -197,7 +195,7 @@ impl WeftCompositorState {
         use crate::protocols::server::zweft_shell_window_v1::Edge;
         let output = self.space.outputs().next()?;
         let mut area = self.space.output_geometry(output)?;
-        for panel in self.weft_shell_state.panels() {
+        for panel in self.weft_shell_state.panels().filter(|p| p.is_alive()) {
             let Some(data) = panel.data::<WeftShellWindowData>() else {
                 continue;
             };
@@ -223,7 +221,27 @@ impl WeftCompositorState {
                 Edge::Right => area.size.w -= size.min(area.size.w),
             }
         }
+        // A zone covering the output still leaves applications a size the
+        // client must honour, never 0, which would let it pick its own.
+        area.size.w = area.size.w.max(1);
+        area.size.h = area.size.h.max(1);
         Some(area)
+    }
+
+    /// The output's geometry as (x, y, width, height).
+    pub fn output_geometry(&self) -> (i32, i32, i32, i32) {
+        self.space
+            .outputs()
+            .next()
+            .and_then(|output| self.space.output_geometry(output))
+            .map_or((0, 0, 0, 0), |g| (g.loc.x, g.loc.y, g.size.w, g.size.h))
+    }
+
+    /// The geometry the layout gives application windows, as
+    /// (x, y, width, height).
+    pub fn app_geometry(&self) -> (i32, i32, i32, i32) {
+        self.work_area()
+            .map_or((0, 0, 0, 0), |a| (a.loc.x, a.loc.y, a.size.w, a.size.h))
     }
 
     /// Places every application window to fill the work area, so none
