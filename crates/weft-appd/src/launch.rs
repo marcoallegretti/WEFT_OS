@@ -71,12 +71,25 @@ fn resolve_in(app_id: &str, stores: &[PathBuf]) -> Result<LaunchPackage, Refusal
         let root = image.root().to_path_buf();
         return from_root(app_id, root, Some(image));
     }
+    // A store whose entry for the app cannot be used does not hide the app
+    // in a later store, as it does not in the list of installed apps; the
+    // first such problem is reported when no store has the app.
+    let mut unusable = None;
     for store in stores {
-        let active = weft_ipc_types::store::active(store, app_id).map_err(|e| match e {
-            weft_ipc_types::store::StoreError::NotAPackage(_) => Refusal::new(403, e.to_string()),
-            weft_ipc_types::store::StoreError::Io(..) => Refusal::new(500, e.to_string()),
-        })?;
-        let Some(active) = active else { continue };
+        let active = match weft_ipc_types::store::active(store, app_id) {
+            Ok(Some(active)) => active,
+            Ok(None) => continue,
+            Err(e) => {
+                tracing::warn!(app_id, error = %e, "package entry skipped");
+                unusable.get_or_insert(match e {
+                    weft_ipc_types::store::StoreError::NotAPackage(_) => {
+                        Refusal::new(403, e.to_string())
+                    }
+                    weft_ipc_types::store::StoreError::Io(..) => Refusal::new(500, e.to_string()),
+                });
+                continue;
+            }
+        };
         let dir = active.dir().to_path_buf();
         // A directory left with only app data by an earlier layout is not a
         // package.
@@ -96,10 +109,7 @@ fn resolve_in(app_id: &str, stores: &[PathBuf]) -> Result<LaunchPackage, Refusal
         package.pin = Some(pin);
         return Ok(package);
     }
-    Err(Refusal::new(
-        404,
-        format!("package {app_id} is not installed"),
-    ))
+    Err(unusable.unwrap_or_else(|| Refusal::new(404, format!("package {app_id} is not installed"))))
 }
 
 fn from_root(app_id: &str, root: PathBuf, image: Option<Mount>) -> Result<LaunchPackage, Refusal> {

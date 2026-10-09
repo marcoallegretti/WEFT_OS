@@ -397,9 +397,9 @@ fn install_dir(
         .and_then(|()| {
             // Held while the copy is in use, so the collection of another
             // operation never takes it for abandoned.
-            let _in_use = weft_ipc_types::store::try_claim(&staging)
+            let in_use = weft_ipc_types::store::try_claim(&staging)
                 .with_context(|| format!("open {}", staging.display()))?;
-            install_staged(&staging, store_root, mode, claim_data)
+            install_staged(&staging, store_root, mode, claim_data, in_use)
         });
     if result.is_err() {
         let _ = std::fs::remove_dir_all(&staging);
@@ -407,11 +407,15 @@ fn install_dir(
     result
 }
 
+/// Installs the staged copy. `in_use` holds the copy against collection by
+/// other operations until it is placed; it is released then, since the copy
+/// has become the revision sessions launch from.
 fn install_staged(
     staging: &Path,
     store_root: &Path,
     mode: InstallMode,
     claim_data: bool,
+    in_use: Option<std::fs::File>,
 ) -> anyhow::Result<()> {
     check_package(staging)?;
     let manifest = load_manifest(staging)?;
@@ -445,6 +449,7 @@ fn install_staged(
     let admission = admit(staging, app_id, mode, &data_home, claim_data)?;
     let owner = admission.owner;
     let revision = place(staging, store_root, app_id, admission)?;
+    drop(in_use);
     drop(legacy);
     collect(store_root, app_id);
     println!(
@@ -512,17 +517,28 @@ fn place(
                 let _ = std::fs::remove_dir_all(staging);
                 return Ok(revision);
             }
+            // The revision may be the active one, as when the same content is
+            // installed again with another signature file, so it is replaced
+            // in one exchange: the name always holds a complete revision.
             let claim = weft_ipc_types::store::try_claim(&dir)
                 .with_context(|| format!("open {}", dir.display()))?
                 .with_context(|| {
-                    format!("{} is in use and differs; try again later", dir.display())
+                    format!(
+                        "{} differs from this package but a running session uses it; close \
+                         the app and install again",
+                        dir.display()
+                    )
                 })?;
-            remove_claimed(store_root, &dir);
+            exchange(staging, &dir)
+                .with_context(|| format!("replace {} with {}", dir.display(), staging.display()))?;
+            // The earlier copy now has the staging name.
+            remove_claimed(store_root, staging);
             drop(claim);
+        } else {
+            weft_ipc_types::package::rename_no_replace(staging, &dir)
+                .with_context(|| format!("move {} -> {}", staging.display(), dir.display()))?;
+            created_revision = Some(dir.clone());
         }
-        weft_ipc_types::package::rename_no_replace(staging, &dir)
-            .with_context(|| format!("move {} -> {}", staging.display(), dir.display()))?;
-        created_revision = Some(dir.clone());
         sync_dir(&revisions)?;
         sync_dir(&store_root.join(weft_ipc_types::store::REVISIONS_DIR))?;
         Ok(revision)
@@ -554,29 +570,44 @@ fn activate(store_root: &Path, app_id: &str, revision: &str) -> anyhow::Result<(
     use weft_ipc_types::store::{link_target, revisions_of};
     let revisions = revisions_of(store_root, app_id);
     let current = active(store_root, app_id)?;
-    match &current {
+    let dest = store_root.join(app_id);
+    let link = temporary_link(store_root, app_id, &link_target(app_id, revision))?;
+    let kept_before = std::fs::read_link(revisions.join(PREVIOUS_LINK)).ok();
+    let kept = match &current {
         Some(Active::Revision { name, .. }) if name != revision => {
-            replace_link(&revisions, PREVIOUS_LINK, Path::new(name))?;
+            replace_link(&revisions, PREVIOUS_LINK, Path::new(name))
         }
-        Some(Active::Revision { .. }) => {}
+        Some(Active::Revision { .. }) => Ok(()),
         // Nothing earlier of this installation to roll back to; a link left
         // by an earlier, interrupted uninstall is dropped.
         _ => match std::fs::remove_file(revisions.join(PREVIOUS_LINK)) {
             Err(e) if e.kind() != std::io::ErrorKind::NotFound => {
-                return Err(e).context("remove the stale rollback link");
+                Err(e).context("remove the stale rollback link")
             }
-            _ => {}
+            _ => sync_dir(&revisions),
         },
-    }
-    let dest = store_root.join(app_id);
-    let link = temporary_link(store_root, app_id, &link_target(app_id, revision))?;
-    let switched = match &current {
-        Some(Active::Directory(_)) => exchange(&link, &dest),
-        _ => std::fs::rename(&link, &dest),
     };
+    let switched = kept.and_then(|()| {
+        match &current {
+            Some(Active::Directory(_)) => exchange(&link, &dest),
+            _ => std::fs::rename(&link, &dest),
+        }
+        .with_context(|| format!("activate {}", dest.display()))
+    });
     if let Err(e) = switched {
         let _ = std::fs::remove_file(&link);
-        return Err(e).with_context(|| format!("activate {}", dest.display()));
+        // The revision kept for rollback stays what it was.
+        if let Some(Active::Revision { name, .. }) = &current
+            && name != revision
+        {
+            let _ = match &kept_before {
+                Some(target) => replace_link(&revisions, PREVIOUS_LINK, target),
+                None => {
+                    std::fs::remove_file(revisions.join(PREVIOUS_LINK)).map_err(anyhow::Error::from)
+                }
+            };
+        }
+        return Err(e);
     }
     if let Err(e) = sync_dir(store_root) {
         eprintln!("{e:#}");
@@ -1818,6 +1849,53 @@ mod tests {
             one.join("app.wasm").is_file(),
             "the damaged revision was reused"
         );
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn the_same_content_with_another_signature_replaces_the_active_revision_in_place() {
+        let home = temp_root("resigned");
+        let store = home.join("store");
+        let app_id = "org.weft.test.resigned";
+        let src = home.join("src");
+        let install = || {
+            with_home(&home, || {
+                install_package_to(&src, &store, InstallMode::Development)
+            })
+        };
+        write_revision(&src, app_id, "one");
+        install().unwrap();
+        let revision = active_dir(&store, app_id);
+        sign_package(&src, &key(&home, "dev", 3, false)).unwrap();
+        // A session runs from the unsigned copy: it is not replaced under it.
+        let session = weft_ipc_types::store::pin(&revision).unwrap();
+        assert!(install().is_err());
+        assert!(
+            !revision
+                .join(weft_ipc_types::trust::SIGNATURE_FILE)
+                .exists()
+        );
+        drop(session);
+        install().unwrap();
+        assert_eq!(
+            active_dir(&store, app_id),
+            revision,
+            "same content, same revision"
+        );
+        assert!(
+            revision
+                .join(weft_ipc_types::trust::SIGNATURE_FILE)
+                .is_file()
+        );
+        assert_eq!(active_ui(&store, app_id), "one");
+        assert!(!staging_left(&store));
+        let leftovers: Vec<_> = std::fs::read_dir(&store)
+            .unwrap()
+            .flatten()
+            .map(|e| e.file_name())
+            .filter(|n| n.to_string_lossy().starts_with(".trash-"))
+            .collect();
+        assert!(leftovers.is_empty(), "{leftovers:?}");
         let _ = std::fs::remove_dir_all(&home);
     }
 
