@@ -37,8 +37,8 @@ pub(crate) struct SessionGrants {
 
 /// Why a launch is refused, with the error code reported to the client:
 /// 400 for a malformed app ID, 404 for a package that is not installed, 403
-/// for a package this host will not run as declared and 500 for a host
-/// fault.
+/// for a package this host will not run as declared, 409 for app data the
+/// user must reconcile and 500 for a host fault.
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) struct Refusal {
     pub code: u32,
@@ -76,8 +76,9 @@ impl HostDirs {
             .map(PathBuf::from)
             .filter(|dir| dir.is_absolute())
             .unwrap_or_else(|| home.join(".config"));
-        let data_home = weft_ipc_types::package::data_home()
-            .ok_or_else(|| Refusal::new(500, "no data home: HOME is not set"))?;
+        let data_home = weft_ipc_types::package::data_home().ok_or_else(|| {
+            Refusal::new(500, "no data home: XDG_DATA_HOME and HOME are unusable")
+        })?;
         Ok(Self {
             data_home,
             documents: documents_dir(&home, &config),
@@ -171,51 +172,28 @@ pub(crate) fn derive(
 }
 
 /// Creates the app's data directory, first moving data an earlier version
-/// kept inside the package store. A conflict between the two locations
-/// refuses the launch (409) and leaves both untouched.
+/// kept inside the user package store, and makes it private. A conflict
+/// between the two locations refuses the launch (409) and leaves both
+/// untouched.
 fn prepare_app_data(app_id: &str, dir: &Path, host: &HostDirs) -> Result<(), Refusal> {
-    use weft_ipc_types::package::{Migration, legacy_app_data_dir, migrate_app_data};
+    use weft_ipc_types::package::{
+        Migration, MigrationError, legacy_app_data_dir, migrate_app_data,
+    };
     let legacy = legacy_app_data_dir(&host.home, app_id);
     match migrate_app_data(&legacy, dir) {
         Ok(Migration::Moved) => {
             tracing::info!(%app_id, from = %legacy.display(), to = %dir.display(), "app data moved");
         }
         Ok(Migration::NotNeeded) => {}
-        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
-            return Err(Refusal::new(409, e.to_string()));
-        }
-        Err(e) => {
-            return Err(Refusal::new(
-                500,
-                format!("cannot move app data from {}: {e}", legacy.display()),
-            ));
-        }
-    }
-    create_private_dir(dir)
-        .map_err(|e| Refusal::new(500, format!("cannot create {}: {e}", dir.display())))
-}
-
-/// Creates `dir` and missing parents, and makes the directory itself
-/// accessible only to the user, including when it already existed or was
-/// moved from the earlier layout.
-fn create_private_dir(dir: &Path) -> std::io::Result<()> {
-    if let Some(parent) = dir.parent() {
-        std::fs::create_dir_all(parent)?;
+        Err(e @ MigrationError::Conflict { .. }) => return Err(Refusal::new(409, e.to_string())),
+        Err(e) => return Err(Refusal::new(500, e.to_string())),
     }
     let mut builder = std::fs::DirBuilder::new();
-    #[cfg(unix)]
-    std::os::unix::fs::DirBuilderExt::mode(&mut builder, 0o700);
-    match builder.create(dir) {
-        Ok(()) => {}
-        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists && dir.is_dir() => {}
-        Err(e) => return Err(e),
-    }
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700))?;
-    }
-    Ok(())
+    builder.recursive(true);
+    builder
+        .create(dir)
+        .and_then(|()| weft_ipc_types::package::make_private(dir))
+        .map_err(|e| Refusal::new(500, format!("cannot prepare {}: {e}", dir.display())))
 }
 
 /// Adds a directory grant; declaring both modes for one directory grants the

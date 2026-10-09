@@ -154,6 +154,12 @@ fn check_package(dir: &Path) -> anyhow::Result<String> {
         }
     };
 
+    // Earlier versions kept app data in `<package>/data`; the name stays
+    // reserved so package content is never mistaken for user data.
+    if std::fs::symlink_metadata(dir.join("data")).is_ok() {
+        errors.push("a top-level 'data' entry is reserved and cannot be part of a package".into());
+    }
+
     if let Some(ref m) = manifest {
         if !weft_ipc_types::package::is_valid_app_id(&m.package.id) {
             errors.push(format!(
@@ -292,11 +298,14 @@ fn install_package_to(path: &Path, store_root: &Path) -> anyhow::Result<()> {
     let manifest = load_manifest(dir)?;
     let app_id = &manifest.package.id;
     let dest = store_root.join(app_id);
-    // An earlier version could leave only app data in the package directory;
-    // move it to its own location so it neither blocks nor joins the package.
+    // An earlier weft-appd could leave only app data, or an empty directory,
+    // where the package now goes; move the data to its own location so it
+    // neither blocks nor joins the package.
     if dest.is_dir() && only_holds_app_data(&dest)? {
-        move_app_data_out(app_id, &dest)?;
-        std::fs::remove_dir(&dest).with_context(|| format!("remove {}", dest.display()))?;
+        if declares_app_data(&manifest) {
+            move_app_data_out(app_id, &dest)?;
+        }
+        let _ = std::fs::remove_dir(&dest);
     }
     if dest.exists() {
         anyhow::bail!(
@@ -328,38 +337,58 @@ fn uninstall_package_from(app_id: &str, store_root: &Path) -> anyhow::Result<()>
             target.display()
         );
     }
-    move_app_data_out(app_id, &target)?;
+    if load_manifest(&target).is_ok_and(|m| declares_app_data(&m)) {
+        move_app_data_out(app_id, &target)?;
+    }
     std::fs::remove_dir_all(&target).with_context(|| format!("remove {}", target.display()))?;
     println!("uninstalled {}", app_id);
     Ok(())
 }
 
-/// Whether a package directory contains nothing but a `data` directory.
+/// Whether a package directory is empty or contains nothing but `data`.
 fn only_holds_app_data(package_dir: &Path) -> anyhow::Result<bool> {
-    let mut entries = std::fs::read_dir(package_dir)
+    let entries = std::fs::read_dir(package_dir)
         .with_context(|| format!("read {}", package_dir.display()))?
         .map(|entry| entry.map(|e| e.file_name()))
         .collect::<Result<Vec<_>, _>>()?;
-    entries.sort();
-    Ok(entries == ["data"])
+    Ok(entries.is_empty() || entries == ["data"])
 }
 
-/// Moves app data that an earlier version kept in `<package_dir>/data` to
-/// the app's data directory, which package operations never remove. Fails,
-/// changing nothing, if the data cannot be moved.
+/// Whether the manifest declares an app-data capability; only such apps
+/// had data kept in the package directory.
+fn declares_app_data(manifest: &Manifest) -> bool {
+    use weft_ipc_types::capability::Capability;
+    manifest
+        .package
+        .capabilities
+        .iter()
+        .flatten()
+        .any(|c| matches!(c.parse(), Ok(Capability::AppData(_))))
+}
+
+/// Moves app data that an earlier weft-appd kept in `<package_dir>/data` to
+/// the app's data directory, which package operations never remove. Earlier
+/// versions only did so in the user package store (`~/.local/share/weft/apps`),
+/// so other stores are left alone. Fails, changing nothing, if the data
+/// cannot be moved.
 fn move_app_data_out(app_id: &str, package_dir: &Path) -> anyhow::Result<()> {
-    use weft_ipc_types::package::{Migration, app_data_dir, data_home, migrate_app_data};
+    use weft_ipc_types::package::{
+        Migration, app_data_dir, data_home, legacy_app_data_dir, make_private, migrate_app_data,
+    };
+    let Some(home) = std::env::var_os("HOME").map(PathBuf::from) else {
+        return Ok(());
+    };
     let legacy = package_dir.join("data");
-    if std::fs::symlink_metadata(&legacy).is_err() {
+    if legacy != legacy_app_data_dir(&home, app_id) {
         return Ok(());
     }
-    let home = data_home().context("cannot locate the data home to keep app data")?;
-    let target = app_data_dir(&home, app_id);
-    match migrate_app_data(&legacy, &target)
-        .with_context(|| format!("keep app data from {}", legacy.display()))?
+    let data_home = data_home().context("cannot locate the data home to keep app data")?;
+    let target = app_data_dir(&data_home, app_id);
+    if migrate_app_data(&legacy, &target).with_context(|| format!("keep app data of {app_id}"))?
+        == Migration::Moved
     {
-        Migration::Moved => println!("app data kept at {}", target.display()),
-        Migration::NotNeeded => {}
+        make_private(&target).with_context(|| format!("restrict {}", target.display()))?;
+        println!("app data kept at {}", target.display());
     }
     Ok(())
 }
@@ -638,83 +667,142 @@ mod tests {
         ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner())
     }
 
-    /// A minimal valid package for `app_id` in `src`.
-    fn write_package(src: &Path, app_id: &str) {
+    /// A minimal valid package for `app_id` in `src` declaring `capabilities`.
+    fn write_package(src: &Path, app_id: &str, capabilities: &str) {
         std::fs::create_dir_all(src.join("ui")).unwrap();
         std::fs::write(src.join("app.wasm"), b"\0asm").unwrap();
         std::fs::write(src.join("ui/index.html"), b"").unwrap();
         std::fs::write(
             src.join("wapp.toml"),
             format!(
-                "[package]\nid = \"{app_id}\"\nname = \"D\"\nversion = \"1.0.0\"\n\n\
+                "[package]\nid = \"{app_id}\"\nname = \"D\"\nversion = \"1.0.0\"\n\
+                 capabilities = [{capabilities}]\n\n\
                  [runtime]\nmodule = \"app.wasm\"\n\n[ui]\nentry = \"ui/index.html\"\n"
             ),
         )
         .unwrap();
     }
 
-    /// Runs `f` with XDG_DATA_HOME set to `data_home`.
-    fn with_data_home<T>(data_home: &Path, f: impl FnOnce() -> T) -> T {
+    /// Runs `f` with HOME set to `home` and XDG_DATA_HOME to `home/share`.
+    fn with_home<T>(home: &Path, f: impl FnOnce() -> T) -> T {
         let _env = env_lock();
-        let prior = std::env::var_os("XDG_DATA_HOME");
+        let prior: Vec<_> = ["HOME", "XDG_DATA_HOME"]
+            .iter()
+            .map(|k| (*k, std::env::var_os(k)))
+            .collect();
         // SAFETY: env_lock serialises every test that touches the environment.
-        unsafe { std::env::set_var("XDG_DATA_HOME", data_home) };
-        let result = f();
         unsafe {
-            match prior {
-                Some(v) => std::env::set_var("XDG_DATA_HOME", v),
-                None => std::env::remove_var("XDG_DATA_HOME"),
+            std::env::set_var("HOME", home);
+            std::env::set_var("XDG_DATA_HOME", home.join("share"));
+        }
+        let result = f();
+        for (key, value) in prior {
+            unsafe {
+                match value {
+                    Some(v) => std::env::set_var(key, v),
+                    None => std::env::remove_var(key),
+                }
             }
         }
         result
     }
 
-    #[test]
-    fn uninstall_keeps_app_data_from_the_package_directory() {
-        let root = std::env::temp_dir().join(format!("weft_pack_keep_{}", std::process::id()));
+    fn temp_root(name: &str) -> PathBuf {
+        let root = std::env::temp_dir().join(format!("weft_pack_{name}_{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
+        root
+    }
+
+    const APP_DATA: &str = "\"fs:rw:app-data\"";
+
+    #[test]
+    fn uninstall_keeps_app_data_from_the_user_store() {
+        let home = temp_root("keep");
         let app_id = "com.example.keep";
-        write_package(&root.join("src"), app_id);
-        let store = root.join("store");
-        install_package_to(&root.join("src"), &store).unwrap();
+        write_package(&home.join("src"), app_id, APP_DATA);
+        let store = home.join(".local/share/weft/apps");
+        install_package_to(&home.join("src"), &store).unwrap();
         let legacy = store.join(app_id).join("data");
         std::fs::create_dir_all(&legacy).unwrap();
         std::fs::write(legacy.join("notes.txt"), "first\nsecond").unwrap();
 
-        let data_home = root.join("share");
-        with_data_home(&data_home, || uninstall_package_from(app_id, &store)).unwrap();
+        with_home(&home, || uninstall_package_from(app_id, &store)).unwrap();
         assert!(!store.join(app_id).exists());
-        let kept = weft_ipc_types::package::app_data_dir(&data_home, app_id);
+        let kept = weft_ipc_types::package::app_data_dir(&home.join("share"), app_id);
         assert_eq!(
             std::fs::read_to_string(kept.join("notes.txt")).unwrap(),
             "first\nsecond"
         );
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(&kept).unwrap().permissions().mode();
+            assert_eq!(mode & 0o777, 0o700);
+        }
 
         // A second copy cannot be merged: uninstall refuses and removes nothing.
-        install_package_to(&root.join("src"), &store).unwrap();
+        install_package_to(&home.join("src"), &store).unwrap();
         std::fs::create_dir_all(&legacy).unwrap();
-        assert!(with_data_home(&data_home, || uninstall_package_from(app_id, &store)).is_err());
+        assert!(with_home(&home, || uninstall_package_from(app_id, &store)).is_err());
         assert!(legacy.is_dir() && kept.is_dir());
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn other_stores_and_apps_without_data_capability_are_left_alone() {
+        let home = temp_root("alone");
+        let app_id = "com.example.alone";
+        // No app-data capability: a data directory is not app data.
+        write_package(&home.join("src"), app_id, "");
+        let store = home.join(".local/share/weft/apps");
+        install_package_to(&home.join("src"), &store).unwrap();
+        std::fs::create_dir_all(store.join(app_id).join("data")).unwrap();
+        with_home(&home, || uninstall_package_from(app_id, &store)).unwrap();
+        assert!(!home.join("share").exists());
+
+        // Another store: earlier versions never kept data there.
+        write_package(&home.join("src2"), app_id, APP_DATA);
+        let other = home.join("other-store");
+        install_package_to(&home.join("src2"), &other).unwrap();
+        std::fs::create_dir_all(other.join(app_id).join("data")).unwrap();
+        with_home(&home, || uninstall_package_from(app_id, &other)).unwrap();
+        assert!(!home.join("share").exists());
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn packages_cannot_ship_a_top_level_data_entry() {
+        let root = temp_root("ships-data");
+        let src = root.join("src");
+        write_package(&src, "com.example.ships", "");
+        std::fs::create_dir_all(src.join("data")).unwrap();
+        std::fs::write(src.join("data/asset.json"), "{}").unwrap();
+        let err = check_package(&src).unwrap_err().to_string();
+        assert!(err.contains("'data'"), "{err}");
+        assert!(install_package_to(&src, &root.join("store")).is_err());
         let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]
     fn install_moves_leftover_app_data_out_of_the_way() {
-        let root = std::env::temp_dir().join(format!("weft_pack_leftover_{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&root);
+        let home = temp_root("leftover");
         let app_id = "com.example.leftover";
-        write_package(&root.join("src"), app_id);
-        let store = root.join("store");
+        write_package(&home.join("src"), app_id, APP_DATA);
+        let store = home.join(".local/share/weft/apps");
         std::fs::create_dir_all(store.join(app_id).join("data")).unwrap();
         std::fs::write(store.join(app_id).join("data/x"), "x").unwrap();
 
-        let data_home = root.join("share");
-        with_data_home(&data_home, || install_package_to(&root.join("src"), &store)).unwrap();
+        with_home(&home, || install_package_to(&home.join("src"), &store)).unwrap();
         assert!(store.join(app_id).join("wapp.toml").exists());
         assert!(!store.join(app_id).join("data").exists());
-        let kept = weft_ipc_types::package::app_data_dir(&data_home, app_id);
+        let kept = weft_ipc_types::package::app_data_dir(&home.join("share"), app_id);
         assert_eq!(std::fs::read_to_string(kept.join("x")).unwrap(), "x");
-        let _ = std::fs::remove_dir_all(&root);
+
+        // An empty directory left behind does not block installation either.
+        with_home(&home, || uninstall_package_from(app_id, &store)).unwrap();
+        std::fs::create_dir_all(store.join(app_id)).unwrap();
+        with_home(&home, || install_package_to(&home.join("src"), &store)).unwrap();
+        let _ = std::fs::remove_dir_all(&home);
     }
 
     #[test]

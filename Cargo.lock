@@ -10522,6 +10522,7 @@ name = "weft-ipc-types"
 version = "0.1.0"
 dependencies = [
  "rmp-serde",
+ "rustix 1.1.4",
  "serde",
 ]
 

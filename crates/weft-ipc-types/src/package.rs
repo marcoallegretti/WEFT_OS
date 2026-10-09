@@ -54,38 +54,127 @@ pub enum Migration {
     Moved,
 }
 
-/// Moves `legacy` to `target` if `legacy` is a directory, in one rename so
-/// the data is never partly in both places. Refuses, leaving both untouched,
-/// when `target` already exists, since either copy may hold the user's
-/// latest data, and when `legacy` is a symbolic link.
-pub fn migrate_app_data(legacy: &Path, target: &Path) -> std::io::Result<Migration> {
-    use std::io::{Error, ErrorKind};
-    let metadata = match std::fs::symlink_metadata(legacy) {
-        Ok(metadata) => metadata,
-        Err(e) if e.kind() == ErrorKind::NotFound => return Ok(Migration::NotNeeded),
-        Err(e) => return Err(e),
-    };
-    if !metadata.is_dir() {
-        return Err(Error::other(format!(
-            "{} is not a directory; move it aside to continue",
-            legacy.display()
-        )));
-    }
-    if std::fs::symlink_metadata(target).is_ok() {
-        return Err(Error::new(
-            ErrorKind::AlreadyExists,
-            format!(
-                "app data exists both in {} and in {}; keep one of them",
+/// Why data in the earlier layout could not be moved. Nothing was changed.
+#[derive(Debug)]
+pub enum MigrationError {
+    /// Data exists in both locations; either may hold the user's latest
+    /// data, so the user has to choose.
+    Conflict {
+        legacy: PathBuf,
+        target: PathBuf,
+    },
+    /// The two locations are on different filesystems, so the data cannot
+    /// be moved in one step.
+    CrossDevice {
+        legacy: PathBuf,
+        target: PathBuf,
+    },
+    /// The earlier location is not a plain directory.
+    NotADirectory(PathBuf),
+    Io(std::io::Error),
+}
+
+impl std::fmt::Display for MigrationError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Conflict { legacy, target } => write!(
+                f,
+                "app data exists both in {} and in {}; keep one of them and remove the other",
                 legacy.display(),
                 target.display()
             ),
-        ));
+            Self::CrossDevice { legacy, target } => write!(
+                f,
+                "app data in {} cannot be moved to {} on another filesystem; move it there by hand",
+                legacy.display(),
+                target.display()
+            ),
+            Self::NotADirectory(path) => write!(
+                f,
+                "{} is not a plain directory; move it aside to continue",
+                path.display()
+            ),
+            Self::Io(e) => e.fmt(f),
+        }
+    }
+}
+
+impl std::error::Error for MigrationError {}
+
+/// Moves `legacy` to `target` if `legacy` is a directory, in one rename so
+/// the data is never partly in both places, and then removes the earlier
+/// package directory if that leaves it empty. Refuses, changing nothing,
+/// when `target` already exists (even empty), when `legacy` is a symbolic
+/// link or not a directory, and when the rename would cross filesystems.
+pub fn migrate_app_data(legacy: &Path, target: &Path) -> Result<Migration, MigrationError> {
+    let conflict = || MigrationError::Conflict {
+        legacy: legacy.to_path_buf(),
+        target: target.to_path_buf(),
+    };
+    let metadata = match std::fs::symlink_metadata(legacy) {
+        Ok(metadata) => metadata,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Migration::NotNeeded),
+        Err(e) => return Err(MigrationError::Io(e)),
+    };
+    if !metadata.is_dir() {
+        return Err(MigrationError::NotADirectory(legacy.to_path_buf()));
+    }
+    if std::fs::symlink_metadata(target).is_ok() {
+        return Err(conflict());
     }
     if let Some(parent) = target.parent() {
-        std::fs::create_dir_all(parent)?;
+        std::fs::create_dir_all(parent).map_err(MigrationError::Io)?;
     }
-    std::fs::rename(legacy, target)?;
+    match rename_no_replace(legacy, target) {
+        Ok(()) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => return Err(conflict()),
+        Err(e) if e.kind() == std::io::ErrorKind::CrossesDevices => {
+            return Err(MigrationError::CrossDevice {
+                legacy: legacy.to_path_buf(),
+                target: target.to_path_buf(),
+            });
+        }
+        Err(e) => return Err(MigrationError::Io(e)),
+    }
+    if let Some(package_dir) = legacy.parent() {
+        // Fails, harmlessly, unless the directory is now empty.
+        let _ = std::fs::remove_dir(package_dir);
+    }
     Ok(Migration::Moved)
+}
+
+/// Renames `from` to `to`, failing with `AlreadyExists` instead of replacing
+/// an existing `to`, even one created after the caller checked for it.
+#[cfg(target_os = "linux")]
+fn rename_no_replace(from: &Path, to: &Path) -> std::io::Result<()> {
+    use rustix::fs::{CWD, RenameFlags, renameat_with};
+    renameat_with(CWD, from, CWD, to, RenameFlags::NOREPLACE).map_err(std::io::Error::from)
+}
+
+#[cfg(not(target_os = "linux"))]
+fn rename_no_replace(from: &Path, to: &Path) -> std::io::Result<()> {
+    if std::fs::symlink_metadata(to).is_ok() {
+        return Err(std::io::ErrorKind::AlreadyExists.into());
+    }
+    std::fs::rename(from, to)
+}
+
+/// Makes `dir` accessible only to its owner. A symbolic link is refused
+/// rather than followed.
+pub fn make_private(dir: &Path) -> std::io::Result<()> {
+    let metadata = std::fs::symlink_metadata(dir)?;
+    if !metadata.is_dir() {
+        return Err(std::io::Error::other(format!(
+            "{} is not a plain directory",
+            dir.display()
+        )));
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700))?;
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -132,6 +221,16 @@ mod tests {
     }
 
     #[test]
+    fn migration_keeps_a_package_directory_with_other_content() {
+        let root = temp("keep-package");
+        let legacy = root.join("apps/org.weft.app/data");
+        std::fs::create_dir_all(&legacy).unwrap();
+        std::fs::write(root.join("apps/org.weft.app/wapp.toml"), "").unwrap();
+        migrate_app_data(&legacy, &root.join("new")).unwrap();
+        assert!(root.join("apps/org.weft.app/wapp.toml").exists());
+    }
+
+    #[test]
     fn migration_moves_data_intact() {
         let root = temp("move");
         let legacy = root.join("apps/org.weft.notes/data");
@@ -166,7 +265,14 @@ mod tests {
         std::fs::write(legacy.join("a"), "old").unwrap();
         std::fs::write(target.join("a"), "new").unwrap();
         let err = migrate_app_data(&legacy, &target).unwrap_err();
-        assert_eq!(err.kind(), std::io::ErrorKind::AlreadyExists);
+        assert!(matches!(err, MigrationError::Conflict { .. }));
+        // An empty target is a conflict too: it may be in use.
+        std::fs::remove_file(target.join("a")).unwrap();
+        assert!(matches!(
+            migrate_app_data(&legacy, &target),
+            Err(MigrationError::Conflict { .. })
+        ));
+        std::fs::write(target.join("a"), "new").unwrap();
         assert_eq!(std::fs::read_to_string(legacy.join("a")).unwrap(), "old");
         assert_eq!(std::fs::read_to_string(target.join("a")).unwrap(), "new");
     }
@@ -177,7 +283,10 @@ mod tests {
         let root = temp("link");
         std::fs::create_dir_all(root.join("elsewhere")).unwrap();
         std::os::unix::fs::symlink(root.join("elsewhere"), root.join("old")).unwrap();
-        assert!(migrate_app_data(&root.join("old"), &root.join("new")).is_err());
+        assert!(matches!(
+            migrate_app_data(&root.join("old"), &root.join("new")),
+            Err(MigrationError::NotADirectory(_))
+        ));
         assert!(!root.join("new").exists());
     }
 }
