@@ -766,6 +766,9 @@ fn scan_installed_apps() -> Vec<AppInfo> {
             }
         }
     }
+    // A stable order, so the launcher's keyboard order does not follow the
+    // directory listing.
+    apps.sort_by_cached_key(|app| (app.name.to_lowercase(), app.app_id.clone()));
     apps
 }
 
@@ -1191,23 +1194,42 @@ mod tests {
 
         let _env = env_lock().blocking_lock();
         let store = std::env::temp_dir().join(format!("weft_appd_scan_{}", std::process::id()));
-        let app_dir = store.join("com.example.scanner");
-        fs::create_dir_all(&app_dir).unwrap();
-        fs::write(
-            app_dir.join("wapp.toml"),
-            "[package]\nid = \"com.example.scanner\"\nname = \"Scanner\"\nversion = \"1.0.0\"\n\
-             [runtime]\nmodule = \"app.wasm\"\n[ui]\nentry = \"ui/index.html\"\n",
-        )
-        .unwrap();
+        // Listed by name, ignoring case, then by ID, whatever the directory
+        // order.
+        for (id, name) in [
+            ("com.example.scanner", "Scanner"),
+            ("com.example.zeta", "alpha"),
+            ("com.example.second", "Alpha"),
+            ("com.example.first", "Alpha"),
+        ] {
+            let app_dir = store.join(id);
+            fs::create_dir_all(&app_dir).unwrap();
+            fs::write(
+                app_dir.join("wapp.toml"),
+                format!(
+                    "[package]\nid = \"{id}\"\nname = \"{name}\"\nversion = \"1.0.0\"\n\
+                     [runtime]\nmodule = \"app.wasm\"\n[ui]\nentry = \"ui/index.html\"\n"
+                ),
+            )
+            .unwrap();
+        }
 
         let prior = std::env::var("WEFT_APP_STORE").ok();
         unsafe { std::env::set_var("WEFT_APP_STORE", &store) };
 
         let apps = scan_installed_apps();
-        assert_eq!(apps.len(), 1);
-        assert_eq!(apps[0].app_id, "com.example.scanner");
-        assert_eq!(apps[0].name, "Scanner");
-        assert_eq!(apps[0].version, "1.0.0");
+        let ids: Vec<&str> = apps.iter().map(|a| a.app_id.as_str()).collect();
+        assert_eq!(
+            ids,
+            [
+                "com.example.first",
+                "com.example.second",
+                "com.example.zeta",
+                "com.example.scanner"
+            ]
+        );
+        assert_eq!(apps[3].name, "Scanner");
+        assert_eq!(apps[3].version, "1.0.0");
 
         unsafe {
             match prior {
