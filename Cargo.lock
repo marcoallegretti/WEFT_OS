@@ -10544,6 +10544,7 @@ dependencies = [
  "hex",
  "libc",
  "rand 0.8.5",
+ "rustix 1.1.4",
  "sha2",
  "tar",
  "weft-ipc-types",

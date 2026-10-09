@@ -110,7 +110,7 @@ fn main() -> anyhow::Result<()> {
             eprintln!("  weft-pack check        <dir>             validate a package directory");
             eprintln!("  weft-pack info         <dir>             print package metadata");
             eprintln!(
-                "  weft-pack install      <dir> [--dev]     install a package signed by a trusted key"
+                "  weft-pack install      <dir> [--dev] [--claim-data]  install a package signed by a trusted key"
             );
             eprintln!(
                 "                                           (--dev: unsigned development content;"
@@ -328,7 +328,34 @@ fn install_dir(
     claim_data: bool,
 ) -> anyhow::Result<()> {
     check_package(dir)?;
-    let manifest = load_manifest(dir)?;
+    // The package is copied into the store first and every decision, the app
+    // ID included, is made on that copy, so the bytes that are checked and
+    // trusted are the bytes that become installed. Only then does one rename
+    // make it available.
+    let staging = store_root.join(format!(
+        ".staging-{}",
+        hex::encode(rand::random::<[u8; 8]>())
+    ));
+    let result = dir
+        .canonicalize()
+        .with_context(|| format!("resolve {}", dir.display()))
+        .and_then(|source| copy_dir(&source, &staging))
+        .with_context(|| format!("copy {} -> {}", dir.display(), staging.display()))
+        .and_then(|()| install_staged(&staging, store_root, mode, claim_data));
+    if result.is_err() {
+        let _ = std::fs::remove_dir_all(&staging);
+    }
+    result
+}
+
+fn install_staged(
+    staging: &Path,
+    store_root: &Path,
+    mode: InstallMode,
+    claim_data: bool,
+) -> anyhow::Result<()> {
+    check_package(staging)?;
+    let manifest = load_manifest(staging)?;
     let app_id = &manifest.package.id;
     let dest = store_root.join(app_id);
     let data_home = weft_ipc_types::package::data_home()
@@ -352,31 +379,9 @@ fn install_dir(
             dest.display()
         );
     }
-
-    // The package is copied into the store first and every decision is made
-    // on that copy, so the bytes that are checked and trusted are the bytes
-    // that become installed. Only then does one rename make it available.
-    let staging = store_root.join(format!(
-        ".staging-{app_id}-{}",
-        hex::encode(rand::random::<[u8; 8]>())
-    ));
-    // Copied from the resolved source path, which every file opened during
-    // the copy is checked against.
-    let admitted = dir
-        .canonicalize()
-        .with_context(|| format!("resolve {}", dir.display()))
-        .and_then(|source| copy_dir(&source, &staging))
-        .with_context(|| format!("copy {} -> {}", dir.display(), staging.display()))
-        .and_then(|()| admit(&staging, app_id, mode, &data_home, claim_data));
-    let admission = match admitted {
-        Ok(admission) => admission,
-        Err(e) => {
-            let _ = std::fs::remove_dir_all(&staging);
-            return Err(e);
-        }
-    };
+    let admission = admit(staging, app_id, mode, &data_home, claim_data)?;
     let owner = admission.owner;
-    place(&staging, &dest, admission)?;
+    place(staging, &dest, admission)?;
     println!("installed {} -> {} ({owner})", app_id, dest.display());
     Ok(())
 }
@@ -402,7 +407,7 @@ fn place(staging: &Path, dest: &Path, admission: Admission) -> anyhow::Result<()
     Ok(())
 }
 
-/// Checks the staged copy of a package and establishes who owns its app ID:
+/// Establishes who owns the app ID of a checked, staged package:
 /// the trusted publisher that signed it, or, only when asked, development.
 /// The first installation of an ID records its owner, and every later one
 /// must have the same owner. The record is written before the package is
@@ -415,12 +420,6 @@ fn admit(
     claim_data: bool,
 ) -> anyhow::Result<Admission> {
     use weft_ipc_types::trust::{owner_record_path, read_owner, write_owner};
-    check_package(staged)?;
-    let manifest = load_manifest(staged)?;
-    anyhow::ensure!(
-        manifest.package.id == app_id,
-        "the package changed while it was copied"
-    );
     let owner = match mode {
         InstallMode::Development => Owner::Development,
         InstallMode::Verified => {
@@ -447,7 +446,12 @@ fn admit(
         ),
         None => {
             let data = weft_ipc_types::package::app_data_dir(data_home, app_id);
-            if std::fs::symlink_metadata(&data).is_ok() && !claim_data {
+            let no_data = match std::fs::symlink_metadata(&data) {
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => true,
+                Err(e) => return Err(e).with_context(|| format!("inspect {}", data.display())),
+                Ok(_) => false,
+            };
+            if !no_data && !claim_data {
                 anyhow::bail!(
                     "{} holds app data for {app_id} with no recorded owner; install with \
                      --claim-data to give it to {owner}, or move it aside",
@@ -484,6 +488,7 @@ fn uninstall_package_from(app_id: &str, store_root: &Path) -> anyhow::Result<()>
         // the package leaves a record with nothing installed; with no data
         // either, it holds the ID for nothing and is released.
         if let Some(home) = &data_home
+            && !installed_in_another_store(app_id, store_root)
             && release_owner_without_data(home, app_id)
         {
             println!("released {app_id}, which was not installed");
@@ -520,11 +525,29 @@ fn uninstall_package_from(app_id: &str, store_root: &Path) -> anyhow::Result<()>
     }
     // The owner record keeps the app ID, and the data with it, for its owner
     // while the data remains; with no data left, the ID is free again.
-    if let Some(home) = &data_home {
+    if let Some(home) = &data_home
+        && !installed_in_another_store(app_id, store_root)
+    {
         release_owner_without_data(home, app_id);
     }
     println!("uninstalled {}", app_id);
     Ok(())
+}
+
+/// Whether `app_id` is installed in a known store other than `store_root`.
+/// Owner records belong to the data home, not to a store, so a record stays
+/// while any store this host knows holds the package.
+fn installed_in_another_store(app_id: &str, store_root: &Path) -> bool {
+    let mut roots = list_installed_roots();
+    roots.extend(
+        ["/usr/share/weft/apps"].iter().map(PathBuf::from).chain(
+            std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".local/share/weft/apps")),
+        ),
+    );
+    roots
+        .iter()
+        .filter(|root| root.as_path() != store_root)
+        .any(|root| std::fs::symlink_metadata(root.join(app_id)).is_ok())
 }
 
 /// Removes the owner record of `app_id` when the app has no data, and
@@ -625,7 +648,9 @@ fn list_installed() {
             };
             // Only a directory named after the ID its manifest declares is an
             // installed package; staging copies and stray directories are not.
-            if entry.file_name().to_str() != Some(m.package.id.as_str()) {
+            if entry.file_name().to_str() != Some(m.package.id.as_str())
+                || !weft_ipc_types::package::is_valid_app_id(&m.package.id)
+            {
                 continue;
             }
             if seen.insert(m.package.id.clone()) {
@@ -689,7 +714,7 @@ fn copy_dir(src: &Path, dst: &Path) -> anyhow::Result<()> {
 }
 
 fn copy_file(src: &Path, dst: &Path, metadata: &std::fs::Metadata) -> std::io::Result<()> {
-    let source = open_regular_file(src)?;
+    let source = open_regular_file(src, metadata)?;
     let mut options = std::fs::OpenOptions::new();
     options.write(true).create_new(true);
     #[cfg(unix)]
@@ -698,35 +723,38 @@ fn copy_file(src: &Path, dst: &Path, metadata: &std::fs::Metadata) -> std::io::R
         let executable = metadata.permissions().mode() & 0o111 != 0;
         options.mode(if executable { 0o755 } else { 0o644 });
     }
-    #[cfg(not(unix))]
-    let _ = metadata;
     let mut target = options.open(dst)?;
     std::io::copy(&mut &source, &mut target)?;
     Ok(())
 }
 
-/// Opens `src` for reading only if it is still the regular file it was when
-/// listed: the last component is not followed, and on Linux the opened file
-/// must be at `src` itself, so a link swapped in for any directory on the way
-/// cannot redirect the copy outside the package.
-fn open_regular_file(src: &Path) -> std::io::Result<std::fs::File> {
+/// Opens `src` for reading only if it is still the regular file that was
+/// listed as `listed`: the last component is not followed, a FIFO or device
+/// swapped in is not waited on, and the opened file must have the listed
+/// device and inode, so a link swapped in for any directory on the way, or
+/// another file renamed into place, cannot redirect the copy.
+fn open_regular_file(src: &Path, listed: &std::fs::Metadata) -> std::io::Result<std::fs::File> {
     let mut options = std::fs::OpenOptions::new();
     options.read(true);
     #[cfg(unix)]
-    std::os::unix::fs::OpenOptionsExt::custom_flags(&mut options, libc::O_NOFOLLOW);
+    std::os::unix::fs::OpenOptionsExt::custom_flags(
+        &mut options,
+        libc::O_NOFOLLOW | libc::O_NONBLOCK | libc::O_NOCTTY,
+    );
     let file = options.open(src)?;
-    let changed =
-        || std::io::Error::other(format!("{} changed while it was copied", src.display()));
-    if !file.metadata()?.is_file() {
-        return Err(changed());
-    }
-    #[cfg(target_os = "linux")]
-    {
-        use std::os::fd::AsRawFd;
-        let opened = std::fs::read_link(format!("/proc/self/fd/{}", file.as_raw_fd()))?;
-        if opened != src {
-            return Err(changed());
-        }
+    let opened = file.metadata()?;
+    #[cfg(unix)]
+    let same = {
+        use std::os::unix::fs::MetadataExt;
+        opened.dev() == listed.dev() && opened.ino() == listed.ino()
+    };
+    #[cfg(not(unix))]
+    let same = listed.is_file();
+    if !opened.is_file() || !same {
+        return Err(std::io::Error::other(format!(
+            "{} changed while it was copied",
+            src.display()
+        )));
     }
     Ok(file)
 }
@@ -1237,20 +1265,62 @@ mod tests {
         let _ = std::fs::remove_dir_all(&home);
     }
 
+    #[test]
+    fn a_record_stays_while_another_store_holds_the_package() {
+        let home = temp_root("other_store");
+        let app_id = "org.weft.test.otherstore";
+        write_package(&home.join("src"), app_id, "");
+        let user_store = home.join(".local/share/weft/apps");
+        let elsewhere = home.join("elsewhere");
+        with_home(&home, || {
+            install_package_to(&home.join("src"), &user_store, InstallMode::Development)
+        })
+        .unwrap();
+        assert!(with_home(&home, || uninstall_package_from(app_id, &elsewhere)).is_err());
+        assert_eq!(owner_of(&home, app_id), Some(Owner::Development));
+        with_home(&home, || uninstall_package_from(app_id, &user_store)).unwrap();
+        assert_eq!(owner_of(&home, app_id), None);
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
     #[cfg(target_os = "linux")]
     #[test]
     fn copies_never_follow_links_swapped_in() {
         let home = temp_root("swapped");
-        std::fs::create_dir_all(home.join("outside")).unwrap();
+        for dir in ["outside", "pkg/dir", "pkg/held"] {
+            std::fs::create_dir_all(home.join(dir)).unwrap();
+        }
         std::fs::write(home.join("outside/secret"), b"secret").unwrap();
-        std::fs::create_dir_all(home.join("pkg")).unwrap();
-        let root = home.canonicalize().unwrap();
-        // A file replaced by a link, and a directory replaced by a link.
-        std::os::unix::fs::symlink(root.join("outside/secret"), root.join("pkg/file")).unwrap();
-        std::os::unix::fs::symlink(root.join("outside"), root.join("pkg/dir")).unwrap();
-        assert!(open_regular_file(&root.join("pkg/file")).is_err());
-        assert!(open_regular_file(&root.join("pkg/dir/secret")).is_err());
-        assert!(open_regular_file(&root.join("outside/secret")).is_ok());
+        std::fs::write(home.join("pkg/file"), b"listed").unwrap();
+        std::fs::write(home.join("pkg/dir/secret"), b"listed").unwrap();
+        let listed = |rel: &str| std::fs::symlink_metadata(home.join(rel)).unwrap();
+        let (file, in_dir) = (listed("pkg/file"), listed("pkg/dir/secret"));
+        assert!(open_regular_file(&home.join("pkg/file"), &file).is_ok());
+
+        // The listed file moved aside and replaced by a link, then by a hard
+        // link to another existing file.
+        std::fs::rename(home.join("pkg/file"), home.join("pkg/held/file")).unwrap();
+        std::os::unix::fs::symlink(home.join("outside/secret"), home.join("pkg/file")).unwrap();
+        assert!(open_regular_file(&home.join("pkg/file"), &file).is_err());
+        std::fs::remove_file(home.join("pkg/file")).unwrap();
+        std::fs::hard_link(home.join("outside/secret"), home.join("pkg/file")).unwrap();
+        assert!(open_regular_file(&home.join("pkg/file"), &file).is_err());
+
+        // A listed directory replaced by a link to one holding the same name.
+        std::fs::rename(home.join("pkg/dir"), home.join("pkg/held/dir")).unwrap();
+        std::os::unix::fs::symlink(home.join("outside"), home.join("pkg/dir")).unwrap();
+        assert!(open_regular_file(&home.join("pkg/dir/secret"), &in_dir).is_err());
+
+        // A FIFO swapped in is refused without waiting for a writer.
+        rustix::fs::mknodat(
+            rustix::fs::CWD,
+            home.join("pkg/fifo"),
+            rustix::fs::FileType::Fifo,
+            rustix::fs::Mode::from_raw_mode(0o600),
+            0,
+        )
+        .unwrap();
+        assert!(open_regular_file(&home.join("pkg/fifo"), &file).is_err());
         let _ = std::fs::remove_dir_all(&home);
     }
 

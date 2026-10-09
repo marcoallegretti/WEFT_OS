@@ -249,7 +249,8 @@ impl fmt::Display for Owner {
     }
 }
 
-/// Where the owner of `app_id` is recorded, beside the app's data.
+/// Where the owner of `app_id` is recorded, beside the app's data. Callers
+/// pass a valid app ID, which cannot leave the owners directory.
 pub fn owner_record_path(data_home: &Path, app_id: &str) -> PathBuf {
     data_home.join("weft/owners").join(app_id)
 }
@@ -308,6 +309,12 @@ pub fn write_owner(record: &Path, owner: Owner) -> Result<(), TrustError> {
 /// owner record of `app_id`, held until the returned file is dropped.
 pub fn lock_owner(data_home: &Path, app_id: &str) -> Result<std::fs::File, TrustError> {
     let dir = data_home.join("weft/owners");
+    if !crate::package::is_valid_app_id(app_id) {
+        return Err(TrustError::Malformed(
+            dir,
+            format!("'{app_id}' is not a valid app ID"),
+        ));
+    }
     std::fs::create_dir_all(&dir).map_err(io(&dir))?;
     let path = dir.join(format!(".{app_id}.lock"));
     let file = std::fs::OpenOptions::new()
