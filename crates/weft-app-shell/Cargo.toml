@@ -27,7 +27,7 @@ toml = { version = "0.8", optional = true }
 
 [dependencies.servo]
 git = "https://github.com/marcoallegretti/servo"
-branch = "servo-weft"
+rev = "f0bb1aaf981b65c8dddc848bb647045d4c777d11"
 optional = true
 default-features = false
 

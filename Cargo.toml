@@ -24,3 +24,17 @@ rust-version = "1.93"
 
 [workspace.lints.rust]
 unsafe_code = "forbid"
+
+# Servo's own [patch] tables do not apply to dependents. The servo fork's
+# backdrop-filter support needs the stylo fork that removes the property's
+# `layout.unimplemented` gate, so the override lives here. Remove it once the
+# change is available from upstream stylo at the revision Servo selects.
+[patch."https://github.com/servo/stylo"]
+selectors = { git = "https://github.com/marcoallegretti/stylo", rev = "f1ba4969536d63f2e319a561e466c03e78b4a076" }
+servo_arc = { git = "https://github.com/marcoallegretti/stylo", rev = "f1ba4969536d63f2e319a561e466c03e78b4a076" }
+stylo = { git = "https://github.com/marcoallegretti/stylo", rev = "f1ba4969536d63f2e319a561e466c03e78b4a076" }
+stylo_atoms = { git = "https://github.com/marcoallegretti/stylo", rev = "f1ba4969536d63f2e319a561e466c03e78b4a076" }
+stylo_dom = { git = "https://github.com/marcoallegretti/stylo", rev = "f1ba4969536d63f2e319a561e466c03e78b4a076" }
+stylo_malloc_size_of = { git = "https://github.com/marcoallegretti/stylo", rev = "f1ba4969536d63f2e319a561e466c03e78b4a076" }
+stylo_static_prefs = { git = "https://github.com/marcoallegretti/stylo", rev = "f1ba4969536d63f2e319a561e466c03e78b4a076" }
+stylo_traits = { git = "https://github.com/marcoallegretti/stylo", rev = "f1ba4969536d63f2e319a561e466c03e78b4a076" }

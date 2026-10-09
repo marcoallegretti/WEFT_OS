@@ -43,7 +43,7 @@ cargo build -p weft-servo-shell --features servo-embed
 cargo build -p weft-app-shell --features servo-embed
 ```
 
-This fetches and compiles the Servo fork (`github.com/marcoallegretti/servo`, branch `servo-weft`). Expect 30–60 minutes on a clean build. Servo's dependencies include SpiderMonkey (C++), which requires `clang` and `python3`.
+This fetches and compiles the Servo and Stylo forks at the revisions recorded in `Cargo.lock` (see `crates/weft-servo-shell/SERVO_PIN.md`). Expect 30–60 minutes on a clean build. Servo's dependencies include SpiderMonkey (C++), which requires `clang` and `python3`.
 
 ## Demo apps (wasm32-wasip2)
 
@@ -86,7 +86,7 @@ Run with QEMU:
 bash infra/vm/run.sh
 ```
 
-See `infra/nixos/weft-packages.nix` for the package derivations. The `outputHashes` entry for the Servo git dependency must be filled in before the `servo-embed` packages will build under Nix.
+See `infra/nixos/weft-packages.nix` for the package derivations. Its `outputHashes` hold one hash per git source in `Cargo.lock` (the Servo and Stylo forks); every package vendors them, so they must match the pinned revisions for any Nix package to build. The Nix shell packages do not yet enable `servo-embed`.
 
 ## CI
 

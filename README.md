@@ -94,7 +94,7 @@ See `docs/security.md`. Key points:
 
 ## Servo fork
 
-- Repository: `https://github.com/marcoallegretti/servo`, branch `servo-weft`
-- Base revision: `04ca254f`
-- Patches: keyboard input, backdrop-filter in stylo
+- Servo: `https://github.com/marcoallegretti/servo` at `f0bb1aaf`, pinned by revision
+- Stylo: `https://github.com/marcoallegretti/stylo` at `f1ba4969`, through the root `[patch]`
+- Patches: `backdrop-filter` parsing (Stylo) and rendering (Servo)
 - See `crates/weft-servo-shell/SERVO_PIN.md` for Servo integration status and known limitations
