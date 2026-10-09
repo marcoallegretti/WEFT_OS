@@ -6,7 +6,7 @@ WEFT OS is a Wayland compositor and application runtime where every app is a Web
 
 **Compositor** — `weft-compositor` is a Smithay-based Wayland compositor with DRM/KMS and winit backends. It implements the `zweft-shell-unstable-v1` protocol extension, which typed shell slots (panel, application) register against.
 
-**System shell** — `weft-servo-shell` embeds Servo (feature-gated, `--features servo-embed`) and renders `system-ui.html` as a Wayland panel. Without `servo-embed`, the binary builds as a no-op stub. Navigation gestures from the compositor are forwarded to `weft-appd` over WebSocket.
+**System shell** — `weft-servo-shell` embeds Servo (feature-gated, `--features servo-embed`) and renders `system-ui.html` as a Wayland panel. Without `servo-embed`, the binary exits with an error instead of rendering. Navigation gestures from the compositor are forwarded to `weft-appd` over WebSocket.
 
 **App shell** — `weft-app-shell` is a per-process Servo host for application WebViews. It resolves `weft-app://<id>/ui/index.html`, injects a `weftIpc` WebSocket bridge into the page, and registers with the compositor as an application surface. Also feature-gated behind `servo-embed`.
 
@@ -77,7 +77,7 @@ See `docs/building.md` for full instructions including Wasm component builds, Ni
 
 Three jobs on every push and pull request:
 
-- `cross-platform` — fmt, clippy, tests on Ubuntu and Windows
+- `portable` — fmt, clippy and tests for the crates that need no Linux system libraries
 - `linux-only` — clippy and tests for compositor and shell crates
 - `servo-embed-linux` — `cargo check --features servo-embed` for both servo crates
 
@@ -94,7 +94,7 @@ See `docs/security.md`. Key points:
 
 ## Servo fork
 
-- Repository: `https://github.com/marcoallegretti/servo`, branch `servo-weft`
-- Base revision: `04ca254f`
-- Patches: keyboard input, backdrop-filter in stylo
+- Servo: `https://github.com/marcoallegretti/servo` at `f0bb1aaf`, pinned by revision
+- Stylo: `https://github.com/marcoallegretti/stylo` at `f1ba4969`, through the root `[patch]`
+- Patches: `backdrop-filter` parsing (Stylo) and rendering (Servo)
 - See `crates/weft-servo-shell/SERVO_PIN.md` for Servo integration status and known limitations
