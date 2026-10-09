@@ -609,6 +609,9 @@ async fn resolve_launch(
 ) -> Result<(launch::LaunchPackage, grants::SessionGrants), grants::Refusal> {
     tokio::task::spawn_blocking(move || {
         let package = launch::resolve(&app_id)?;
+        // Unknown and unsupported capabilities are refused as such, then
+        // unapproved ones, before anything is prepared on the host.
+        grants::validate(&package.capabilities)?;
         check_approval(&app_id, &package.capabilities)?;
         let grants = grants::derive(&app_id, &package.capabilities, grants::HostDirs::from_env)?;
         tracing::info!(
