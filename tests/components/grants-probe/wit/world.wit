@@ -5,4 +5,5 @@ world app {
     import weft:app/fetch@0.1.0;
     import weft:app/notifications@0.1.0;
     import weft:app/clipboard@0.1.0;
+    import weft:app/ipc@0.1.0;
 }

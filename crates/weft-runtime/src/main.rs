@@ -3,6 +3,11 @@ use std::path::PathBuf;
 use anyhow::Context;
 
 mod grants;
+#[cfg(feature = "wasmtime-runtime")]
+mod ipc;
+
+/// The default limit on a component's linear memory, in MiB.
+const DEFAULT_MAX_MEMORY_MIB: usize = 256;
 
 use grants::{Grants, Preopen};
 
@@ -18,7 +23,8 @@ fn main() -> anyhow::Result<()> {
     if args.len() < 3 {
         anyhow::bail!(
             "usage: weft-runtime <app_id> <session_id> --module PATH \
-             [--preopen HOST::GUEST::ro|rw]... [--grant CAPABILITY]... [--ipc-socket PATH]"
+             [--preopen HOST::GUEST::ro|rw]... [--grant CAPABILITY]... [--ipc-socket PATH] \
+             [--max-memory-mib N]"
         );
     }
     let app_id = &args[1];
@@ -30,6 +36,7 @@ fn main() -> anyhow::Result<()> {
     let mut grants = Grants::default();
     let mut ipc_socket: Option<String> = None;
     let mut module: Option<PathBuf> = None;
+    let mut max_memory_mib = DEFAULT_MAX_MEMORY_MIB;
 
     let mut i = 3usize;
     while i < args.len() {
@@ -48,6 +55,17 @@ fn main() -> anyhow::Result<()> {
                 module = Some(PathBuf::from(
                     args.get(i).context("--module requires an argument")?,
                 ));
+            }
+            "--max-memory-mib" => {
+                i += 1;
+                let value = args
+                    .get(i)
+                    .context("--max-memory-mib requires an argument")?;
+                max_memory_mib = value
+                    .parse::<usize>()
+                    .ok()
+                    .filter(|&mib| mib > 0 && mib <= 1 << 20)
+                    .with_context(|| format!("invalid --max-memory-mib: {value}"))?;
             }
             "--ipc-socket" => {
                 i += 1;
@@ -72,7 +90,13 @@ fn main() -> anyhow::Result<()> {
     let wasm_path = module.context("--module is required")?;
 
     tracing::info!(session_id, %app_id, wasm = %wasm_path.display(), "executing module");
-    run_module(&wasm_path, &preopen, grants, ipc_socket.as_deref())?;
+    run_module(
+        &wasm_path,
+        &preopen,
+        grants,
+        ipc_socket.as_deref(),
+        max_memory_mib << 20,
+    )?;
 
     tracing::info!(session_id, %app_id, "exiting");
     Ok(())
@@ -94,6 +118,7 @@ fn run_module(
     _preopen: &[Preopen],
     _grants: Grants,
     _ipc_socket: Option<&str>,
+    _max_memory: usize,
 ) -> anyhow::Result<()> {
     anyhow::bail!(
         "weft-runtime was built without the wasmtime-runtime feature and cannot execute components"
@@ -106,6 +131,7 @@ fn run_module(
     preopen: &[Preopen],
     grants: Grants,
     ipc_socket: Option<&str>,
+    max_memory: usize,
 ) -> anyhow::Result<()> {
     use std::sync::{Arc, Mutex};
     use wasmtime::{
@@ -118,63 +144,10 @@ fn run_module(
     };
     use weft_ipc_types::capability::Access;
 
-    struct IpcState {
-        socket: std::os::unix::net::UnixStream,
-        recv_buf: Vec<u8>,
-    }
-
-    impl IpcState {
-        fn connect(path: &str) -> Option<Self> {
-            let socket = std::os::unix::net::UnixStream::connect(path).ok()?;
-            socket.set_nonblocking(true).ok()?;
-            Some(Self {
-                socket,
-                recv_buf: Vec::new(),
-            })
-        }
-
-        fn send(&mut self, payload: &str) -> Result<(), String> {
-            use std::io::Write;
-            let _ = self.socket.set_nonblocking(false);
-            let mut line = payload.to_owned();
-            line.push('\n');
-            let result = self
-                .socket
-                .write_all(line.as_bytes())
-                .map_err(|e| e.to_string());
-            let _ = self.socket.set_nonblocking(true);
-            result
-        }
-
-        fn recv(&mut self) -> Option<String> {
-            use std::io::Read;
-            let mut chunk = [0u8; 4096];
-            loop {
-                match self.socket.read(&mut chunk) {
-                    Ok(0) => break,
-                    Ok(n) => self.recv_buf.extend_from_slice(&chunk[..n]),
-                    Err(e)
-                        if e.kind() == std::io::ErrorKind::WouldBlock
-                            || e.kind() == std::io::ErrorKind::TimedOut =>
-                    {
-                        break;
-                    }
-                    Err(_) => break,
-                }
-            }
-            if let Some(pos) = self.recv_buf.iter().position(|&b| b == b'\n') {
-                let raw: Vec<u8> = self.recv_buf.drain(..=pos).collect();
-                return String::from_utf8(raw)
-                    .ok()
-                    .map(|s| s.trim_end_matches('\n').trim_end_matches('\r').to_owned());
-            }
-            None
-        }
-    }
-
     struct State {
         ctx: WasiCtx,
         table: ResourceTable,
+        limits: wasmtime::StoreLimits,
     }
 
     impl IoView for State {
@@ -199,7 +172,7 @@ fn run_module(
     let grants = Arc::new(grants);
     let mut linker: Linker<State> = Linker::new(&engine);
     add_to_linker_sync(&mut linker).context("add WASI to linker")?;
-    let ipc_state: Arc<Mutex<Option<IpcState>>> = Arc::new(Mutex::new(None));
+    let ipc_state: Arc<Mutex<Option<ipc::IpcState>>> = Arc::new(Mutex::new(None));
 
     {
         let ipc_send = Arc::clone(&ipc_state);
@@ -223,6 +196,9 @@ fn run_module(
                 move |_: wasmtime::StoreContextMut<'_, State>,
                       (payload,): (String,)|
                       -> wasmtime::Result<(Result<(), String>,)> {
+                    if let Err(e) = ipc::check_payload(&payload) {
+                        return Ok((Err(e),));
+                    }
                     let mut guard = ipc_send.lock().unwrap_or_else(|p| p.into_inner());
                     match guard.as_mut() {
                         Some(ipc) => Ok((ipc.send(&payload),)),
@@ -316,7 +292,7 @@ fn run_module(
 
     if let Some(socket_path) = ipc_socket {
         ctx_builder.env("WEFT_IPC_SOCKET", socket_path);
-        if let Some(ipc) = IpcState::connect(socket_path) {
+        if let Some(ipc) = ipc::IpcState::connect(socket_path) {
             *ipc_state.lock().unwrap_or_else(|p| p.into_inner()) = Some(ipc);
         } else {
             tracing::warn!("weft:app/ipc: could not connect to IPC socket {socket_path}");
@@ -343,8 +319,16 @@ fn run_module(
         State {
             ctx,
             table: ResourceTable::new(),
+            // A memory or table that would grow past the limit does not
+            // grow: the component sees an allocation failure.
+            limits: wasmtime::StoreLimitsBuilder::new()
+                .memory_size(max_memory)
+                .table_elements(100_000)
+                .instances(1_000)
+                .build(),
         },
     );
+    store.limiter(|state| &mut state.limits);
 
     let command =
         Command::instantiate(&mut store, &component, &linker).context("instantiate component")?;
@@ -602,6 +586,7 @@ mod tests {
             &[],
             Grants::default(),
             None,
+            DEFAULT_MAX_MEMORY_MIB << 20,
         )
         .expect_err("a build without wasmtime-runtime must not report success");
         assert!(err.to_string().contains("wasmtime-runtime"));

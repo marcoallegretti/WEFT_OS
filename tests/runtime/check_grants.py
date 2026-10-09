@@ -18,7 +18,10 @@ scenario passes a different set of `--grant` and `--preopen` arguments:
   status (200, 404, and 302 without following the redirect to another
   host); requests to another host, a forged `Host` header, a method that
   injects a request line and a `file:` URL are refused;
-- a wildcard fetch grant: the other host is reachable.
+- a wildcard fetch grant: the other host is reachable;
+- limits: an allocation beyond the default memory limit (256 MiB) fails
+  inside the component, and succeeds with `--max-memory-mib 512`; app
+  messages longer than 64 KiB or containing a line break are refused.
 
 It also checks that the runtime refuses, with a specific error, filesystem
 capabilities passed as `--grant`, unknown capabilities and preopens
@@ -147,11 +150,19 @@ def check(runner, data):
     _, probes = runner.run("--grant", "net:fetch:*")
     expect(probes, "fetch-other-host", True, contains="200")
 
+    _, probes = runner.run()
+    expect(probes, "memory-grow", False)
+    expect(probes, "ipc-newline", False, contains="line break")
+    expect(probes, "ipc-oversize", False, contains="exceeds")
+    _, probes = runner.run("--max-memory-mib", "512")
+    expect(probes, "memory-grow", True)
+
     for arguments, message in (
             (["--grant", "fs:rw:app-data"], "is not granted through --grant"),
             (["--preopen", f"{data}::/data"], "--preopen expects HOST::GUEST::ro|rw"),
             (["--preopen", f"{data}::/data::wx"], "--preopen mode must be ro or rw"),
-            (["--grant", "sys:everything"], "unknown capability 'sys:everything'")):
+            (["--grant", "sys:everything"], "unknown capability 'sys:everything'"),
+            (["--max-memory-mib", "0"], "invalid --max-memory-mib")):
         result, _ = runner.run(*arguments, expect_success=False)
         if result.returncode == 0 or message not in result.stderr:
             raise AssertionError(f"runtime did not refuse {' '.join(arguments)} with "

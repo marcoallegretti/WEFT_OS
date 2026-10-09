@@ -1,6 +1,6 @@
-//! Test component that calls every grant-controlled operation once and
-//! prints one `PROBE <name> ok <detail>` or `PROBE <name> err <message>`
-//! line for each.
+//! Test component that calls every grant-controlled operation once, and
+//! probes the runtime's memory and message limits, then prints one
+//! `PROBE <name> ok <detail>` or `PROBE <name> err <message>` line for each.
 //!
 //! Fetch targets are read from `/probe/targets.txt` (`<name> <url>` per
 //! line), a directory the harness preopens read-only next to the grants
@@ -13,7 +13,10 @@ wit_bindgen::generate!({
     generate_all,
 });
 
-use weft::app::{clipboard, fetch, notifications, notify};
+use weft::app::{clipboard, fetch, ipc, notifications, notify};
+
+/// An allocation larger than the runtime's default memory limit.
+const MEMORY_PROBE: usize = 300 << 20;
 
 fn report<T: std::fmt::Debug, E: std::fmt::Display>(name: &str, result: Result<T, E>) {
     match result {
@@ -49,6 +52,14 @@ fn main() {
             );
         }
     }
+    let mut big: Vec<u8> = Vec::new();
+    report(
+        "memory-grow",
+        big.try_reserve(MEMORY_PROBE).map(|()| big.capacity()),
+    );
+    drop(big);
+    report("ipc-newline", ipc::send("two\nmessages"));
+    report("ipc-oversize", ipc::send(&"x".repeat(64 * 1024 + 1)));
     report(
         "fetch-file-scheme",
         fetch::fetch("file:///etc/hostname", "GET", &[], None).map(|r| r.status),

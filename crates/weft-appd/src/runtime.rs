@@ -163,6 +163,8 @@ const SYSTEMD_SCOPE_ARGS: &[&str] = &[
     "CPUQuota=200%",
     "-p",
     "MemoryMax=512M",
+    "-p",
+    "TasksMax=64",
 ];
 
 fn systemd_cgroup_available() -> bool {
