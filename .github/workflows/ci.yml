@@ -7,15 +7,9 @@ on:
   pull_request:
 
 jobs:
-  # Crates that must compile on every supported host platform.
-  cross-platform:
-    runs-on: ${{ matrix.os }}
-    strategy:
-      fail-fast: false
-      matrix:
-        os:
-          - ubuntu-latest
-          - windows-latest
+  # Crates that build without Wayland or other Linux system libraries.
+  portable:
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -24,14 +18,14 @@ jobs:
           components: rustfmt, clippy
       - name: cargo fmt
         run: cargo fmt --all --check
-      - name: cargo clippy (cross-platform crates)
+      - name: cargo clippy (portable crates)
         run: >
           cargo clippy --workspace
           --exclude weft-compositor
           --exclude weft-servo-shell
           --exclude weft-app-shell
           --all-targets -- -D warnings
-      - name: cargo test (cross-platform crates)
+      - name: cargo test (portable crates)
         run: >
           cargo test --workspace
           --exclude weft-compositor

@@ -1,20 +1,22 @@
-#![cfg(feature = "servo-embed")]
-
+use std::num::NonZeroU32;
 use std::path::PathBuf;
 use std::rc::Rc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 use servo::{
-    EventLoopWaker, InputEvent, MouseButton as ServoMouseButton, MouseButtonAction,
-    MouseButtonEvent, MouseMoveEvent, ServoBuilder, ServoDelegate, ServoUrl, UserContentManager,
+    DeviceIntRect, DeviceIntSize, DevicePoint, EventLoopWaker, InputEvent, LoadStatus,
+    MouseButton as ServoMouseButton, MouseButtonAction, MouseButtonEvent, MouseMoveEvent,
+    RenderingContext, RgbaImage, ServoBuilder, ServoDelegate, ServoUrl, UserContentManager,
     UserScript, WebViewBuilder, WebViewDelegate,
 };
 use winit::{
     application::ApplicationHandler,
+    dpi::PhysicalSize,
     event::{ElementState, MouseButton, WindowEvent},
     event_loop::{ActiveEventLoop, EventLoop, EventLoopProxy},
     keyboard::ModifiersState,
-    platform::wayland::{ActiveEventLoopExtWayland, WindowExtWayland},
+    raw_window_handle::{HasDisplayHandle, HasWindowHandle, RawDisplayHandle, RawWindowHandle},
     window::{Window, WindowAttributes, WindowId},
 };
 
@@ -48,29 +50,133 @@ impl ServoDelegate for WeftServoDelegate {
     }
 }
 
+/// Frame and load progress reported by Servo, shared with the event loop.
+#[derive(Default)]
+struct FrameSignals {
+    /// A new frame is waiting to be painted.
+    redraw: AtomicBool,
+    /// Servo has requested at least one repaint.
+    content: AtomicBool,
+    /// The document has loaded and Servo reports its rendering is up to date.
+    settled: AtomicBool,
+}
+
 struct WeftWebViewDelegate {
-    redraw_requested: Arc<std::sync::atomic::AtomicBool>,
+    signals: Arc<FrameSignals>,
 }
 
 impl WebViewDelegate for WeftWebViewDelegate {
     fn notify_new_frame_ready(&self, _webview: servo::WebView) {
-        self.redraw_requested
-            .store(true, std::sync::atomic::Ordering::Relaxed);
+        self.signals.content.store(true, Ordering::Relaxed);
+        self.signals.redraw.store(true, Ordering::Relaxed);
+    }
+
+    fn notify_load_status_changed(&self, webview: servo::WebView, status: LoadStatus) {
+        if status != LoadStatus::Complete {
+            return;
+        }
+        // Servo completes a screenshot request only once every frame has fired
+        // `load`, render-blocking resources, images and web fonts are done and
+        // the rendering is up to date, which is the readiness this host reports.
+        let signals = Arc::clone(&self.signals);
+        webview.take_screenshot(None, move |result| match result {
+            Ok(_) => {
+                signals.settled.store(true, Ordering::Relaxed);
+                signals.redraw.store(true, Ordering::Relaxed);
+            }
+            Err(e) => tracing::error!(?e, "document rendering did not settle; not ready"),
+        });
     }
 }
 
+/// Servo preferences shared by the WEFT hosts.
+fn host_preferences() -> servo::Preferences {
+    servo::Preferences {
+        // The system UI and application pages lay out with CSS Grid, which
+        // Servo disables by default.
+        layout_grid_enabled: true,
+        ..Default::default()
+    }
+}
+
+// ── Rendering ───────────────────────────────────────────────────────────────
+
+type BlitSurface = softbuffer::Surface<Arc<Window>, Arc<Window>>;
+
 enum RenderingCtx {
-    Software(Rc<servo::SoftwareRenderingContext>),
+    /// Servo renders offscreen; each frame is read back and copied to the window.
+    Software {
+        context: Rc<servo::SoftwareRenderingContext>,
+        surface: BlitSurface,
+    },
+    /// Servo renders directly to the window's EGL surface.
     Egl(Rc<servo::WindowRenderingContext>),
 }
 
 impl RenderingCtx {
-    fn as_dyn(&self) -> Rc<dyn servo::RenderingContext> {
+    fn as_dyn(&self) -> Rc<dyn RenderingContext> {
         match self {
-            Self::Software(rc) => Rc::clone(rc) as Rc<dyn servo::RenderingContext>,
-            Self::Egl(rc) => Rc::clone(rc) as Rc<dyn servo::RenderingContext>,
+            Self::Software { context, .. } => Rc::clone(context) as Rc<dyn RenderingContext>,
+            Self::Egl(context) => Rc::clone(context) as Rc<dyn RenderingContext>,
         }
     }
+
+    /// Paints the webview into this context and presents the frame on the window.
+    fn paint_and_present(&mut self, webview: &servo::WebView) -> Result<(), String> {
+        match self {
+            Self::Software { context, surface } => {
+                context
+                    .make_current()
+                    .map_err(|e| format!("make_current: {e:?}"))?;
+                webview.paint();
+                let size = context.size();
+                let rect = DeviceIntRect::from_size(DeviceIntSize::new(
+                    size.width as i32,
+                    size.height as i32,
+                ));
+                let image = context.read_to_image(rect);
+                context.present();
+                let image = image.ok_or("frame readback failed")?;
+                blit(surface, &image)
+            }
+            Self::Egl(context) => {
+                context
+                    .make_current()
+                    .map_err(|e| format!("make_current: {e:?}"))?;
+                webview.paint();
+                context.present();
+                Ok(())
+            }
+        }
+    }
+}
+
+/// Copies an RGBA frame into the window's software surface and presents it.
+fn blit(surface: &mut BlitSurface, image: &RgbaImage) -> Result<(), String> {
+    let (width, height) = image.dimensions();
+    let (Some(w), Some(h)) = (NonZeroU32::new(width), NonZeroU32::new(height)) else {
+        return Ok(());
+    };
+    surface.resize(w, h).map_err(|e| format!("resize: {e}"))?;
+    let mut buffer = surface.buffer_mut().map_err(|e| format!("buffer: {e}"))?;
+    for (dst, src) in buffer.iter_mut().zip(image.as_raw().chunks_exact(4)) {
+        *dst = u32::from(src[0]) << 16 | u32::from(src[1]) << 8 | u32::from(src[2]);
+    }
+    buffer.present().map_err(|e| format!("present: {e}"))
+}
+
+/// Returns winit's `wl_display` and `wl_surface` pointers when running on Wayland.
+fn wayland_handles(
+    event_loop: &ActiveEventLoop,
+    window: &Window,
+) -> Option<(*mut std::ffi::c_void, *mut std::ffi::c_void)> {
+    let RawDisplayHandle::Wayland(display) = event_loop.display_handle().ok()?.as_raw() else {
+        return None;
+    };
+    let RawWindowHandle::Wayland(surface) = window.window_handle().ok()?.as_raw() else {
+        return None;
+    };
+    Some((display.display.as_ptr(), surface.surface.as_ptr()))
 }
 
 struct App {
@@ -82,12 +188,12 @@ struct App {
     servo: Option<servo::Servo>,
     webview: Option<servo::WebView>,
     rendering_context: Option<RenderingCtx>,
-    redraw_requested: Arc<std::sync::atomic::AtomicBool>,
+    signals: Arc<FrameSignals>,
     waker: WeftEventLoopWaker,
     shutting_down: bool,
     ready_signalled: bool,
     modifiers: ModifiersState,
-    cursor_pos: servo::euclid::default::Point2D<f32>,
+    cursor_pos: DevicePoint,
     shell_client: Option<crate::shell_client::ShellClient>,
 }
 
@@ -108,47 +214,46 @@ impl App {
             servo: None,
             webview: None,
             rendering_context: None,
-            redraw_requested: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            signals: Arc::default(),
             waker,
             shutting_down: false,
             ready_signalled: false,
             modifiers: ModifiersState::default(),
-            cursor_pos: servo::euclid::default::Point2D::zero(),
+            cursor_pos: DevicePoint::origin(),
             shell_client: None,
         }
     }
 
-    fn render_frame(window: &Arc<Window>, ctx: &RenderingCtx) {
-        match ctx {
-            RenderingCtx::Software(rc) => Self::blit_software(window, rc),
-            RenderingCtx::Egl(_) => {}
+    /// Paints and presents once Servo has requested its first repaint.
+    ///
+    /// Nothing is presented before that request; the first frames can still be
+    /// blank or unstyled while the document loads. READY is printed after a
+    /// frame is presented once the document has loaded and its rendering has
+    /// settled.
+    fn render_frame(&mut self) {
+        if !self.signals.content.load(Ordering::Relaxed) {
+            return;
+        }
+        let (Some(webview), Some(context)) = (&self.webview, &mut self.rendering_context) else {
+            return;
+        };
+        if let Err(e) = context.paint_and_present(webview) {
+            tracing::warn!("frame not presented: {e}");
+            return;
+        }
+        if !self.ready_signalled && self.signals.settled.load(Ordering::Relaxed) {
+            self.ready_signalled = true;
+            println!("READY");
+            use std::io::Write;
+            let _ = std::io::stdout().flush();
         }
     }
 
-    fn blit_software(window: &Arc<Window>, rendering_context: &servo::SoftwareRenderingContext) {
-        let size = window.inner_size();
-        let Some(pixels) = rendering_context.read_pixels() else {
-            return;
-        };
-        let Ok(ctx) = softbuffer::Context::new(Arc::clone(window)) else {
-            tracing::warn!("softbuffer context creation failed; skipping frame");
-            return;
-        };
-        let Ok(mut surface) = softbuffer::Surface::new(&ctx, Arc::clone(window)) else {
-            tracing::warn!("softbuffer surface creation failed; skipping frame");
-            return;
-        };
-        let _ = surface.resize(
-            std::num::NonZeroU32::new(size.width).unwrap_or(std::num::NonZeroU32::MIN),
-            std::num::NonZeroU32::new(size.height).unwrap_or(std::num::NonZeroU32::MIN),
-        );
-        let Ok(mut buf) = surface.buffer_mut() else {
-            return;
-        };
-        for (dst, src) in buf.iter_mut().zip(pixels.chunks(4)) {
-            *dst = u32::from_be_bytes([0, src[0], src[1], src[2]]);
-        }
-        let _ = buf.present();
+    /// Drops the webview and Servo; dropping the last `Servo` handle shuts it down.
+    fn shut_down(&mut self) {
+        self.shutting_down = true;
+        self.webview = None;
+        self.servo = None;
     }
 }
 
@@ -171,23 +276,22 @@ impl ApplicationHandler<ServoWake> for App {
         let size = window.inner_size();
         self.window = Some(Arc::clone(&window));
 
-        if self.shell_client.is_none() {
-            if let (Some(disp), Some(surf)) =
-                (event_loop.wayland_display(), window.wayland_surface())
-            {
-                match crate::shell_client::ShellClient::connect_as_app_with_display(
-                    &self.app_id,
-                    self.session_id,
-                    disp,
-                    surf,
-                ) {
-                    Ok(sc) => self.shell_client = Some(sc),
-                    Err(e) => tracing::warn!(error = %e, "shell protocol unavailable"),
-                }
+        if self.shell_client.is_none()
+            && let Some((disp, surf)) = wayland_handles(event_loop, &window)
+        {
+            match crate::shell_client::ShellClient::connect_as_app_with_display(
+                &self.app_id,
+                self.session_id,
+                disp,
+                surf,
+            ) {
+                Ok(sc) => self.shell_client = Some(sc),
+                Err(e) => tracing::warn!(error = %e, "shell protocol unavailable"),
             }
         }
 
         let servo = ServoBuilder::default()
+            .preferences(host_preferences())
             .event_loop_waker(Box::new(self.waker.clone()))
             .build();
 
@@ -212,22 +316,15 @@ impl ApplicationHandler<ServoWake> for App {
 
         let webview = WebViewBuilder::new(&servo, rendering_context.as_dyn())
             .delegate(Rc::new(WeftWebViewDelegate {
-                redraw_requested: Arc::clone(&self.redraw_requested),
+                signals: Arc::clone(&self.signals),
             }))
             .user_content_manager(ucm)
-            .url(self.url.clone())
+            .url(self.url.clone().into_url())
             .build();
 
         self.servo = Some(servo);
         self.webview = Some(webview);
         self.rendering_context = Some(rendering_context);
-
-        if !self.ready_signalled {
-            self.ready_signalled = true;
-            println!("READY");
-            use std::io::Write;
-            let _ = std::io::stdout().flush();
-        }
     }
 
     fn user_event(&mut self, _event_loop: &ActiveEventLoop, _event: ServoWake) {
@@ -241,28 +338,26 @@ impl ApplicationHandler<ServoWake> for App {
             event_loop.exit();
             return;
         }
+        let mut compositor_closed = false;
         if let Some(sc) = &mut self.shell_client {
             match sc.dispatch_pending() {
-                Ok(false) => {
-                    self.shutting_down = true;
-                    if let Some(servo) = &self.servo {
-                        servo.start_shutting_down();
-                    }
-                }
+                Ok(false) => compositor_closed = true,
                 Err(e) => tracing::warn!("shell client dispatch error: {e}"),
                 Ok(true) => {}
             }
         }
+        if compositor_closed {
+            self.shut_down();
+            event_loop.exit();
+            return;
+        }
         if let Some(servo) = &self.servo {
             servo.spin_event_loop();
         }
-        if self
-            .redraw_requested
-            .swap(false, std::sync::atomic::Ordering::Relaxed)
+        if self.signals.redraw.swap(false, Ordering::Relaxed)
+            && let Some(w) = &self.window
         {
-            if let Some(w) = &self.window {
-                w.request_redraw();
-            }
+            w.request_redraw();
         }
     }
 
@@ -273,18 +368,13 @@ impl ApplicationHandler<ServoWake> for App {
         event: WindowEvent,
     ) {
         match event {
-            WindowEvent::RedrawRequested => {
-                if let (Some(window), Some(servo)) = (&self.window, &self.servo) {
-                    if let Some(rc) = &self.rendering_context {
-                        Self::render_frame(window, rc);
-                    }
-                    servo.spin_event_loop();
-                }
-            }
+            WindowEvent::RedrawRequested => self.render_frame(),
             WindowEvent::Resized(new_size) => {
-                let sz = servo::euclid::Size2D::new(new_size.width, new_size.height);
+                if new_size.width == 0 || new_size.height == 0 {
+                    return;
+                }
                 if let Some(wv) = &self.webview {
-                    wv.resize(sz);
+                    wv.resize(new_size);
                 }
             }
             WindowEvent::ModifiersChanged(mods) => {
@@ -297,10 +387,11 @@ impl ApplicationHandler<ServoWake> for App {
                 }
             }
             WindowEvent::CursorMoved { position, .. } => {
-                let pt = servo::euclid::default::Point2D::new(position.x as f32, position.y as f32);
+                let pt = DevicePoint::new(position.x as f32, position.y as f32);
                 self.cursor_pos = pt;
                 if let Some(wv) = &self.webview {
-                    let _ = wv.notify_input_event(InputEvent::MouseMove(MouseMoveEvent::new(pt)));
+                    let _ = wv
+                        .notify_input_event(InputEvent::MouseMove(MouseMoveEvent::new(pt.into())));
                 }
             }
             WindowEvent::MouseInput { state, button, .. } => {
@@ -311,22 +402,19 @@ impl ApplicationHandler<ServoWake> for App {
                     _ => return,
                 };
                 let action = match state {
-                    ElementState::Pressed => MouseButtonAction::Click,
+                    ElementState::Pressed => MouseButtonAction::Down,
                     ElementState::Released => MouseButtonAction::Up,
                 };
                 if let Some(wv) = &self.webview {
                     let _ = wv.notify_input_event(InputEvent::MouseButton(MouseButtonEvent::new(
                         action,
                         btn,
-                        self.cursor_pos.cast_unit(),
+                        self.cursor_pos.into(),
                     )));
                 }
             }
             WindowEvent::CloseRequested => {
-                self.shutting_down = true;
-                if let Some(servo) = &self.servo {
-                    servo.start_shutting_down();
-                }
+                self.shut_down();
                 event_loop.exit();
             }
             _ => {}
@@ -337,7 +425,7 @@ impl ApplicationHandler<ServoWake> for App {
 fn build_rendering_ctx(
     event_loop: &ActiveEventLoop,
     window: &Arc<Window>,
-    size: winit::dpi::PhysicalSize<u32>,
+    size: PhysicalSize<u32>,
 ) -> Option<RenderingCtx> {
     if std::env::var_os("WEFT_EGL_RENDERING").is_some() {
         let display_handle = event_loop.display_handle();
@@ -349,16 +437,26 @@ fn build_rendering_ctx(
                     return Some(RenderingCtx::Egl(Rc::new(rc)));
                 }
                 Err(e) => {
-                    tracing::warn!("EGL rendering context failed ({e}), falling back to software");
+                    tracing::warn!(
+                        "EGL rendering context failed ({e:?}), falling back to software"
+                    );
                 }
             }
         }
     }
-    match servo::SoftwareRenderingContext::new(servo::euclid::Size2D::new(size.width, size.height))
-    {
-        Ok(rc) => Some(RenderingCtx::Software(Rc::new(rc))),
+    let context = match servo::SoftwareRenderingContext::new(size) {
+        Ok(rc) => Rc::new(rc),
         Err(e) => {
-            tracing::error!("SoftwareRenderingContext failed: {e}");
+            tracing::error!("SoftwareRenderingContext failed: {e:?}");
+            return None;
+        }
+    };
+    let surface = softbuffer::Context::new(Arc::clone(window))
+        .and_then(|display| softbuffer::Surface::new(&display, Arc::clone(window)));
+    match surface {
+        Ok(surface) => Some(RenderingCtx::Software { context, surface }),
+        Err(e) => {
+            tracing::error!("software presentation surface failed: {e}");
             None
         }
     }

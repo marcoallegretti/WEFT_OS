@@ -215,8 +215,4 @@ impl ShellClient {
         self.event_queue.flush().context("Wayland flush")?;
         Ok(!self.data.window_state.closed)
     }
-
-    pub fn window_state(&self) -> &ShellWindowState {
-        &self.data.window_state
-    }
 }
