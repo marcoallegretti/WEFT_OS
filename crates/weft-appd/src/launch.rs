@@ -486,6 +486,19 @@ mod tests {
     }
 
     #[test]
+    fn a_first_launch_without_a_usable_home_records_nothing() {
+        let _env = crate::tests::env_lock().blocking_lock();
+        let store = demo_store("no_home", true);
+        // SAFETY: env_lock is held; finish restores HOME.
+        unsafe { std::env::set_var("HOME", "relative") };
+        let refused = refusal(resolve(DEMO));
+        let owner = read_owner(&owner_record_path(&store.join("share"), DEMO)).unwrap();
+        finish(&store);
+        assert_eq!(refused.code, 500, "{}", refused.message);
+        assert_eq!(owner, None);
+    }
+
+    #[test]
     fn only_the_signed_manifest_is_accepted() {
         let _env = crate::tests::env_lock().blocking_lock();
         let store = demo_store("manifest", true);

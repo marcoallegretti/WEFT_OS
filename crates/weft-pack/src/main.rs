@@ -490,6 +490,10 @@ fn admit(
             "{app_id} belongs to {existing}; this package is {owner}. Its app data stays with \
              its owner, so another publisher or a development build cannot take the ID over"
         ),
+        None if claim_data => {
+            write_owner(&record, owner)?;
+            Some(record)
+        }
         None => {
             // Data in the earlier layout counts: weft-appd moves it to the
             // app's data directory when the app next launches.
@@ -498,7 +502,7 @@ fn admit(
             )?;
             let existing = weft_ipc_types::package::existing_app_data(data_home, &home, app_id)
                 .with_context(|| format!("inspect the app data of {app_id}"))?;
-            if let Some(data) = existing.filter(|_| !claim_data) {
+            if let Some(data) = existing {
                 anyhow::bail!(
                     "{} holds app data for {app_id} with no recorded owner; install with \
                      --claim-data to give it to {owner}, or move it aside",
@@ -1430,6 +1434,24 @@ mod tests {
         })
         .unwrap();
         assert_eq!(owner_of(&home, app_id), Some(Owner::Development));
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn a_first_install_without_a_usable_home_records_nothing() {
+        let home = temp_root("no_home");
+        let app_id = "org.weft.test.nohome";
+        write_package(&home.join("src"), app_id, "");
+        let store = home.join("store");
+        let refused = with_home(&home, || {
+            // SAFETY: with_home holds env_lock and restores HOME afterwards.
+            unsafe { std::env::set_var("HOME", "relative") };
+            install_package_to(&home.join("src"), &store, InstallMode::Development)
+        });
+        let message = format!("{:#}", refused.unwrap_err());
+        assert!(message.contains("HOME"), "{message}");
+        assert_eq!(owner_of(&home, app_id), None);
+        assert!(!store.join(app_id).exists());
         let _ = std::fs::remove_dir_all(&home);
     }
 
