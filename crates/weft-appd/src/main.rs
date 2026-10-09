@@ -514,15 +514,31 @@ pub(crate) async fn dispatch(req: Request, registry: &Registry) -> Response {
             session_id,
             payload,
         } => {
-            if let Some(tx) = registry.lock().await.ipc_sender_for(session_id)
-                && tx.send(payload).await.is_err()
-            {
-                tracing::warn!(session_id, "IPC relay sender closed");
-                registry.lock().await.remove_ipc_sender(session_id);
-            }
-            Response::AppState {
-                session_id,
-                state: ipc::AppStateKind::Running,
+            // The registry lock is released before sending; a component that
+            // stops reading must not stall appd.
+            let sender = registry.lock().await.ipc_sender_for(session_id);
+            let Some(tx) = sender else {
+                return Response::Error {
+                    code: 1,
+                    message: format!("session {session_id} has no IPC relay"),
+                };
+            };
+            match tx.try_send(payload) {
+                Ok(()) => Response::AppState {
+                    session_id,
+                    state: ipc::AppStateKind::Running,
+                },
+                Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => Response::Error {
+                    code: 1,
+                    message: format!("session {session_id} is not reading messages"),
+                },
+                Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {
+                    registry.lock().await.remove_ipc_sender(session_id);
+                    Response::Error {
+                        code: 1,
+                        message: format!("session {session_id} has no IPC relay"),
+                    }
+                }
             }
         }
         Request::PanelGesture {
@@ -622,9 +638,10 @@ mod tests {
     /// socket. Callers hold env_lock.
     fn use_test_runtime_dir() {
         let dir =
-            std::env::temp_dir().join(format!("weft_test_runtime_dir_{}", std::process::id()));
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/test-runtime-dir");
         std::fs::create_dir_all(&dir).unwrap();
-        // SAFETY: callers hold env_lock on a current_thread runtime.
+        // SAFETY: env_lock serialises the tests that change the environment,
+        // and std serialises the environment accesses themselves.
         unsafe { std::env::set_var("XDG_RUNTIME_DIR", &dir) };
     }
 
@@ -997,6 +1014,106 @@ mod tests {
     }
 
     #[cfg(unix)]
+    #[tokio::test]
+    async fn ipc_forward_never_waits_on_a_component() {
+        let registry = make_registry();
+        let forward = |session_id| Request::IpcForward {
+            session_id,
+            payload: "x".into(),
+        };
+        let reply = dispatch(forward(7), &registry).await;
+        assert!(matches!(reply, Response::Error { .. }), "{reply:?}");
+
+        let (tx, _rx) = tokio::sync::mpsc::channel(1);
+        registry.lock().await.register_ipc_sender(7, tx);
+        assert!(matches!(
+            dispatch(forward(7), &registry).await,
+            Response::AppState { .. }
+        ));
+        // The queue is full and nothing reads it: the reply comes at once.
+        let reply = tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            dispatch(forward(7), &registry),
+        )
+        .await
+        .expect("IPC_FORWARD blocked");
+        assert!(matches!(reply, Response::Error { .. }), "{reply:?}");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_closed_ipc_connection_ends_the_session() {
+        use std::os::unix::fs::PermissionsExt;
+        let _env = env_lock().lock().await;
+        use_test_runtime_dir();
+        let dir = std::env::temp_dir().join(format!("weft_test_ipc_close_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        // The runtime connects to its IPC socket ($4), closes the connection
+        // and keeps running; the app shell just reports ready.
+        let runtime = dir.join("runtime.sh");
+        std::fs::write(
+            &runtime,
+            "#!/bin/sh\necho READY $WEFT_READY_TOKEN\n\
+             python3 -c 'import socket,sys; s=socket.socket(socket.AF_UNIX); \
+             s.connect(sys.argv[1]); s.close()' \"$4\"\nexec sleep 30\n",
+        )
+        .unwrap();
+        let shell = dir.join("shell.sh");
+        std::fs::write(
+            &shell,
+            "#!/bin/sh\necho READY $WEFT_READY_TOKEN\nexec sleep 30\n",
+        )
+        .unwrap();
+        for script in [&runtime, &shell] {
+            std::fs::set_permissions(script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        let prior: Vec<_> = [
+            "WEFT_RUNTIME_BIN",
+            "WEFT_APP_SHELL_BIN",
+            "WEFT_DISABLE_CGROUP",
+        ]
+        .iter()
+        .map(|k| (*k, std::env::var_os(k)))
+        .collect();
+        // SAFETY: env_lock serialises the tests that change the environment.
+        unsafe {
+            std::env::set_var("WEFT_RUNTIME_BIN", &runtime);
+            std::env::set_var("WEFT_APP_SHELL_BIN", &shell);
+            std::env::set_var("WEFT_DISABLE_CGROUP", "1");
+        }
+
+        let registry = make_registry();
+        let session_id = registry.lock().await.launch("test.app");
+        let abort_rx = registry.lock().await.register_abort(session_id);
+        let finished = tokio::time::timeout(
+            std::time::Duration::from_secs(15),
+            runtime::supervise(
+                session_id,
+                "test.app",
+                grants::SessionGrants::default(),
+                Arc::clone(&registry),
+                abort_rx,
+                None,
+            ),
+        )
+        .await;
+
+        for (key, value) in prior {
+            // SAFETY: as above.
+            unsafe {
+                match value {
+                    Some(v) => std::env::set_var(key, v),
+                    None => std::env::remove_var(key),
+                }
+            }
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(finished.is_ok(), "the session outlived its IPC connection");
+        assert!(matches!(
+            registry.lock().await.state(session_id),
+            AppStateKind::Stopped
+        ));
+    }
+
     #[tokio::test(flavor = "current_thread")]
     async fn a_stopped_session_releases_its_ipc_relay() {
         use std::os::unix::fs::PermissionsExt;
@@ -1019,10 +1136,10 @@ mod tests {
         .unwrap();
         std::fs::set_permissions(&child, std::fs::Permissions::from_mode(0o755)).unwrap();
         let vars = [
-            ("WEFT_RUNTIME_BIN", child.as_os_str()),
-            ("WEFT_APP_SHELL_BIN", child.as_os_str()),
-            ("WEFT_DISABLE_CGROUP", std::ffi::OsStr::new("1")),
-            ("WEFT_APP_STORE", dir.join("store").into_os_string().leak()),
+            ("WEFT_RUNTIME_BIN", child.clone().into_os_string()),
+            ("WEFT_APP_SHELL_BIN", child.clone().into_os_string()),
+            ("WEFT_DISABLE_CGROUP", "1".into()),
+            ("WEFT_APP_STORE", dir.join("store").into_os_string()),
         ];
         let prior: Vec<_> = vars
             .iter()

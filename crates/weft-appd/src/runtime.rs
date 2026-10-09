@@ -17,7 +17,15 @@ pub(crate) struct IpcRelay {
 }
 
 impl IpcRelay {
-    fn close(self) {
+    /// Completes when the relay stops: the component closed its connection
+    /// or the listener failed.
+    async fn ended(&mut self) {
+        let _ = (&mut self.task).await;
+    }
+}
+
+impl Drop for IpcRelay {
+    fn drop(&mut self) {
         self.task.abort();
         let _ = std::fs::remove_file(&self.socket_path);
     }
@@ -34,6 +42,10 @@ pub(crate) fn spawn_ipc_relay(
 ) -> std::io::Result<(tokio::sync::mpsc::Sender<String>, IpcRelay)> {
     let _ = std::fs::remove_file(&socket_path);
     let listener = tokio::net::UnixListener::bind(&socket_path)?;
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&socket_path, std::fs::Permissions::from_mode(0o600))?;
+    }
     let (html_to_wasm_tx, mut html_to_wasm_rx) = tokio::sync::mpsc::channel::<String>(64);
     let task = tokio::spawn(async move {
         let Ok((stream, _)) = listener.accept().await else {
@@ -410,6 +422,9 @@ pub(crate) async fn supervise(
             format!("app shell exited ({status:?})")
         }
         _ = &mut abort_rx => "terminate requested".to_owned(),
+        _ = session.relay.as_mut().expect("relay opened").ended() => {
+            "component closed its IPC connection".to_owned()
+        }
     };
     session.settle(&registry, &reason).await
 }
@@ -459,9 +474,7 @@ impl OwnedSession {
         }
         self.mount.umount();
         kill_portal(self.portal).await;
-        if let Some(relay) = self.relay {
-            relay.close();
-        }
+        drop(self.relay);
         let mut reg = registry.lock().await;
         reg.remove_ipc_sender(session_id);
         reg.set_state(session_id, AppStateKind::Stopped);
