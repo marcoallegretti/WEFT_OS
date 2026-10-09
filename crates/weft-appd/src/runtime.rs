@@ -33,14 +33,15 @@ impl Drop for IpcRelay {
     }
 }
 
+/// The longest message from a component, its line break included: the
+/// runtime refuses longer ones, so a longer line ends the relay.
+#[cfg(unix)]
+const MAX_RELAY_FRAME: usize = 64 * 1024 + 2;
+
 /// Listens on `socket_path` for the session's component and relays
 /// newline-delimited messages between it and the returned sender (towards
 /// the component) and the broadcast channel (from the component).
 #[cfg(unix)]
-/// The longest message from a component, its line break included: the
-/// runtime refuses longer ones, so a longer line ends the relay.
-const MAX_RELAY_FRAME: usize = 64 * 1024 + 2;
-
 pub(crate) fn spawn_ipc_relay(
     session_id: u64,
     socket_path: PathBuf,
@@ -79,15 +80,18 @@ pub(crate) fn spawn_ipc_relay(
                 n = limited.read_until(b'\n', &mut frame) => {
                     match n {
                         Ok(0) | Err(_) => break,
-                        Ok(_) if !frame.ends_with(b"\n") => {
-                            if frame.len() > MAX_RELAY_FRAME {
-                                tracing::warn!(session_id, "IPC relay: message over the size limit");
-                                break;
-                            }
+                        Ok(_) if frame.len() > MAX_RELAY_FRAME => {
+                            tracing::warn!(session_id, "IPC relay: message over the size limit");
+                            break;
                         }
+                        // The rest of the message is still to come.
+                        Ok(_) if !frame.ends_with(b"\n") => {}
                         Ok(_) => {
                             let line = std::mem::take(&mut frame);
-                            let text = String::from_utf8_lossy(&line);
+                            let Ok(text) = String::from_utf8(line) else {
+                                tracing::warn!(session_id, "IPC relay: message is not UTF-8");
+                                break;
+                            };
                             let payload = text.trim_end_matches(['\n', '\r']).to_owned();
                             let _ = broadcast.send(Response::IpcMessage { session_id, payload });
                         }
@@ -611,11 +615,25 @@ mod tests {
             "{message:?}"
         );
 
-        // A line longer than any message ends the relay.
-        component
-            .write_all(&vec![b'x'; super::MAX_RELAY_FRAME + 1])
+        // A message at the limit, ending in a carriage return and line
+        // feed, arrives whole.
+        let mut at_limit = vec![b'y'; super::MAX_RELAY_FRAME - 2];
+        at_limit.extend_from_slice(b"\r\n");
+        component.write_all(&at_limit).await.unwrap();
+        let message = tokio::time::timeout(std::time::Duration::from_secs(5), messages.recv())
             .await
+            .unwrap()
             .unwrap();
+        assert!(
+            matches!(&message, crate::ipc::Response::IpcMessage { payload, .. } if payload.len() == super::MAX_RELAY_FRAME - 2),
+            "a message at the limit did not arrive whole"
+        );
+
+        // A line longer than any message ends the relay, even when its line
+        // break comes in the same read.
+        let mut over = vec![b'x'; super::MAX_RELAY_FRAME];
+        over.push(b'\n');
+        component.write_all(&over).await.unwrap();
         tokio::time::timeout(std::time::Duration::from_secs(5), relay.ended())
             .await
             .expect("the relay did not end on an overlong line");
