@@ -190,7 +190,7 @@ async fn run() -> anyhow::Result<()> {
     let socket_path = appd_socket_path()?;
 
     if let Some(parent) = socket_path.parent() {
-        std::fs::create_dir_all(parent).with_context(|| format!("create {}", parent.display()))?;
+        private_dir(parent).with_context(|| format!("create {}", parent.display()))?;
     }
     let _ = std::fs::remove_file(&socket_path);
 
@@ -366,7 +366,7 @@ fn system_token_path() -> std::io::Result<PathBuf> {
             .map_err(|_| std::io::Error::other("XDG_RUNTIME_DIR not set"))?,
     )
     .join("weft");
-    std::fs::create_dir_all(&dir)?;
+    private_dir(&dir)?;
     Ok(dir.join("appd.systoken"))
 }
 
@@ -375,7 +375,7 @@ fn write_ws_port(port: u16) -> anyhow::Result<()> {
     let runtime_dir = std::env::var("XDG_RUNTIME_DIR").context("XDG_RUNTIME_DIR not set")?;
     let path = PathBuf::from(runtime_dir).join("weft/appd.wsport");
     if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent).with_context(|| format!("create {}", parent.display()))?;
+        private_dir(parent).with_context(|| format!("create {}", parent.display()))?;
     }
     std::fs::write(&path, port.to_string()).with_context(|| format!("write {}", path.display()))?;
     Ok(())
@@ -415,8 +415,25 @@ async fn handle_connection(
 pub(crate) fn session_ipc_socket_path(session_id: u64) -> Option<PathBuf> {
     let runtime_dir = std::env::var("XDG_RUNTIME_DIR").ok()?;
     let dir = PathBuf::from(runtime_dir).join("weft");
-    std::fs::create_dir_all(&dir).ok()?;
+    private_dir(&dir).ok()?;
     Some(dir.join(format!("ipc-{session_id}.sock")))
+}
+
+/// Creates appd's runtime directory (`$XDG_RUNTIME_DIR/weft`) or another of
+/// its directories, accessible to the user only whatever the umask, also
+/// when it already existed.
+pub(crate) fn private_dir(dir: &std::path::Path) -> std::io::Result<()> {
+    let mut builder = std::fs::DirBuilder::new();
+    builder.recursive(true);
+    #[cfg(unix)]
+    std::os::unix::fs::DirBuilderExt::mode(&mut builder, 0o700);
+    builder.create(dir)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700))?;
+    }
+    Ok(())
 }
 
 pub(crate) async fn dispatch(req: Request, registry: &Registry) -> Response {
@@ -468,27 +485,11 @@ pub(crate) async fn dispatch(req: Request, registry: &Registry) -> Response {
                 });
                 return Response::LaunchAck { session_id, app_id };
             }
-            let ipc_socket = session_ipc_socket_path(session_id);
-            let broadcast = registry.lock().await.broadcast().clone();
-            if let Some(ref sock_path) = ipc_socket
-                && let Some(tx) =
-                    runtime::spawn_ipc_relay(session_id, sock_path.clone(), broadcast).await
-            {
-                registry.lock().await.register_ipc_sender(session_id, tx);
-            }
             let reg = Arc::clone(registry);
             let aid = app_id.clone();
             tokio::spawn(async move {
-                if let Err(e) = runtime::supervise(
-                    session_id,
-                    &aid,
-                    grants,
-                    reg,
-                    abort_rx,
-                    compositor_tx,
-                    ipc_socket,
-                )
-                .await
+                if let Err(e) =
+                    runtime::supervise(session_id, &aid, grants, reg, abort_rx, compositor_tx).await
                 {
                     tracing::warn!(session_id, error = %e, "runtime supervisor error");
                 }
@@ -530,15 +531,31 @@ pub(crate) async fn dispatch(req: Request, registry: &Registry) -> Response {
             session_id,
             payload,
         } => {
-            if let Some(tx) = registry.lock().await.ipc_sender_for(session_id)
-                && tx.send(payload).await.is_err()
-            {
-                tracing::warn!(session_id, "IPC relay sender closed");
-                registry.lock().await.remove_ipc_sender(session_id);
-            }
-            Response::AppState {
-                session_id,
-                state: ipc::AppStateKind::Running,
+            // The registry lock is released before sending; a component that
+            // stops reading must not stall appd.
+            let sender = registry.lock().await.ipc_sender_for(session_id);
+            let Some(tx) = sender else {
+                return Response::Error {
+                    code: 1,
+                    message: format!("session {session_id} has no IPC relay"),
+                };
+            };
+            match tx.try_send(payload) {
+                Ok(()) => Response::AppState {
+                    session_id,
+                    state: ipc::AppStateKind::Running,
+                },
+                Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => Response::Error {
+                    code: 1,
+                    message: format!("session {session_id} is not reading messages"),
+                },
+                Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {
+                    registry.lock().await.remove_ipc_sender(session_id);
+                    Response::Error {
+                        code: 1,
+                        message: format!("session {session_id} has no IPC relay"),
+                    }
+                }
             }
         }
         Request::PanelGesture {
@@ -633,6 +650,31 @@ mod tests {
     use ipc::AppStateKind;
 
     static ENV_LOCK: std::sync::OnceLock<tokio::sync::Mutex<()>> = std::sync::OnceLock::new();
+
+    /// Points XDG_RUNTIME_DIR at a directory private to this test process,
+    /// since session sockets are named by session ID and every test registry
+    /// starts at 1. Directories of test processes that have ended are
+    /// removed. Callers hold env_lock.
+    fn use_test_runtime_dir() {
+        let base = std::env::temp_dir().join("weft-appd-tests");
+        if let Ok(entries) = std::fs::read_dir(&base) {
+            for entry in entries.flatten() {
+                let alive = entry
+                    .file_name()
+                    .to_str()
+                    .and_then(|pid| pid.parse::<u32>().ok())
+                    .is_some_and(|pid| std::path::Path::new(&format!("/proc/{pid}")).exists());
+                if !alive {
+                    let _ = std::fs::remove_dir_all(entry.path());
+                }
+            }
+        }
+        let dir = base.join(std::process::id().to_string());
+        std::fs::create_dir_all(&dir).unwrap();
+        // SAFETY: env_lock serialises the tests that change the environment,
+        // and std serialises the environment accesses themselves.
+        unsafe { std::env::set_var("XDG_RUNTIME_DIR", &dir) };
+    }
 
     pub(crate) fn env_lock() -> &'static tokio::sync::Mutex<()> {
         ENV_LOCK.get_or_init(|| tokio::sync::Mutex::new(()))
@@ -1003,6 +1045,187 @@ mod tests {
     }
 
     #[cfg(unix)]
+    #[tokio::test]
+    async fn ipc_forward_never_waits_on_a_component() {
+        let registry = make_registry();
+        let forward = |session_id| Request::IpcForward {
+            session_id,
+            payload: "x".into(),
+        };
+        let reply = dispatch(forward(7), &registry).await;
+        assert!(matches!(reply, Response::Error { .. }), "{reply:?}");
+
+        let (tx, _rx) = tokio::sync::mpsc::channel(1);
+        registry.lock().await.register_ipc_sender(7, tx);
+        assert!(matches!(
+            dispatch(forward(7), &registry).await,
+            Response::AppState { .. }
+        ));
+        // The queue is full and nothing reads it: the reply comes at once.
+        let reply = tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            dispatch(forward(7), &registry),
+        )
+        .await
+        .expect("IPC_FORWARD blocked");
+        assert!(matches!(reply, Response::Error { .. }), "{reply:?}");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_closed_ipc_connection_ends_the_session() {
+        use std::os::unix::fs::PermissionsExt;
+        let _env = env_lock().lock().await;
+        use_test_runtime_dir();
+        let dir = std::env::temp_dir().join(format!("weft_test_ipc_close_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        // Both children report ready and keep running; the test plays the
+        // component, connecting to the session's IPC socket and closing it.
+        let child = dir.join("child.sh");
+        std::fs::write(
+            &child,
+            "#!/bin/sh\necho READY $WEFT_READY_TOKEN\nexec sleep 30\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&child, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let prior: Vec<_> = [
+            "WEFT_RUNTIME_BIN",
+            "WEFT_APP_SHELL_BIN",
+            "WEFT_DISABLE_CGROUP",
+        ]
+        .iter()
+        .map(|k| (*k, std::env::var_os(k)))
+        .collect();
+        // SAFETY: env_lock serialises the tests that change the environment.
+        unsafe {
+            std::env::set_var("WEFT_RUNTIME_BIN", &child);
+            std::env::set_var("WEFT_APP_SHELL_BIN", &child);
+            std::env::set_var("WEFT_DISABLE_CGROUP", "1");
+        }
+
+        let registry = make_registry();
+        let mut rx = registry.lock().await.subscribe();
+        let session_id = registry.lock().await.launch("test.app");
+        let abort_rx = registry.lock().await.register_abort(session_id);
+        let socket = session_ipc_socket_path(session_id).unwrap();
+        let component = async {
+            // Connect once the session is running, then close the connection.
+            loop {
+                if let Ok(Response::AppReady { session_id: id, .. }) = rx.recv().await
+                    && id == session_id
+                {
+                    break;
+                }
+            }
+            drop(tokio::net::UnixStream::connect(&socket).await.unwrap());
+        };
+        let supervised = runtime::supervise(
+            session_id,
+            "test.app",
+            grants::SessionGrants::default(),
+            Arc::clone(&registry),
+            abort_rx,
+            None,
+        );
+        let finished = tokio::time::timeout(std::time::Duration::from_secs(15), async {
+            tokio::join!(supervised, component)
+        })
+        .await;
+
+        for (key, value) in prior {
+            // SAFETY: as above.
+            unsafe {
+                match value {
+                    Some(v) => std::env::set_var(key, v),
+                    None => std::env::remove_var(key),
+                }
+            }
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(finished.is_ok(), "the session outlived its IPC connection");
+        assert!(matches!(
+            registry.lock().await.state(session_id),
+            AppStateKind::Stopped
+        ));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_stopped_session_releases_its_ipc_relay() {
+        use std::os::unix::fs::PermissionsExt;
+        let _env = env_lock().lock().await;
+        use_test_runtime_dir();
+        let dir = std::env::temp_dir().join(format!("weft_test_relay_{}", std::process::id()));
+        let app = dir.join("store/org.example.relay");
+        std::fs::create_dir_all(&app).unwrap();
+        std::fs::write(
+            app.join("wapp.toml"),
+            "[package]\nid = \"org.example.relay\"\n",
+        )
+        .unwrap();
+        // The runtime reports ready and exits without connecting to the relay.
+        let child = dir.join("child.sh");
+        std::fs::write(
+            &child,
+            "#!/bin/sh\necho READY $WEFT_READY_TOKEN\nexec sleep 1\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&child, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let vars = [
+            ("WEFT_RUNTIME_BIN", child.clone().into_os_string()),
+            ("WEFT_APP_SHELL_BIN", child.clone().into_os_string()),
+            ("WEFT_DISABLE_CGROUP", "1".into()),
+            ("WEFT_APP_STORE", dir.join("store").into_os_string()),
+        ];
+        let prior: Vec<_> = vars
+            .iter()
+            .map(|(k, _)| (*k, std::env::var_os(k)))
+            .collect();
+        for (key, value) in &vars {
+            // SAFETY: env_lock is held on a current_thread runtime.
+            unsafe { std::env::set_var(key, value) };
+        }
+
+        let registry = make_registry();
+        let mut rx = registry.lock().await.subscribe();
+        let ack = dispatch(
+            Request::LaunchApp {
+                app_id: "org.example.relay".into(),
+                surface_id: 0,
+            },
+            &registry,
+        )
+        .await;
+        let Response::LaunchAck { session_id, .. } = ack else {
+            panic!("expected LaunchAck, got {ack:?}");
+        };
+        let stopped = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            loop {
+                if let Ok(Response::AppState {
+                    session_id: id,
+                    state: AppStateKind::Stopped,
+                }) = rx.recv().await
+                    && id == session_id
+                {
+                    break;
+                }
+            }
+        })
+        .await;
+
+        for (key, value) in prior {
+            // SAFETY: as above.
+            unsafe {
+                match value {
+                    Some(v) => std::env::set_var(key, v),
+                    None => std::env::remove_var(key),
+                }
+            }
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(stopped.is_ok(), "session did not stop");
+        assert!(registry.lock().await.ipc_sender_for(session_id).is_none());
+        assert!(!session_ipc_socket_path(session_id).unwrap().exists());
+    }
+
     #[tokio::test(flavor = "current_thread")]
     async fn supervisor_transitions_through_ready_to_stopped() {
         use std::os::unix::fs::PermissionsExt;
@@ -1040,13 +1263,14 @@ mod tests {
         let session_id = registry.lock().await.launch("test.app");
         let abort_rx = registry.lock().await.register_abort(session_id);
 
+        use_test_runtime_dir();
+
         runtime::supervise(
             session_id,
             "test.app",
             grants::SessionGrants::default(),
             Arc::clone(&registry),
             abort_rx,
-            None,
             None,
         )
         .await
@@ -1056,6 +1280,10 @@ mod tests {
             registry.lock().await.state(session_id),
             AppStateKind::Stopped
         ));
+        // The session's IPC relay ends with it, although the test runtime
+        // never connected to it.
+        assert!(registry.lock().await.ipc_sender_for(session_id).is_none());
+        assert!(!session_ipc_socket_path(session_id).unwrap().exists());
 
         let notification =
             tokio::time::timeout(std::time::Duration::from_millis(200), rx.recv()).await;
@@ -1110,13 +1338,14 @@ mod tests {
 
         registry.lock().await.terminate(session_id);
 
+        use_test_runtime_dir();
+
         runtime::supervise(
             session_id,
             "test.abort.startup",
             grants::SessionGrants::default(),
             Arc::clone(&registry),
             abort_rx,
-            None,
             None,
         )
         .await
@@ -1159,13 +1388,14 @@ mod tests {
         let session_id = registry.lock().await.launch("test.spawn.fail");
         let abort_rx = registry.lock().await.register_abort(session_id);
 
+        use_test_runtime_dir();
+
         runtime::supervise(
             session_id,
             "test.spawn.fail",
             grants::SessionGrants::default(),
             Arc::clone(&registry),
             abort_rx,
-            None,
             None,
         )
         .await
@@ -1316,6 +1546,7 @@ mod tests {
         let session_id = registry.lock().await.launch("test.app");
         let abort_rx = registry.lock().await.register_abort(session_id);
         let started = std::time::Instant::now();
+        use_test_runtime_dir();
         tokio::time::timeout(
             std::time::Duration::from_secs(20),
             runtime::supervise(
@@ -1324,7 +1555,6 @@ mod tests {
                 grants::SessionGrants::default(),
                 Arc::clone(&registry),
                 abort_rx,
-                None,
                 None,
             ),
         )
