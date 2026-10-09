@@ -164,7 +164,7 @@ const SYSTEMD_SCOPE_ARGS: &[&str] = &[
     "-p",
     "MemoryMax=512M",
     "-p",
-    "TasksMax=64",
+    "TasksMax=512",
 ];
 
 fn systemd_cgroup_available() -> bool {

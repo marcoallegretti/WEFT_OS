@@ -5,6 +5,8 @@ use anyhow::Context;
 mod grants;
 #[cfg(feature = "wasmtime-runtime")]
 mod ipc;
+#[cfg(feature = "wasmtime-runtime")]
+mod limits;
 
 /// The default limit on a component's linear memory, in MiB.
 const DEFAULT_MAX_MEMORY_MIB: usize = 256;
@@ -147,7 +149,7 @@ fn run_module(
     struct State {
         ctx: WasiCtx,
         table: ResourceTable,
-        limits: wasmtime::StoreLimits,
+        limits: limits::Limits,
     }
 
     impl IoView for State {
@@ -319,13 +321,7 @@ fn run_module(
         State {
             ctx,
             table: ResourceTable::new(),
-            // A memory or table that would grow past the limit does not
-            // grow: the component sees an allocation failure.
-            limits: wasmtime::StoreLimitsBuilder::new()
-                .memory_size(max_memory)
-                .table_elements(100_000)
-                .instances(1_000)
-                .build(),
+            limits: limits::Limits::new(max_memory),
         },
     );
     store.limiter(|state| &mut state.limits);

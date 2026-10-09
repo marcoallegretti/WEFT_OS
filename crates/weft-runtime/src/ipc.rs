@@ -11,6 +11,9 @@ use std::os::unix::net::UnixStream;
 
 /// The longest message in either direction, in bytes.
 pub const MAX_MESSAGE: usize = 64 * 1024;
+/// How long sending one message may block before the connection is given
+/// up.
+const SEND_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 
 /// Checks a message the component wants to send.
 pub fn check_payload(payload: &str) -> Result<(), String> {
@@ -50,15 +53,23 @@ impl IpcState {
         if let Some(reason) = self.closed {
             return Err(format!("IPC connection {reason}"));
         }
-        let _ = self.socket.set_nonblocking(false);
         let mut line = payload.to_owned();
         line.push('\n');
         let result = self
             .socket
-            .write_all(line.as_bytes())
-            .map_err(|e| e.to_string());
-        let _ = self.socket.set_nonblocking(true);
-        result
+            .set_nonblocking(false)
+            .and_then(|()| self.socket.set_write_timeout(Some(SEND_TIMEOUT)))
+            .and_then(|()| self.socket.write_all(line.as_bytes()));
+        let restored = self.socket.set_nonblocking(true);
+        match result.and(restored) {
+            Ok(()) => Ok(()),
+            // Part of the line may have been written; anything sent after it
+            // would join it, so the connection ends.
+            Err(e) => {
+                self.close("failed");
+                Err(e.to_string())
+            }
+        }
     }
 
     /// The next complete message, if one has arrived.
@@ -81,9 +92,8 @@ impl IpcState {
                     if self.recv_buf.contains(&b'\n') {
                         break;
                     }
-                    if self.recv_buf.len() > MAX_MESSAGE {
-                        self.close("ended by a message over the size limit");
-                        self.recv_buf.clear();
+                    if self.recv_buf.len() > MAX_MESSAGE + 2 {
+                        self.overlong();
                         break;
                     }
                 }
@@ -103,8 +113,13 @@ impl IpcState {
         self.closed = Some(reason);
     }
 
+    fn overlong(&mut self) {
+        self.close("ended by a message over the size limit");
+        self.recv_buf.clear();
+    }
+
     /// Removes the first complete line from the buffer. A line that is not
-    /// UTF-8, or longer than a message, is dropped.
+    /// UTF-8 is dropped; one longer than a message ends the connection.
     fn take_line(&mut self) -> Option<String> {
         loop {
             let pos = self.recv_buf.iter().position(|&b| b == b'\n')?;
@@ -112,10 +127,12 @@ impl IpcState {
             let text = raw.strip_suffix(b"\n").unwrap_or(&raw);
             let text = text.strip_suffix(b"\r").unwrap_or(text);
             if text.len() > MAX_MESSAGE {
-                continue;
+                self.overlong();
+                return None;
             }
-            if let Ok(message) = String::from_utf8(text.to_vec()) {
-                return Some(message);
+            match String::from_utf8(text.to_vec()) {
+                Ok(message) => return Some(message),
+                Err(_) => tracing::warn!("IPC message that is not UTF-8 dropped"),
             }
         }
     }
@@ -162,6 +179,34 @@ mod tests {
         }
         assert!(ipc.recv_buf.len() <= MAX_MESSAGE + 4096);
         assert!(ipc.send("after").is_err());
+    }
+
+    #[test]
+    fn a_message_at_the_limit_arrives_and_one_over_it_ends_the_connection() {
+        let (mut ipc, mut peer) = pair();
+        let mut at_limit = vec![b'x'; MAX_MESSAGE];
+        at_limit.push(b'\n');
+        peer.write_all(&at_limit).unwrap();
+        let mut received = None;
+        while received.is_none() {
+            received = ipc.recv();
+        }
+        assert_eq!(received.map(|m| m.len()), Some(MAX_MESSAGE));
+        // One byte over, with its newline in the same read.
+        let mut over = vec![b'x'; MAX_MESSAGE + 1];
+        over.extend_from_slice(b"\nnext\n");
+        peer.write_all(&over).unwrap();
+        while ipc.closed.is_none() {
+            assert_eq!(ipc.recv(), None);
+        }
+        assert_eq!(ipc.recv(), None);
+    }
+
+    #[test]
+    fn a_line_that_is_not_utf8_is_dropped() {
+        let (mut ipc, mut peer) = pair();
+        peer.write_all(b"\xff\xfe\nafter\n").unwrap();
+        assert_eq!(ipc.recv().as_deref(), Some("after"));
     }
 
     #[test]
