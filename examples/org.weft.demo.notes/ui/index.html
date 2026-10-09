@@ -118,6 +118,7 @@
   var rev = null;
   var seq = 0;
   var pending = null;
+  var lastSent = null;
   var encoder = new TextEncoder();
 
   function setStatus(msg) { statusEl.textContent = msg; }
@@ -143,11 +144,18 @@
       return;
     }
     var request = { op: 'save', seq: seq + 1, base: rev, text: editor.value };
+    try {
+      encodeURIComponent(request.text);
+    } catch (_) {
+      setStatus('not saved: the text contains characters that cannot be stored');
+      return;
+    }
     if (encoder.encode(JSON.stringify(request)).length > MAX_MESSAGE) {
       setStatus('not saved: the notes are too long');
       return;
     }
     seq += 1;
+    lastSent = { seq: seq, text: request.text };
     pending = {
       seq: seq,
       text: request.text,
@@ -163,7 +171,7 @@
 
   // Discard reloads the stored notes, replacing unsaved edits.
   document.getElementById('discard').addEventListener('click', function () {
-    if (!window.weftIpc || pending) return;
+    if (!window.weftIpc || pending || rev === null) return;
     editor.value = saved;
     countChars();
     rev = null;
@@ -183,14 +191,18 @@
     var msg;
     try { msg = JSON.parse(raw); } catch (_) { return; }
     if (msg.op === 'loaded') {
+      // Only the reply to the outstanding load applies; the editor is
+      // read-only until it arrives, so it never replaces newer text.
+      if (rev !== null) return;
       editor.value = msg.text;
       countChars();
       saved = msg.text;
       rev = msg.rev;
       setLoaded(true);
       setStatus('');
-    } else if (msg.op === 'saved' && pending && msg.seq === pending.seq) {
-      saved = pending.text;
+    } else if (msg.op === 'saved' && lastSent && msg.seq === lastSent.seq) {
+      // Also accepts an acknowledgement that arrives after the timeout.
+      saved = lastSent.text;
       rev = msg.rev;
       finishSave();
       setStatus(editor.value === saved ? 'saved' : 'saved; newer changes are not saved yet');

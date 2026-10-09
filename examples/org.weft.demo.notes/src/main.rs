@@ -50,22 +50,49 @@ fn load() -> Value {
     }
 }
 
-/// Exclusive access to the notes file for one save.
-struct SaveLock;
+/// A value unique to this process and moment, for lock ownership and
+/// staging file names.
+fn unique() -> String {
+    static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or_default();
+    let n = COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    format!("{nanos}-{n}")
+}
+
+/// Exclusive access to the notes file for one save. The lock file holds an
+/// owner token, so a save only ever removes its own lock.
+struct SaveLock {
+    token: String,
+}
 
 impl SaveLock {
     fn acquire() -> Result<Self, String> {
+        use std::io::Write;
+        let token = unique();
         for _ in 0..50 {
-            match std::fs::OpenOptions::new().write(true).create_new(true).open(LOCK_PATH) {
-                Ok(_) => return Ok(SaveLock),
+            match std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(LOCK_PATH)
+            {
+                Ok(mut file) => {
+                    let _ = file.write_all(token.as_bytes());
+                    return Ok(SaveLock { token });
+                }
                 Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+                    // A lock older than STALE_LOCK (or of unknown age) was left
+                    // by an ended session. Renaming it away is atomic, so only
+                    // one save can take it over.
                     let stale = std::fs::metadata(LOCK_PATH)
                         .and_then(|m| m.modified())
-                        .ok()
-                        .and_then(|t| t.elapsed().ok())
-                        .is_some_and(|age| age > STALE_LOCK);
-                    if stale {
-                        let _ = std::fs::remove_file(LOCK_PATH);
+                        .map(|t| t.elapsed().is_ok_and(|age| age > STALE_LOCK))
+                        .unwrap_or(true);
+                    let taken = format!("/data/.notes.lock.{token}.stale");
+                    if stale && std::fs::rename(LOCK_PATH, &taken).is_ok() {
+                        let _ = std::fs::remove_file(&taken);
                     } else {
                         std::thread::sleep(std::time::Duration::from_millis(20));
                     }
@@ -79,7 +106,24 @@ impl SaveLock {
 
 impl Drop for SaveLock {
     fn drop(&mut self) {
-        let _ = std::fs::remove_file(LOCK_PATH);
+        if std::fs::read_to_string(LOCK_PATH).is_ok_and(|t| t == self.token) {
+            let _ = std::fs::remove_file(LOCK_PATH);
+        }
+    }
+}
+
+/// Removes staging files left by saves that ended before their rename. Only
+/// called with the lock held, when no other save is in progress.
+fn remove_abandoned_staging() {
+    let Ok(entries) = std::fs::read_dir("/data") else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+        if name.starts_with(".notes.txt.") && name.ends_with(".saving") {
+            let _ = std::fs::remove_file(entry.path());
+        }
     }
 }
 
@@ -88,19 +132,14 @@ impl Drop for SaveLock {
 /// the new text in full.
 fn replace_notes(text: &str) -> std::io::Result<()> {
     use std::io::Write;
-    let nanos = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_nanos())
-        .unwrap_or_default();
-    let staging = format!("/data/.notes.txt.{nanos}.saving");
-    let written = std::fs::OpenOptions::new()
+    let staging = format!("/data/.notes.txt.{}.saving", unique());
+    let mut file = std::fs::OpenOptions::new()
         .write(true)
         .create_new(true)
-        .open(&staging)
-        .and_then(|mut file| {
-            file.write_all(text.as_bytes())?;
-            file.sync_all()
-        })
+        .open(&staging)?;
+    let written = file
+        .write_all(text.as_bytes())
+        .and_then(|()| file.sync_all())
         .and_then(|()| std::fs::rename(&staging, NOTES_PATH));
     if written.is_err() {
         let _ = std::fs::remove_file(&staging);
@@ -109,9 +148,7 @@ fn replace_notes(text: &str) -> std::io::Result<()> {
 }
 
 fn save(seq: &Value, base: &str, text: &str) -> Value {
-    let error = |conflict: bool, message: String| {
-        json!({ "op": "error", "seq": seq, "conflict": conflict, "message": message })
-    };
+    let error = |conflict: bool, message: String| json!({ "op": "error", "seq": seq, "conflict": conflict, "message": message });
     if text.len() > MAX_NOTES {
         return error(false, format!("notes are limited to {MAX_NOTES} bytes"));
     }
@@ -119,6 +156,7 @@ fn save(seq: &Value, base: &str, text: &str) -> Value {
         Ok(lock) => lock,
         Err(message) => return error(false, message),
     };
+    remove_abandoned_staging();
     let current = match stored() {
         Ok(bytes) => revision(&bytes),
         Err(message) => return error(false, message),
