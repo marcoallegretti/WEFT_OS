@@ -215,10 +215,9 @@ fn record_first_owner(
     }
     // Data in the earlier layout counts: it would be moved to this app's
     // data directory when the session starts.
-    let home = std::env::var_os("HOME")
-        .map(std::path::PathBuf::from)
-        .filter(|home| home.is_absolute());
-    match weft_ipc_types::package::existing_app_data(data_home, home.as_deref(), app_id) {
+    let home = weft_ipc_types::package::home_dir()
+        .ok_or_else(|| Refusal::new(500, "HOME is not set to an absolute path"))?;
+    match weft_ipc_types::package::existing_app_data(data_home, &home, app_id) {
         Err(e) => Err(Refusal::new(
             500,
             format!("cannot inspect the app data of {app_id}: {e}"),
@@ -264,6 +263,10 @@ mod tests {
 
     const ID: &str = "org.weft.test.resolve";
 
+    /// HOME as the test process found it, restored by `finish`.
+    static HOME_AT_START: std::sync::OnceLock<Option<std::ffi::OsString>> =
+        std::sync::OnceLock::new();
+
     /// A store holding a directory install of `ID`, with WEFT_APP_STORE
     /// pointing at it. Callers hold env_lock.
     fn store(name: &str, manifest_id: &str, module: &str) -> PathBuf {
@@ -289,10 +292,12 @@ mod tests {
             Owner::Development,
         )
         .unwrap();
+        HOME_AT_START.get_or_init(|| std::env::var_os("HOME"));
         // SAFETY: callers hold env_lock, which serialises environment changes.
         unsafe {
             std::env::set_var("WEFT_APP_STORE", &store);
             std::env::set_var("XDG_DATA_HOME", store.join("share"));
+            std::env::set_var("HOME", store.join("home"));
         }
         store
     }
@@ -304,6 +309,10 @@ mod tests {
             std::env::remove_var("WEFT_MOUNT_HELPER");
             std::env::remove_var("XDG_DATA_HOME");
             std::env::remove_var("WEFT_TRUSTED_KEYS");
+            match HOME_AT_START.get() {
+                Some(Some(home)) => std::env::set_var("HOME", home),
+                _ => std::env::remove_var("HOME"),
+            }
         }
         let _ = std::fs::remove_dir_all(store);
     }
@@ -462,19 +471,9 @@ mod tests {
     fn unowned_data_in_the_earlier_layout_is_not_given_away() {
         let _env = crate::tests::env_lock().blocking_lock();
         let store = demo_store("legacy_data", true);
-        let home = store.join("home");
-        let legacy = weft_ipc_types::package::legacy_app_data_dir(&home, DEMO);
+        let legacy = weft_ipc_types::package::legacy_app_data_dir(&store.join("home"), DEMO);
         std::fs::create_dir_all(&legacy).unwrap();
-        let prior = std::env::var_os("HOME");
-        // SAFETY: env_lock is held.
-        unsafe { std::env::set_var("HOME", &home) };
         let refused = refusal(resolve(DEMO));
-        unsafe {
-            match prior {
-                Some(v) => std::env::set_var("HOME", v),
-                None => std::env::remove_var("HOME"),
-            }
-        }
         let owner = read_owner(&owner_record_path(&store.join("share"), DEMO)).unwrap();
         finish(&store);
         assert_eq!(refused.code, 403, "{}", refused.message);

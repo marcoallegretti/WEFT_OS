@@ -493,12 +493,11 @@ fn admit(
         None => {
             // Data in the earlier layout counts: weft-appd moves it to the
             // app's data directory when the app next launches.
-            let home = std::env::var_os("HOME")
-                .map(PathBuf::from)
-                .filter(|home| home.is_absolute());
-            let existing =
-                weft_ipc_types::package::existing_app_data(data_home, home.as_deref(), app_id)
-                    .with_context(|| format!("inspect the app data of {app_id}"))?;
+            let home = weft_ipc_types::package::home_dir().context(
+                "HOME is not set to an absolute path, so earlier app data cannot be found",
+            )?;
+            let existing = weft_ipc_types::package::existing_app_data(data_home, &home, app_id)
+                .with_context(|| format!("inspect the app data of {app_id}"))?;
             if let Some(data) = existing.filter(|_| !claim_data) {
                 anyhow::bail!(
                     "{} holds app data for {app_id} with no recorded owner; install with \
@@ -602,9 +601,13 @@ fn installed_in_another_store(app_id: &str, store_root: &Path) -> bool {
 /// Removes the owner record of `app_id` when the app has no data, and
 /// reports whether a record was removed.
 fn release_owner_without_data(data_home: &Path, app_id: &str) -> bool {
-    let no_data =
-        std::fs::symlink_metadata(weft_ipc_types::package::app_data_dir(data_home, app_id))
-            .is_err_and(|e| e.kind() == std::io::ErrorKind::NotFound);
+    // Data in either layout keeps the record; so does not being able to look.
+    let no_data = weft_ipc_types::package::home_dir().is_some_and(|home| {
+        matches!(
+            weft_ipc_types::package::existing_app_data(data_home, &home, app_id),
+            Ok(None)
+        )
+    });
     no_data
         && std::fs::remove_file(weft_ipc_types::trust::owner_record_path(data_home, app_id)).is_ok()
 }
@@ -1343,6 +1346,13 @@ mod tests {
         std::fs::remove_dir_all(&data).unwrap();
         with_home(&home, || uninstall_package_from(app_id, &store)).unwrap();
         assert!(!record.exists());
+
+        // Data in the earlier layout keeps the record too.
+        weft_ipc_types::trust::write_owner(&record, Owner::Development).unwrap();
+        let legacy = weft_ipc_types::package::legacy_app_data_dir(&home, app_id);
+        std::fs::create_dir_all(&legacy).unwrap();
+        assert!(with_home(&home, || uninstall_package_from(app_id, &store)).is_err());
+        assert!(record.exists());
         let _ = std::fs::remove_dir_all(&home);
     }
 

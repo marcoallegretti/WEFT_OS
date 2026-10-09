@@ -727,6 +727,7 @@ mod tests {
                 let stale = entry
                     .file_name()
                     .to_str()
+                    .filter(|n| *n != name)
                     .and_then(|n| n.strip_prefix("weft-appd-tests-data-"))
                     .is_some_and(|pid| !std::path::Path::new("/proc").join(pid).exists());
                 if stale {

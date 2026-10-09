@@ -41,8 +41,9 @@ def run(args, desktop, home, xdotool):
     (legacy / "notes.txt").write_bytes(NOTES)
     data_home = home / "data-home"
     target = data_home / "weft/app-data" / APP_ID
-    # The earlier data belongs to the demo publisher, as installing the
-    # signed package with weft-pack would have recorded.
+    # The earlier data is recorded as the demo publisher's. Data from before
+    # owner records has no record and is refused until claimed with
+    # weft-pack install --claim-data.
     owner = data_home / "weft/owners" / APP_ID
     owner.parent.mkdir(parents=True)
     key = (ROOT / "examples/keys/weft-sign.pub").read_text().strip()
