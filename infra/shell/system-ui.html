@@ -320,6 +320,8 @@
         } else if (msg.type === 'APP_STATE') {
           if (msg.state === 'stopped') {
             removeTaskbarEntry(msg.session_id);
+          } else if (msg.state === 'stopping') {
+            markTaskbarEntryClosing(msg.session_id);
           }
         } else if (msg.type === 'RUNNING_APPS') {
           msg.sessions.forEach(function (s) {
@@ -391,7 +393,7 @@
         var close = document.createElement('span');
         close.className = 'task-close';
         close.textContent = '×';
-        close.title = 'Terminate';
+        close.title = 'Close';
         close.addEventListener('click', function (e) {
           e.stopPropagation();
           if (ws && ws.readyState === WebSocket.OPEN) {
@@ -409,6 +411,17 @@
         var taskbar = document.querySelector('weft-taskbar');
         var clock = document.getElementById('clock');
         taskbar.insertBefore(el, clock);
+      }
+
+      // The app has been asked to close and may take a few seconds, for
+      // example to save; the entry stays until the session has stopped.
+      function markTaskbarEntryClosing(sessionId) {
+        var el = document.getElementById('task-' + sessionId);
+        if (!el) { return; }
+        el.style.opacity = '0.5';
+        el.title += ' (closing)';
+        var close = el.querySelector('.task-close');
+        if (close) { close.remove(); }
       }
 
       function removeTaskbarEntry(sessionId) {

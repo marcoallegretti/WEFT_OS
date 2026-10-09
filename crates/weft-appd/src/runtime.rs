@@ -537,16 +537,33 @@ impl OwnedSession {
         if !asked {
             return "terminate requested; the compositor could not ask the app to close".to_owned();
         }
-        let Some(app_shell) = self.app_shell.as_mut() else {
+        let (Some(app_shell), Some(runtime), Some(relay)) = (
+            self.app_shell.as_mut(),
+            self.runtime.as_mut(),
+            self.relay.as_mut(),
+        ) else {
             return "terminate requested".to_owned();
         };
-        match tokio::time::timeout(CLOSE_TIMEOUT, app_shell.wait()).await {
-            Ok(status) => format!("closed on request; app shell exited ({status:?})"),
-            Err(_) => format!(
-                "close requested; the app shell did not exit within {} s and was terminated",
-                CLOSE_TIMEOUT.as_secs()
-            ),
-        }
+        let wait = async {
+            tokio::select! {
+                status = app_shell.wait() => match status {
+                    Ok(status) if status.success() => {
+                        format!("closed on request; app shell exited ({status:?})")
+                    }
+                    status => format!("app shell failed while closing ({status:?})"),
+                },
+                status = runtime.wait() => format!("runtime exited while closing ({status:?})"),
+                _ = relay.ended() => "component closed its IPC connection while closing".to_owned(),
+            }
+        };
+        tokio::time::timeout(CLOSE_TIMEOUT, wait)
+            .await
+            .unwrap_or_else(|_| {
+                format!(
+                    "close requested; the app shell did not exit within {} s and was terminated",
+                    CLOSE_TIMEOUT.as_secs()
+                )
+            })
     }
 
     async fn settle(self, registry: &Registry, reason: &str) -> anyhow::Result<()> {

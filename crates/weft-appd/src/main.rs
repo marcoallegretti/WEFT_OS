@@ -27,6 +27,10 @@ struct SessionEntry {
     bridge_token: Option<String>,
 }
 
+/// How many stopped sessions stay registered, so their final state can
+/// still be queried.
+const KEPT_STOPPED: usize = 32;
+
 struct SessionRegistry {
     next_id: u64,
     sessions: std::collections::HashMap<u64, SessionEntry>,
@@ -52,6 +56,7 @@ impl Default for SessionRegistry {
 
 impl SessionRegistry {
     fn launch(&mut self, app_id: &str) -> u64 {
+        self.prune_stopped();
         self.next_id += 1;
         let id = self.next_id;
         self.sessions.insert(
@@ -69,6 +74,24 @@ impl SessionRegistry {
             },
         );
         id
+    }
+
+    /// Forgets the oldest stopped sessions beyond `KEPT_STOPPED`, so the
+    /// registry does not grow with every launch.
+    fn prune_stopped(&mut self) {
+        let mut stopped: Vec<u64> = self
+            .sessions
+            .iter()
+            .filter(|(_, e)| matches!(e.state, AppStateKind::Stopped))
+            .map(|(&id, _)| id)
+            .collect();
+        if stopped.len() <= KEPT_STOPPED {
+            return;
+        }
+        stopped.sort_unstable();
+        for id in &stopped[..stopped.len() - KEPT_STOPPED] {
+            self.sessions.remove(id);
+        }
     }
 
     pub(crate) fn bridge_token(&self, session_id: u64) -> Option<String> {
@@ -96,6 +119,9 @@ impl SessionRegistry {
                 self.set_state(session_id, AppStateKind::Stopping);
                 true
             }
+            // A session already closing keeps closing; it stays registered
+            // until its supervisor settles it.
+            None if matches!(self.state(session_id), AppStateKind::Stopping) => true,
             // A session no supervisor runs has nothing to settle.
             None => self.sessions.remove(&session_id).is_some(),
         }
@@ -118,10 +144,12 @@ impl SessionRegistry {
             .collect()
     }
 
+    /// The apps to restore at the next start: a session the user asked to
+    /// close is not among them.
     fn running_app_ids(&self) -> Vec<String> {
         self.sessions
             .values()
-            .filter(|e| !matches!(e.state, AppStateKind::Stopped))
+            .filter(|e| !matches!(e.state, AppStateKind::Stopped | AppStateKind::Stopping))
             .map(|e| e.app_id.clone())
             .collect()
     }
@@ -1416,6 +1444,19 @@ mod tests {
         .await;
         let started = std::time::Instant::now();
         let reply = dispatch(Request::TerminateApp { session_id }, &registry).await;
+        // A second request while the app is closing changes nothing: the
+        // session stays registered and listed until it settles.
+        let again = dispatch(Request::TerminateApp { session_id }, &registry).await;
+        let closing = {
+            let reg = registry.lock().await;
+            (
+                reg.state(session_id),
+                reg.running_sessions()
+                    .iter()
+                    .any(|s| s.session_id == session_id),
+                reg.running_app_ids(),
+            )
+        };
         let stopped = tokio::time::timeout(std::time::Duration::from_secs(15), async {
             while !matches!(
                 rx.recv().await,
@@ -1453,6 +1494,24 @@ mod tests {
             ),
             "{reply:?}"
         );
+        assert!(
+            matches!(
+                again,
+                Response::AppState {
+                    state: AppStateKind::Stopping,
+                    ..
+                }
+            ),
+            "{again:?}"
+        );
+        assert!(
+            matches!(closing.0, AppStateKind::Stopping),
+            "{:?}",
+            closing.0
+        );
+        assert!(closing.1, "a closing session is no longer listed");
+        // An app the user closed is not restored at the next start.
+        assert!(closing.2.is_empty(), "{:?}", closing.2);
         assert!(stopped.is_ok(), "the session did not stop");
         // The app was asked to close, given the timeout, then terminated.
         assert!(
@@ -1467,6 +1526,24 @@ mod tests {
             elapsed < runtime::CLOSE_TIMEOUT + std::time::Duration::from_secs(5),
             "{elapsed:?}"
         );
+    }
+
+    #[test]
+    fn only_the_latest_stopped_sessions_stay_registered() {
+        let mut reg = SessionRegistry::default();
+        let first = reg.launch("org.example.a");
+        let running = reg.launch("org.example.b");
+        reg.set_state(running, AppStateKind::Running);
+        reg.set_state(first, AppStateKind::Stopped);
+        for _ in 0..KEPT_STOPPED {
+            let id = reg.launch("org.example.c");
+            reg.set_state(id, AppStateKind::Stopped);
+        }
+        let last = reg.launch("org.example.d");
+        assert!(matches!(reg.state(first), AppStateKind::NotFound));
+        assert!(matches!(reg.state(running), AppStateKind::Running));
+        assert!(matches!(reg.state(last - 1), AppStateKind::Stopped));
+        assert_eq!(reg.sessions.len(), KEPT_STOPPED + 2);
     }
 
     #[tokio::test(flavor = "current_thread")]

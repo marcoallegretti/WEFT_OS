@@ -225,8 +225,9 @@ def run(args, desktop, xdotool):
     appd.send({"type": "TERMINATE_APP", "session_id": session_id})
     deadline = time.monotonic() + 15
     asked = f"session asked to close session_id={session_id} windows=1"
+    # appd records "closed on request" only when the app shell exits cleanly.
     closed = (f'stopping session session_id={session_id} reason="closed on request; '
-              'app shell exited (Ok(ExitStatus(unix_wait_status(0))))"')
+              'app shell exited')
     while asked not in desktop.log_text("compositor") or closed not in desktop.log_text("appd"):
         if time.monotonic() > deadline:
             raise AssertionError("the session did not close on request; see compositor.log "
