@@ -418,8 +418,9 @@ mod tests {
         assert!(other.try_lock().is_err());
         drop(held);
         assert!(other.try_lock().is_ok());
-        assert!(lock_owner(&home, "../outside").is_err());
-        assert!(!home.join("weft/outside.lock").exists());
+        // A name that would open fine but is not an app ID is refused.
+        assert!(lock_owner(&home, "Org.weft.test").is_err());
+        assert!(!home.join("weft/owners/.Org.weft.test.lock").exists());
         std::fs::remove_dir_all(&home).unwrap();
     }
 

@@ -715,20 +715,32 @@ fn copy_dir(_src: &Path, _dst: &Path) -> anyhow::Result<()> {
 fn copy_tree(dir: &rustix::fd::OwnedFd, shown: &Path, dst: &Path) -> anyhow::Result<()> {
     use rustix::fs::{AtFlags, FileType, Mode, OFlags};
     use std::os::unix::ffi::OsStrExt;
-    use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
+    use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt, PermissionsExt};
 
+    // Modes are set explicitly rather than requested at creation, so the
+    // installer's umask cannot make an installed package unreadable.
+    let set_mode = |path: &Path, mode: u32| {
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode))
+            .with_context(|| format!("set the mode of {}", path.display()))
+    };
     std::fs::DirBuilder::new()
-        .mode(0o755)
+        .mode(0o700)
         .create(dst)
         .with_context(|| format!("create {}", dst.display()))?;
+    set_mode(dst, 0o755)?;
+    // The names are read first and the listing closed, so the walk holds one
+    // descriptor per directory level.
+    let mut names = Vec::new();
     let mut entries =
         rustix::fs::Dir::read_from(dir).with_context(|| format!("read {}", shown.display()))?;
     while let Some(entry) = entries.read() {
         let entry = entry.with_context(|| format!("read {}", shown.display()))?;
-        let name = entry.file_name();
-        if matches!(name.to_bytes(), b"." | b"..") {
-            continue;
+        if !matches!(entry.file_name().to_bytes(), b"." | b"..") {
+            names.push(entry.file_name().to_owned());
         }
+    }
+    drop(entries);
+    for name in &names {
         let src_path = shown.join(std::ffi::OsStr::from_bytes(name.to_bytes()));
         let dst_path = dst.join(std::ffi::OsStr::from_bytes(name.to_bytes()));
         let listed = rustix::fs::statat(dir, name, AtFlags::SYMLINK_NOFOLLOW)
@@ -764,11 +776,18 @@ fn copy_tree(dir: &rustix::fd::OwnedFd, shown: &Path, dst: &Path) -> anyhow::Res
             let mut target = std::fs::OpenOptions::new()
                 .write(true)
                 .create_new(true)
-                .mode(if executable { 0o755 } else { 0o644 })
+                .mode(0o600)
                 .open(&dst_path)
                 .with_context(|| format!("create {}", dst_path.display()))?;
             std::io::copy(&mut std::fs::File::from(opened), &mut target)
                 .with_context(|| format!("copy {}", src_path.display()))?;
+            target
+                .set_permissions(std::fs::Permissions::from_mode(if executable {
+                    0o755
+                } else {
+                    0o644
+                }))
+                .with_context(|| format!("set the mode of {}", dst_path.display()))?;
         }
     }
     Ok(())
@@ -1334,7 +1353,7 @@ mod tests {
         for dir in ["outside", "pkg/dir", "held"] {
             std::fs::create_dir_all(home.join(dir)).unwrap();
         }
-        std::fs::write(home.join("outside/secret"), b"outside").unwrap();
+        std::fs::write(home.join("outside/other"), b"outside").unwrap();
         std::fs::write(home.join("pkg/dir/secret"), b"listed").unwrap();
         let open_dir = |path: &Path| {
             rustix::fs::openat(
@@ -1356,6 +1375,7 @@ mod tests {
             std::fs::read(home.join("copied/secret")).unwrap(),
             b"listed"
         );
+        assert!(!home.join("copied/other").exists());
 
         // A link where an entry is listed is refused, and so is a FIFO,
         // without waiting for a writer.
