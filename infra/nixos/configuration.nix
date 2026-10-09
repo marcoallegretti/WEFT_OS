@@ -18,8 +18,10 @@
     fsType = "ext4";
   };
 
+  # The session is graphical: tty0 is the primary console, and the serial
+  # console stays available as a secondary one for debugging.
   virtualisation = {
-    graphics = false;
+    graphics = true;
     memorySize = 4096;
     cores = 4;
     diskSize = 20480;
@@ -48,6 +50,18 @@
   services.getty.autologinUser = "weft";
 
   security.polkit.enable = true;
+
+  # weft-mount-helper mounts verified package images and must run as root;
+  # the Nix store cannot hold set-user-ID programs. Only the session user's
+  # group may run it, and it mounts only in the caller's own runtime
+  # directory (see crates/weft-mount-helper).
+  security.wrappers.weft-mount-helper = {
+    source = "${pkgs.weft.weft-mount-helper}/bin/weft-mount-helper";
+    owner = "root";
+    group = "users";
+    setuid = true;
+    permissions = "u+rx,g+x";
+  };
   services.dbus.enable = true;
 
   services.udev.packages = [ pkgs.libinput ];
@@ -134,7 +148,7 @@
           "WEFT_RUNTIME_BIN=${pkgs.weft.weft-runtime}/bin/weft-runtime"
           "WEFT_APP_SHELL_BIN=${pkgs.weft.weft-app-shell}/bin/weft-app-shell"
           "WEFT_FILE_PORTAL_BIN=${pkgs.weft.weft-file-portal}/bin/weft-file-portal"
-          "WEFT_MOUNT_HELPER=${pkgs.weft.weft-mount-helper}/bin/weft-mount-helper"
+          "WEFT_MOUNT_HELPER=/run/wrappers/bin/weft-mount-helper"
         ];
       };
     };

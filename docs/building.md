@@ -144,9 +144,9 @@ See `infra/nixos/weft-packages.nix` for the package derivations. Its `outputHash
 Logging in on tty1 starts the user target `weft-session.target`, which binds `graphical-session.target` (that one refuses a manual start) and wants `weft-compositor`, then `weft-servo-shell` with the system UI page its package installs, and `weft-appd` with the runtime, app shell, file portal and mount helper packages. Run as a systemd user service, the compositor publishes its socket as `WAYLAND_DISPLAY` to the user manager before reporting readiness, so the units after it, and the app shells weft-appd starts, connect to it. The units in `infra/systemd/` are the same session for an installation outside Nix, as user units under `weft-session.target`. The image is not yet bootable to a working desktop:
 
 - the Servo source hash in `outputHashes` is still a placeholder, so no package builds until a Nix build reports it;
-- the shell packages do not enable `servo-embed`, so `weft-servo-shell` and `weft-app-shell` exit at startup;
-- the VM runs without graphics (`virtualisation.graphics = false` in `infra/nixos/configuration.nix`, for a serial console), so the session's output is not shown;
-- `WEFT_MOUNT_HELPER` names the mount helper's store path, which cannot be setuid, so verified images cannot be mounted; a setuid wrapper would be needed.
+- the shell packages do not enable `servo-embed`, so `weft-servo-shell` and `weft-app-shell` exit at startup.
+
+The VM opens a graphics window; `tty0` is its primary console and the serial console a secondary one. `weft-mount-helper` is installed setuid root through `security.wrappers` at `/run/wrappers/bin/weft-mount-helper`, built to run cryptsetup's `veritysetup`.
 
 ## CI
 
