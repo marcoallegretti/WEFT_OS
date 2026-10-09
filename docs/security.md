@@ -8,7 +8,7 @@ WEFT OS enforces a capability-based security model. No capability is granted by 
 
 `weft-pack check` validates capability strings against the shared vocabulary in `weft_ipc_types::capability`. Unknown capability strings are rejected. At launch, `weft-appd` derives the session's grants from the manifest and refuses to start a package with a capability that is unknown, unsupported or unsatisfiable. `weft-runtime` enforces the grants it is given: read-only directories are preopened read-only, and each host import checks its grant on every call. See the capability table in `architecture.md`.
 
-Installing a package does not yet ask the user to approve its capabilities; every declared, supported capability is granted at launch.
+A package gets only the capabilities the user approved. `weft-pack install --approve` approves those the installed package declares, and `weft-pack approve <id>` approves those of the installed app later; without approval, `install` lists what still needs it. The approval is recorded in `$XDG_DATA_HOME/weft/approvals/<id>`, and weft-appd refuses to launch an app that declares a capability it does not hold (403, naming the capabilities). An update that declares a new capability needs approval again; an earlier approval never extends to it. Uninstalling the app forgets the approval. Private app data (`fs:read:app-data`, `fs:rw:app-data`) is a minimal execution resource and needs no approval. Signature verification and approval are separate decisions: a trusted signature approves nothing.
 
 ## Process Isolation
 

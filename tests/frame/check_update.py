@@ -17,6 +17,8 @@ colour. In the presented pixels and the store:
    two active again.
 5. Uninstalling while a session runs stops new launches (404) but not the
    session; the next uninstall, after it has ended, removes the revisions.
+6. An app declaring a capability (notifications) is refused at launch (403)
+   until `weft-pack approve` approves it, and then launches.
 
 The application is unsigned development content using the Counter demo's
 component.
@@ -41,11 +43,12 @@ VERSIONS = {"one": 1, "two": 2, "bad": 3, "three": 4}
 STARTUP_TIMEOUT = 120.0
 
 
-def write_revision(src, name, wasm=None):
+def write_revision(src, name, wasm=None, capabilities="[]"):
     shutil.rmtree(src, ignore_errors=True)
     (src / "ui").mkdir(parents=True)
     (src / "wapp.toml").write_text(
         f'[package]\nid = "{APP_ID}"\nname = "Update"\nversion = "0.0.{VERSIONS[name]}"\n'
+        f'capabilities = {capabilities}\n'
         '[runtime]\nmodule = "app.wasm"\n[ui]\nentry = "ui/index.html"\n')
     if wasm is None:
         shutil.copy(ROOT / "examples/org.weft.demo.counter/app.wasm", src / "app.wasm")
@@ -176,6 +179,16 @@ def run(args, desktop, store, home):
     pack("uninstall", APP_ID, ok=False)
     if revisions.exists():
         raise AssertionError(f"revisions left after uninstall: {list(revisions.iterdir())}")
+
+    # 6. A declared capability needs approval before the app launches.
+    write_revision(src, "one", capabilities='["sys:notifications"]')
+    pack("install", str(src), "--dev")
+    appd.send({"type": "LAUNCH_APP", "app_id": APP_ID, "surface_id": 0})
+    refused = appd.wait_for(lambda m: m.get("type") in ("APP_READY", "ERROR"), 30)
+    if refused.get("code") != 403 or "needs approval" not in refused.get("message", ""):
+        raise AssertionError(f"an unapproved capability launched: {refused}")
+    pack("approve", APP_ID)
+    stop(launch())
 
 
 def main(argv=None):

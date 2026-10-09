@@ -28,7 +28,7 @@ WASI Preview 2 + Component Model execution host (Wasmtime 30). Runs the componen
 
 ### weft-pack
 
-Package management CLI. Subcommands: `check` (validate wapp.toml, entries and package content), `sign` (Ed25519 signature over every file), `verify` (verify signature), `generate-key`, `install` (requires a signature by a trusted key unless `--dev`; records the app ID's owner; installs or updates, see [Installing and updating](#installing-and-updating)), `uninstall`, `rollback`, `list`, `build-image` (EROFS dm-verity), `info`.
+Package management CLI. Subcommands: `check` (validate wapp.toml, entries and package content), `sign` (Ed25519 signature over every file), `verify` (verify signature), `generate-key`, `install` (requires a signature by a trusted key unless `--dev`; records the app ID's owner; installs or updates, see [Installing and updating](#installing-and-updating)), `uninstall`, `rollback`, `approve` (approve the installed app's declared capabilities; `install --approve` does so at installation), `list`, `build-image` (EROFS dm-verity), `info`.
 
 ### weft-file-portal
 
