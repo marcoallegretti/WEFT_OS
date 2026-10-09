@@ -516,13 +516,13 @@ fn settle_approval(
     // An approval covers what the installed package declares: a capability
     // it no longer declares is dropped, so declaring it again later asks
     // again.
-    let kept: Vec<String> = declared
+    let kept: std::collections::BTreeSet<String> = declared
         .iter()
         .filter(|c| approved.contains(*c))
         .cloned()
         .collect();
-    if kept.len() != approved.len() {
-        write_approved(&record, &kept)
+    if kept != approved {
+        write_approved(&record, &kept.into_iter().collect::<Vec<_>>())
             .with_context(|| format!("update the approval of {app_id}"))?;
     }
     let pending = unapproved(declared, &approved);
@@ -549,6 +549,10 @@ fn approve_package(app_id: &str, explicit: &[String]) -> anyhow::Result<()> {
     let data_home = weft_ipc_types::package::data_home()
         .context("cannot locate the data home to record the approval")?;
     let _lock = weft_ipc_types::trust::lock_owner(&data_home, app_id)?;
+    let roots = list_installed_roots();
+    let image = roots
+        .iter()
+        .any(|root| ImageFiles::in_store(root, app_id).any_present());
     if !explicit.is_empty() {
         for capability in explicit {
             capability
@@ -556,26 +560,50 @@ fn approve_package(app_id: &str, explicit: &[String]) -> anyhow::Result<()> {
                 .map_err(|e| anyhow::anyhow!("{e}"))?;
             anyhow::ensure!(needs_approval(capability), "{capability} needs no approval");
         }
-        return settle_approval(&data_home, app_id, explicit, true);
+        // Approvals by name add to the app's approval. They are for an
+        // installed app, and for a package weft-pack can read, only for
+        // what it declares.
+        if !image {
+            let manifest = launched_manifest(&roots, app_id)?;
+            if let Some(undeclared) = explicit
+                .iter()
+                .find(|c| !manifest.capabilities().contains(c))
+            {
+                anyhow::bail!("{app_id} does not declare {undeclared}");
+            }
+        }
+        let record = weft_ipc_types::approval::approval_path(&data_home, app_id);
+        let mut approved: Vec<String> = weft_ipc_types::approval::read_approved(&record)
+            .with_context(|| format!("read {}", record.display()))?
+            .into_iter()
+            .collect();
+        approved.extend(explicit.iter().cloned());
+        return settle_approval(&data_home, app_id, &approved, true);
     }
-    let roots = list_installed_roots();
-    if roots
-        .iter()
-        .any(|root| ImageFiles::in_store(root, app_id).any_present())
-    {
+    if image {
         anyhow::bail!(
             "{app_id} is installed as a verified image, whose capabilities weft-pack cannot \
              read; approve them by name: weft-pack approve {app_id} <capability>..."
         );
     }
+    let manifest = launched_manifest(&roots, app_id)?;
+    if !manifest.capabilities().iter().any(|c| needs_approval(c)) {
+        println!("{app_id} declares nothing that needs approval");
+    }
+    settle_approval(&data_home, app_id, manifest.capabilities(), true)
+}
+
+/// The manifest of the package of `app_id` that weft-appd launches from a
+/// directory or revision: the first of `roots` holding one.
+fn launched_manifest(roots: &[PathBuf], app_id: &str) -> anyhow::Result<Manifest> {
     let found = roots
         .iter()
         .find_map(|root| match active(root, app_id) {
             Ok(Some(found))
-                if found
-                    .dir()
-                    .join(weft_ipc_types::manifest::MANIFEST_FILE)
-                    .is_file() =>
+                if std::fs::symlink_metadata(
+                    found.dir().join(weft_ipc_types::manifest::MANIFEST_FILE),
+                )
+                .is_ok() =>
             {
                 Some(found)
             }
@@ -588,10 +616,7 @@ fn approve_package(app_id: &str, explicit: &[String]) -> anyhow::Result<()> {
         "{} declares another app ID",
         found.dir().display()
     );
-    if !manifest.capabilities().iter().any(|c| needs_approval(c)) {
-        println!("{app_id} declares nothing that needs approval");
-    }
-    settle_approval(&data_home, app_id, manifest.capabilities(), true)
+    Ok(manifest)
 }
 
 /// The active package of `app_id` in `store_root`.
@@ -2155,12 +2180,29 @@ mod tests {
         // Capabilities can be approved by name, and only valid ones that
         // need approval.
         with_home(&home, || {
-            approve_package(app_id, &["sys:clipboard:read".to_owned()])
+            with_store(&store, || {
+                approve_package(app_id, &["sys:clipboard:read".to_owned()])
+            })
         })
         .unwrap();
-        assert!(pending(&["sys:clipboard:read"]).is_empty());
+        // Added to what was approved before.
+        assert!(pending(&["sys:notifications", "sys:clipboard:read"]).is_empty());
+        let undeclared = with_home(&home, || {
+            with_store(&store, || {
+                approve_package(app_id, &["sys:clipboard:write".to_owned()])
+            })
+        });
+        assert!(
+            undeclared.is_err(),
+            "approved a capability the package does not declare"
+        );
         for refused in ["fs:rw:app-data", "sys:everything"] {
-            assert!(with_home(&home, || approve_package(app_id, &[refused.to_owned()])).is_err());
+            assert!(
+                with_home(&home, || with_store(&store, || {
+                    approve_package(app_id, &[refused.to_owned()])
+                }))
+                .is_err()
+            );
         }
         // Uninstalling forgets the approval.
         with_home(&home, || uninstall_package_from(app_id, &store)).unwrap();
