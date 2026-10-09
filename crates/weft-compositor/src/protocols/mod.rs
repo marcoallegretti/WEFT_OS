@@ -33,6 +33,8 @@ pub struct WeftShellWindowData {
     pub role: String,
     pub surface: Option<wayland_server::protocol::wl_surface::WlSurface>,
     pub closed: std::sync::atomic::AtomicBool,
+    /// The edge strip a panel reserved with set_exclusive_zone.
+    pub exclusive_zone: std::sync::Mutex<Option<(server::zweft_shell_window_v1::Edge, i32)>>,
 }
 
 impl WeftShellState {
@@ -41,7 +43,7 @@ impl WeftShellState {
         D: GlobalDispatch<ZweftShellManagerV1, ()>,
         D: 'static,
     {
-        let global = display.create_global::<D, ZweftShellManagerV1, ()>(2, ());
+        let global = display.create_global::<D, ZweftShellManagerV1, ()>(3, ());
         Self {
             _global: global,
             panels: Vec::new(),
@@ -97,6 +99,7 @@ mod tests {
             role: "normal".into(),
             surface: None,
             closed: std::sync::atomic::AtomicBool::new(false),
+            exclusive_zone: std::sync::Mutex::new(None),
         };
         assert_eq!(d.app_id, "com.example.test");
         assert_eq!(d.title, "Test Window");
@@ -112,6 +115,7 @@ mod tests {
             role: String::new(),
             surface: None,
             closed: std::sync::atomic::AtomicBool::new(false),
+            exclusive_zone: std::sync::Mutex::new(None),
         };
         assert!(!d.closed.load(Ordering::Relaxed));
         d.closed.store(true, Ordering::Relaxed);
@@ -122,14 +126,14 @@ mod tests {
     fn manager_interface_name_and_version() {
         let iface = ZweftShellManagerV1::interface();
         assert_eq!(iface.name, "zweft_shell_manager_v1");
-        assert_eq!(iface.version, 2);
+        assert_eq!(iface.version, 3);
     }
 
     #[test]
     fn window_interface_name_and_version() {
         let iface = ZweftShellWindowV1::interface();
         assert_eq!(iface.name, "zweft_shell_window_v1");
-        assert_eq!(iface.version, 2);
+        assert_eq!(iface.version, 3);
     }
 
     #[test]

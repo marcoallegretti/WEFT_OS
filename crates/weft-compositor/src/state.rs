@@ -542,6 +542,7 @@ impl Dispatch<ZweftShellManagerV1, ()> for WeftCompositorState {
                         role,
                         surface,
                         closed: std::sync::atomic::AtomicBool::new(false),
+                        exclusive_zone: std::sync::Mutex::new(None),
                     },
                 );
                 if let Some(session) = session
@@ -585,7 +586,7 @@ impl Dispatch<ZweftShellManagerV1, ()> for WeftCompositorState {
 
 impl Dispatch<ZweftShellWindowV1, WeftShellWindowData> for WeftCompositorState {
     fn request(
-        _state: &mut Self,
+        state: &mut Self,
         _client: &Client,
         resource: &ZweftShellWindowV1,
         request: zweft_shell_window_v1::Request,
@@ -612,6 +613,27 @@ impl Dispatch<ZweftShellWindowV1, WeftShellWindowData> for WeftCompositorState {
                 height,
             } => {
                 resource.configure(x, y, width, height, 0);
+            }
+            zweft_shell_window_v1::Request::SetExclusiveZone { edge, size } => {
+                let is_panel = state
+                    .weft_shell_state
+                    .panels()
+                    .any(|panel| panel == resource);
+                let edge = edge.into_result().ok();
+                match edge {
+                    Some(edge) if is_panel && size >= 0 => {
+                        let zone = (size > 0).then_some((edge, size));
+                        *data
+                            .exclusive_zone
+                            .lock()
+                            .unwrap_or_else(|p| p.into_inner()) = zone;
+                        state.layout_app_windows();
+                    }
+                    _ => resource.post_error(
+                        crate::protocols::server::zweft_shell_window_v1::Error::InvalidExclusiveZone,
+                        "only a panel may reserve an edge, with a size of at least 0",
+                    ),
+                }
             }
         }
     }

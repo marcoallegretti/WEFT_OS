@@ -9,6 +9,11 @@ use crate::protocols::{
     client::{zweft_shell_manager_v1, zweft_shell_window_v1},
 };
 
+/// Height in logical pixels of the taskbar strip the system UI draws along
+/// the bottom of the output; it matches `--taskbar-height` in
+/// `infra/shell/system-ui.html`.
+pub const TASKBAR_HEIGHT: i32 = 48;
+
 // ── Window state ──────────────────────────────────────────────────────────────
 
 pub struct ShellWindowState {
@@ -72,7 +77,7 @@ impl Dispatch<wl_registry::WlRegistry, ()> for AppData {
         } = event
             && interface == "zweft_shell_manager_v1"
         {
-            let mgr = registry.bind::<ZweftShellManagerV1, _, _>(name, version.min(2), qh, ());
+            let mgr = registry.bind::<ZweftShellManagerV1, _, _>(name, version.min(3), qh, ());
             state.manager = Some(mgr);
         }
     }
@@ -213,6 +218,11 @@ impl ShellClient {
             &qh,
             (),
         );
+        // The taskbar's strip at the bottom of the output is kept free of
+        // application windows.
+        if window.version() >= 3 {
+            window.set_exclusive_zone(zweft_shell_window_v1::Edge::Bottom, TASKBAR_HEIGHT);
+        }
         data.window = Some(window);
 
         event_queue

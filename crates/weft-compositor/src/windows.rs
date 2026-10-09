@@ -10,7 +10,7 @@ use smithay::desktop::Window;
 use smithay::reexports::wayland_protocols::xdg::shell::server::xdg_toplevel;
 use smithay::reexports::wayland_server::Resource;
 use smithay::reexports::wayland_server::protocol::wl_surface::WlSurface;
-use smithay::utils::SERIAL_COUNTER;
+use smithay::utils::{Logical, Rectangle, SERIAL_COUNTER};
 use smithay::wayland::seat::WaylandFocus;
 
 use crate::protocols::WeftShellWindowData;
@@ -121,6 +121,7 @@ impl WeftCompositorState {
         for window in &others {
             self.space.raise_element(window, false);
         }
+        self.layout_app_windows();
     }
 
     /// Maps a new toplevel. The first window a session maps in its lifetime
@@ -145,8 +146,11 @@ impl WeftCompositorState {
         self.space.map_element(window.clone(), (0, 0), false);
         if self.is_panel(&window) {
             self.fit_panels();
-        } else if first {
-            self.activate_window(&window);
+        } else {
+            self.layout_app_windows();
+            if first {
+                self.activate_window(&window);
+            }
         }
     }
 
@@ -184,6 +188,66 @@ impl WeftCompositorState {
                     keyboard.set_focus(self, None, SERIAL_COUNTER.next_serial());
                 }
             }
+        }
+    }
+
+    /// The part of the output that application windows occupy: the output
+    /// less the strips the panels reserved.
+    pub fn work_area(&self) -> Option<Rectangle<i32, Logical>> {
+        use crate::protocols::server::zweft_shell_window_v1::Edge;
+        let output = self.space.outputs().next()?;
+        let mut area = self.space.output_geometry(output)?;
+        for panel in self.weft_shell_state.panels() {
+            let Some(data) = panel.data::<WeftShellWindowData>() else {
+                continue;
+            };
+            let zone = *data
+                .exclusive_zone
+                .lock()
+                .unwrap_or_else(|p| p.into_inner());
+            let Some((edge, size)) = zone else {
+                continue;
+            };
+            match edge {
+                Edge::Top => {
+                    let size = size.min(area.size.h);
+                    area.loc.y += size;
+                    area.size.h -= size;
+                }
+                Edge::Bottom => area.size.h -= size.min(area.size.h),
+                Edge::Left => {
+                    let size = size.min(area.size.w);
+                    area.loc.x += size;
+                    area.size.w -= size;
+                }
+                Edge::Right => area.size.w -= size.min(area.size.w),
+            }
+        }
+        Some(area)
+    }
+
+    /// Places every application window to fill the work area, so none
+    /// covers the panel's reserved strips.
+    pub fn layout_app_windows(&mut self) {
+        let Some(area) = self.work_area() else {
+            return;
+        };
+        let apps: Vec<Window> = self
+            .space
+            .elements()
+            .filter(|window| !self.is_panel(window))
+            .cloned()
+            .collect();
+        for window in apps {
+            if let Some(toplevel) = window.toplevel() {
+                toplevel.with_pending_state(|state| {
+                    state.size = Some(area.size);
+                    state.states.set(xdg_toplevel::State::Maximized);
+                });
+                toplevel.send_pending_configure();
+            }
+            // Re-mapped in stacking order, so the order is kept.
+            self.space.map_element(window.clone(), area.loc, false);
         }
     }
 

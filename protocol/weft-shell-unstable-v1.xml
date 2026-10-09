@@ -43,7 +43,7 @@
 
   <!-- ───────────────────────────── Manager ───────────────────────────── -->
 
-  <interface name="zweft_shell_manager_v1" version="2">
+  <interface name="zweft_shell_manager_v1" version="3">
 
     <description summary="shell session manager">
       Bound once by weft-servo-shell. The manager owns the shell session.
@@ -95,7 +95,7 @@
 
   <!-- ───────────────────────────── Window ────────────────────────────── -->
 
-  <interface name="zweft_shell_window_v1" version="2">
+  <interface name="zweft_shell_window_v1" version="3">
 
     <description summary="a compositor-managed window slot">
       Represents one visual window. The compositor controls the effective
@@ -121,6 +121,16 @@
              summary="request sent after window_closed was received"/>
       <entry name="role_not_permitted" value="1"
              summary="an application session requested a shell-only role"/>
+      <entry name="invalid_exclusive_zone" value="2"
+             summary="set_exclusive_zone on a window that is not a panel, or with a negative size"/>
+    </enum>
+
+    <enum name="edge">
+      <description summary="output edge"/>
+      <entry name="top"    value="1"/>
+      <entry name="bottom" value="2"/>
+      <entry name="left"   value="3"/>
+      <entry name="right"  value="4"/>
     </enum>
 
     <request name="destroy" type="destructor">
@@ -153,6 +163,19 @@
       <arg name="y"      type="int" summary="requested y position"/>
       <arg name="width"  type="int" summary="requested width"/>
       <arg name="height" type="int" summary="requested height"/>
+    </request>
+
+    <request name="set_exclusive_zone" since="3">
+      <description summary="reserve an edge of the output for the panel">
+        Reserves a strip of the given size, in logical pixels, along an
+        edge of the output for shell chrome drawn by this panel, such as a
+        taskbar. The compositor places application windows only in the
+        work area that remains, so they never cover the strip. A size of 0
+        releases the reservation; a later request replaces the earlier one.
+        Only a panel window may reserve a zone.
+      </description>
+      <arg name="edge" type="uint" enum="edge" summary="edge to reserve"/>
+      <arg name="size" type="int" summary="thickness of the strip"/>
     </request>
 
     <event name="configure">

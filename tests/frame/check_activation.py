@@ -7,6 +7,8 @@ nested desktop (see session.py). Each application page switches between its
 colour and a lighter shade on every key press. In the presented pixels:
 
 - the panel fills the compositor output and stays beneath the applications;
+- application windows fill the work area: the output less the strip the
+  shell reserves for its taskbar along the bottom, which stays visible;
 - each newly launched application is shown on top and receives keys;
 - ACTIVATE_APP, the request the taskbar sends, brings the other session's
   window back to the front with keyboard focus;
@@ -35,6 +37,8 @@ APPS = {
     "org.weft.test.blue": ((0, 0, 200), (120, 120, 255)),
 }
 STARTUP_TIMEOUT = 120.0
+# The strip weft-servo-shell reserves at the bottom (TASKBAR_HEIGHT).
+TASKBAR = 48
 
 PANEL_PAGE = ('<!DOCTYPE html><html><body style="margin:0;background:rgb(0,160,0);'
               'width:100vw;height:100vh"></body></html>')
@@ -97,10 +101,9 @@ def run(args, desktop, store, home):
     shot, panel = wait_for_color(desktop, GREEN, 60)
     if panel is None:
         raise AssertionError("the panel was not shown")
-    width, height, _ = parse_ppm(shot)
-    # The compositor sizes the panel to its whole output, which reaches the
-    # right and bottom edges of the nested desktop.
-    if panel[2] != width - 1 or panel[3] < height - 3:
+    # The compositor sizes the panel to its whole output, larger than a
+    # toplevel's default size.
+    if panel[2] - panel[0] + 1 < 1000 or panel[3] - panel[1] + 1 < 700:
         raise AssertionError(f"the panel does not fill the output: {panel}")
 
     t = Path(args.target)
@@ -133,9 +136,13 @@ def run(args, desktop, store, home):
             box, _, _ = area(shot, color)
             hidden = all(area(shot, c)[0] is None for c in others)
             if box is not None and hidden:
-                # The panel stays visible beside the application window.
-                if area(shot, GREEN)[0] is None:
-                    raise AssertionError("an application covered the panel")
+                # The application fills the work area: the panel's whole
+                # width, down to the reserved strip, which stays visible.
+                if box[0] != panel[0] or box[2] != panel[2] or box[1] != panel[1]:
+                    raise AssertionError(f"{app_id} does not fill the work area: {box}")
+                if box[3] != panel[3] - TASKBAR:
+                    raise AssertionError(
+                        f"{app_id} does not end at the reserved strip: {box}, panel {panel}")
                 return
             time.sleep(0.3)
         state = "pressed " if pressed else ""
