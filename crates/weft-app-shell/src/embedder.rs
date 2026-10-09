@@ -48,6 +48,16 @@ impl ServoDelegate for WeftServoDelegate {
     fn notify_error(&self, error: servo::ServoError) {
         tracing::error!(?error, "Servo error");
     }
+
+    /// Loads not tied to the webview, such as `navigator.sendBeacon()`,
+    /// worklets and notification icons, also come from the application page,
+    /// and none of them is needed: all are refused.
+    fn load_web_resource(&self, load: servo::WebResourceLoad) {
+        let url = load.request().url.clone();
+        tracing::warn!(%url, "resource load outside the webview denied");
+        load.intercept(servo::WebResourceResponse::new(url))
+            .cancel();
+    }
 }
 
 /// Frame and load progress reported by Servo, shared with the event loop.
@@ -65,6 +75,8 @@ struct WeftWebViewDelegate {
     signals: Arc<FrameSignals>,
     /// URL prefix of the application's UI directory; see `ui_scope`.
     scope: String,
+    /// The UI directory with symbolic links resolved, if it exists.
+    ui_dir: Option<std::path::PathBuf>,
     /// The bridge's WebSocket handshake URL, as the network layer requests it
     /// (`ws:` becomes `http:`).
     bridge: String,
@@ -87,14 +99,18 @@ impl WebViewDelegate for WeftWebViewDelegate {
         }
     }
 
-    /// Every resource the page loads passes through here, including
-    /// `fetch()`, XHR, subresources, redirects and WebSocket handshakes. The
-    /// page may read its own UI files and open the session bridge; any other
-    /// local file or network destination is refused with a network error.
-    /// Network access belongs to the component, under its fetch grants.
+    /// Every resource the webview loads passes through here, including
+    /// `fetch()`, XHR, subresources and WebSocket handshakes. The page may
+    /// read its own UI files and open the session bridge; any other local
+    /// file or network destination is refused with a network error. Network
+    /// access belongs to the component, under its fetch grants.
+    ///
+    /// On a redirect Servo reports the first URL of the chain again, not the
+    /// target, so every redirect is refused.
     fn load_web_resource(&self, _webview: servo::WebView, load: servo::WebResourceLoad) {
-        let url = load.request().url.clone();
-        if resource_allowed(url.as_str(), &self.scope, &self.bridge) {
+        let request = load.request();
+        let url = request.url.clone();
+        if !request.is_redirect && self.allows(&ServoUrl::from_url(url.clone())) {
             return;
         }
         tracing::warn!(%url, "resource outside the application denied");
@@ -160,15 +176,37 @@ fn in_scope(url: &str, scope: &str) -> bool {
     })
 }
 
-/// Whether an application page may load `url`: a file inside its UI
-/// directory, an inline (`data:`, `blob:`, `about:`) resource, or the session
-/// bridge.
-fn resource_allowed(url: &str, scope: &str, bridge: &str) -> bool {
-    in_scope(url, scope)
-        || url == bridge
-        || ["data:", "blob:", "about:"]
-            .iter()
-            .any(|scheme| url.starts_with(scheme))
+impl WeftWebViewDelegate {
+    /// Whether an application page may load `url`: a file inside its UI
+    /// directory, also after resolving symbolic links, an inline (`data:`,
+    /// `blob:`) resource, `about:blank`, or the session bridge.
+    fn allows(&self, url: &ServoUrl) -> bool {
+        match url.scheme() {
+            "file" => {
+                in_scope(url.as_str(), &self.scope)
+                    && self.ui_dir.as_deref().is_some_and(|dir| {
+                        url.to_file_path()
+                            .ok()
+                            .and_then(|path| path.canonicalize().ok())
+                            .is_some_and(|path| path.starts_with(dir))
+                    })
+            }
+            "data" | "blob" => true,
+            "about" => url.as_str() == "about:blank",
+            _ => url.as_str() == self.bridge,
+        }
+    }
+}
+
+/// The UI directory behind the URL prefix `scope`, with symbolic links
+/// resolved.
+fn ui_dir(scope: &str) -> Option<std::path::PathBuf> {
+    ServoUrl::parse(scope)
+        .ok()?
+        .to_file_path()
+        .ok()?
+        .canonicalize()
+        .ok()
 }
 
 /// `value` as a single-quoted JavaScript string literal.
@@ -457,6 +495,7 @@ impl ApplicationHandler<ServoWake> for App {
             .delegate(Rc::new(WeftWebViewDelegate {
                 signals: Arc::clone(&self.signals),
                 scope: ui_scope(&self.url),
+                ui_dir: ui_dir(&ui_scope(&self.url)),
                 bridge: format!("http://127.0.0.1:{}/app", self.ws_port),
             }))
             .user_content_manager(ucm)

@@ -4,9 +4,12 @@
 <meta charset="utf-8">
 <title>confinement</title>
 <style>
+  @import url('@HTTP@style.css');
+  @font-face { font-family: probe; src: url('@HTTP@font.woff'); }
   html, body { margin: 0; height: 100%; }
-  body { display: flex; flex-direction: column; }
+  body { display: flex; flex-direction: column; font-family: probe; }
   div { flex: 1; background: #808080; }
+  iframe { position: absolute; width: 1px; height: 1px; border: 0; }
 </style>
 </head>
 <body>
@@ -14,17 +17,24 @@
 <div id="bridge"></div>
 <div id="outside-image"></div>
 <div id="other-image"></div>
+<div id="linked-image"></div>
 <div id="http-image"></div>
 <div id="http-fetch"></div>
 <div id="websocket"></div>
+<div id="worker-fetch"></div>
+<div id="srcdoc-internals"></div>
+<span>probe</span>
+<iframe srcdoc="<img src='@HTTP@srcdoc.png'><script>parent.postMessage('servo:' + typeof navigator.servo, '*');</script>"></iframe>
 <script>
 // One band per probe: green when the outcome matches the policy, red when it
 // does not. Every refused probe would succeed without the policy: the images
-// are valid PNG files, the fetch uses no-cors, so an opaque response would
-// resolve it, and the WebSocket listener accepts connections. The harness
-// substitutes the ports and the path of a file outside the package.
-var HTTP = 'http://127.0.0.1:@HTTP_PORT@/';
-var TCP = 'ws://127.0.0.1:@TCP_PORT@/';
+// are valid PNG files, the fetches use no-cors, so an opaque response would
+// resolve them, and the WebSocket listener completes the handshake. The
+// stylesheet import, the font, the frame's image and the beacon have no band;
+// the harness requires that none of them reaches its server. The harness
+// substitutes the server URLs and the path of a file outside the package.
+var HTTP = '@HTTP@';
+var WS = '@WS@';
 var OTHER = '@OTHER_URL@';
 
 function mark(id, ok) {
@@ -40,18 +50,38 @@ function image(id, src, shouldLoad) {
 image('own-image', 'own.png', true);
 image('outside-image', '../outside.png', false);
 image('other-image', OTHER, false);
+image('linked-image', 'linked/other.png', false);
 image('http-image', HTTP + 'image.png', false);
 fetch(HTTP + 'probe', { mode: 'no-cors' }).then(
   function () { mark('http-fetch', false); },
   function () { mark('http-fetch', true); });
 
 try {
-  var ws = new WebSocket(TCP);
+  var ws = new WebSocket(WS);
   ws.onopen = function () { mark('websocket', false); };
   ws.onerror = function () { mark('websocket', true); };
 } catch (e) {
   mark('websocket', true);
 }
+
+try {
+  var worker = new Worker('worker.js');
+  worker.onmessage = function (event) { mark('worker-fetch', event.data === 'refused'); };
+  worker.onerror = function () { mark('worker-fetch', false); };
+  worker.postMessage(HTTP + 'worker');
+} catch (e) {
+  mark('worker-fetch', false);
+}
+
+// A srcdoc frame holds this page's content and must not reach the engine's
+// privileged navigator.servo interface.
+addEventListener('message', function (event) {
+  if (typeof event.data === 'string' && event.data.indexOf('servo:') === 0) {
+    mark('srcdoc-internals', event.data === 'servo:undefined');
+  }
+});
+
+try { navigator.sendBeacon(HTTP + 'beacon', 'probe'); } catch (e) {}
 
 (function bridge() {
   if (!window.weftIpc) { setTimeout(bridge, 50); return; }
