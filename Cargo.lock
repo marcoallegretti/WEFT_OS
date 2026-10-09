@@ -10473,6 +10473,7 @@ dependencies = [
  "futures-util",
  "libc",
  "rmp-serde",
+ "rustix 1.1.4",
  "sd-notify",
  "serde",
  "serde_json",
@@ -10494,6 +10495,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "bitflags 2.11.0",
+ "rustix 1.1.4",
  "sd-notify",
  "smithay",
  "smithay-drm-extras",

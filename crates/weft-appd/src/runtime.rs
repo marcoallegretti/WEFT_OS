@@ -191,8 +191,26 @@ fn spawn_app_shell(
     package: &LaunchPackage,
     token: &str,
     bridge_token: Option<String>,
+    wayland: Option<std::os::unix::net::UnixStream>,
 ) -> std::io::Result<tokio::process::Child> {
     let mut command = tokio::process::Command::new(bin);
+    match wayland {
+        // The app shell's only Wayland connection is the one created for its
+        // session, handed over as its standard input: WAYLAND_SOCKET names
+        // that descriptor, and no display socket is offered to connect
+        // anywhere else. Only this child receives the descriptor.
+        Some(stream) => {
+            command
+                .stdin(std::process::Stdio::from(std::os::fd::OwnedFd::from(
+                    stream,
+                )))
+                .env("WAYLAND_SOCKET", "0")
+                .env_remove("WAYLAND_DISPLAY");
+        }
+        None => {
+            command.stdin(std::process::Stdio::null());
+        }
+    }
     if let Some(bridge_token) = bridge_token {
         // The page holds this credential; it must differ from the readiness
         // token, which page output could otherwise use to fake readiness.
@@ -204,7 +222,6 @@ fn spawn_app_shell(
         .arg("--ui")
         .arg(&package.ui_entry)
         .env(READY_TOKEN_ENV, token)
-        .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
         .kill_on_drop(true)
@@ -330,7 +347,7 @@ pub(crate) async fn supervise(
         relay: Some(relay),
         image,
         compositor_tx,
-        surface_announced: false,
+        client_attached: false,
     };
 
     let mut runtime = match cmd.spawn() {
@@ -341,23 +358,6 @@ pub(crate) async fn supervise(
                 .await;
         }
     };
-    if let Some(tx) = &session.compositor_tx {
-        let pid = runtime.id().unwrap_or(0);
-        // A full queue (compositor disconnected) must not stall the session.
-        session.surface_announced = tx
-            .try_send(AppdToCompositor::AppSurfaceCreated {
-                app_id: app_id.to_owned(),
-                session_id,
-                pid,
-            })
-            .is_ok();
-        if !session.surface_announced {
-            tracing::warn!(
-                session_id,
-                "compositor queue unavailable; surface not announced"
-            );
-        }
-    }
     let runtime_stdout = runtime.stdout.take().expect("stdout piped");
     tokio::spawn(drain_stderr(
         runtime.stderr.take().expect("stderr piped"),
@@ -377,16 +377,35 @@ pub(crate) async fn supervise(
     };
     tokio::spawn(drain_stdout(runtime_stdout, session_id));
 
-    let bridge_token = registry.lock().await.bridge_token(session_id);
-    let mut app_shell =
-        match spawn_app_shell(&shell_bin, session_id, &package, &token, bridge_token) {
-            Ok(child) => child,
-            Err(e) => {
-                return session
-                    .settle(&registry, &format!("failed to spawn app shell: {e}"))
-                    .await;
+    // With a compositor, the app shell connects only through a connection
+    // the compositor received for this session, so every surface it creates
+    // is bound to the session.
+    let wayland = match &session.compositor_tx {
+        None => None,
+        Some(tx) => match attach_client(tx, session_id, app_id) {
+            Ok(stream) => {
+                session.client_attached = true;
+                Some(stream)
             }
-        };
+            Err(reason) => return session.settle(&registry, &reason).await,
+        },
+    };
+    let bridge_token = registry.lock().await.bridge_token(session_id);
+    let mut app_shell = match spawn_app_shell(
+        &shell_bin,
+        session_id,
+        &package,
+        &token,
+        bridge_token,
+        wayland,
+    ) {
+        Ok(child) => child,
+        Err(e) => {
+            return session
+                .settle(&registry, &format!("failed to spawn app shell: {e}"))
+                .await;
+        }
+    };
     let shell_stdout = app_shell.stdout.take().expect("stdout piped");
     tokio::spawn(drain_stderr(
         app_shell.stderr.take().expect("stderr piped"),
@@ -438,6 +457,26 @@ pub(crate) async fn supervise(
     session.settle(&registry, &reason).await
 }
 
+/// Creates the session's Wayland connection and queues the compositor's end
+/// for the compositor, returning the app shell's end.
+fn attach_client(
+    tx: &CompositorSender,
+    session_id: u64,
+    app_id: &str,
+) -> Result<std::os::unix::net::UnixStream, String> {
+    let (shell, compositor) = std::os::unix::net::UnixStream::pair()
+        .map_err(|e| format!("cannot create the app's Wayland connection: {e}"))?;
+    tx.try_send(crate::compositor_client::Outbound {
+        msg: AppdToCompositor::AttachClient {
+            session_id,
+            app_id: app_id.to_owned(),
+        },
+        fd: Some(compositor.into()),
+    })
+    .map_err(|_| "the compositor connection is not available".to_owned())?;
+    Ok(shell)
+}
+
 /// Marks a session that never started any process as stopped.
 async fn stop_unstarted(
     registry: &Registry,
@@ -467,7 +506,8 @@ struct OwnedSession {
     /// The mounted package image, released after both children have exited.
     image: Option<Mount>,
     compositor_tx: Option<CompositorSender>,
-    surface_announced: bool,
+    /// Whether the compositor was given this session's client connection.
+    client_attached: bool,
 }
 
 impl OwnedSession {
@@ -476,10 +516,10 @@ impl OwnedSession {
         tracing::info!(session_id, reason, "stopping session");
         kill_child(self.app_shell).await;
         kill_child(self.runtime).await;
-        if self.surface_announced
+        if self.client_attached
             && let Some(tx) = &self.compositor_tx
             && tx
-                .try_send(AppdToCompositor::AppSurfaceDestroyed { session_id })
+                .try_send(AppdToCompositor::AppSurfaceDestroyed { session_id }.into())
                 .is_err()
         {
             tracing::warn!(

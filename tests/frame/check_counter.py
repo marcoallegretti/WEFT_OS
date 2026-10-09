@@ -169,9 +169,16 @@ def run(args, desktop, xdotool):
     appd = AppdClient(port, token)
     appd.send({"type": "LAUNCH_APP", "app_id": APP_ID, "surface_id": 0})
     try:
-        appd.wait_for(lambda m: m.get("type") == "APP_READY", STARTUP_TIMEOUT)
+        ready = appd.wait_for(lambda m: m.get("type") == "APP_READY", STARTUP_TIMEOUT)
     except TimeoutError:
         raise AssertionError("no APP_READY")
+    session_id = ready["session_id"]
+
+    # The app's only Wayland connection is the one appd handed the
+    # compositor for this session.
+    bound = f"client bound to session session_id={session_id} app_id={APP_ID}"
+    if bound not in desktop.log_text("compositor"):
+        raise AssertionError(f"the compositor did not bind the app's client: {bound!r}")
 
     def capture_card():
         deadline = time.monotonic() + 10
@@ -212,6 +219,15 @@ def run(args, desktop, xdotool):
         raise AssertionError("counts 0, 1 and 2 are not distinct on screen")
     if states[3] != states[1]:
         raise AssertionError("count after ArrowDown does not match the count after one ArrowUp")
+
+    # Ending the session closes its client in the compositor.
+    appd.send({"type": "TERMINATE_APP", "session_id": session_id})
+    deadline = time.monotonic() + 15
+    closed = f"closing the client of an ended session session_id={session_id}"
+    while closed not in desktop.log_text("compositor"):
+        if time.monotonic() > deadline:
+            raise AssertionError(f"the compositor did not close the session's client: {closed!r}")
+        time.sleep(0.3)
 
 
 def subprocess_run(xdotool, display, arguments):

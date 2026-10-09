@@ -1,3 +1,4 @@
+use std::os::fd::OwnedFd;
 use std::path::PathBuf;
 
 use tokio::io::AsyncWriteExt;
@@ -6,7 +7,19 @@ use weft_ipc_types::{
     AppdToCompositor, CompositorToAppd, MAX_FRAME_LEN, frame_decode, frame_encode,
 };
 
-pub type CompositorSender = mpsc::Sender<AppdToCompositor>;
+/// A message for the compositor and the file descriptor it carries, if any.
+pub struct Outbound {
+    pub msg: AppdToCompositor,
+    pub fd: Option<OwnedFd>,
+}
+
+impl From<AppdToCompositor> for Outbound {
+    fn from(msg: AppdToCompositor) -> Self {
+        Self { msg, fd: None }
+    }
+}
+
+pub type CompositorSender = mpsc::Sender<Outbound>;
 
 /// Resolve the compositor IPC socket path.
 ///
@@ -26,15 +39,14 @@ pub fn socket_path() -> Option<PathBuf> {
 ///
 /// The task connects to `socket_path`, retrying every 2 s on failure. If the
 /// connection drops while sending, it waits 500 ms then reconnects. Incoming
-/// `CompositorToAppd` frames are decoded and logged; no behavioural action is
-/// taken yet (surface lifecycle hookup happens in a later task).
+/// `CompositorToAppd` frames are decoded and logged.
 pub fn spawn(socket_path: PathBuf) -> CompositorSender {
-    let (tx, rx) = mpsc::channel::<AppdToCompositor>(32);
+    let (tx, rx) = mpsc::channel::<Outbound>(32);
     tokio::spawn(run_client(socket_path, rx));
     tx
 }
 
-async fn run_client(socket_path: PathBuf, mut rx: mpsc::Receiver<AppdToCompositor>) {
+async fn run_client(socket_path: PathBuf, mut rx: mpsc::Receiver<Outbound>) {
     loop {
         let stream = loop {
             match tokio::net::UnixStream::connect(&socket_path).await {
@@ -53,22 +65,66 @@ async fn run_client(socket_path: PathBuf, mut rx: mpsc::Receiver<AppdToComposito
         tokio::spawn(read_unix_incoming(read_half));
 
         loop {
-            let Some(msg) = rx.recv().await else {
+            let Some(outbound) = rx.recv().await else {
                 return;
             };
-            match frame_encode(&msg) {
-                Ok(frame) => {
-                    if write_half.write_all(&frame).await.is_err() {
-                        tracing::warn!("compositor IPC write failed; reconnecting");
-                        break;
-                    }
+            let frame = match frame_encode(&outbound.msg) {
+                Ok(frame) => frame,
+                Err(e) => {
+                    tracing::warn!(?e, "compositor IPC encode error");
+                    continue;
                 }
-                Err(e) => tracing::warn!(?e, "compositor IPC encode error"),
+            };
+            if send_frame(&mut write_half, &frame, outbound.fd)
+                .await
+                .is_err()
+            {
+                tracing::warn!("compositor IPC write failed; reconnecting");
+                break;
             }
         }
 
         tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
     }
+}
+
+/// Writes `frame`, attaching `fd` to its first bytes so the compositor
+/// receives the descriptor together with the message it belongs to.
+async fn send_frame(
+    stream: &mut tokio::net::unix::OwnedWriteHalf,
+    frame: &[u8],
+    fd: Option<OwnedFd>,
+) -> std::io::Result<()> {
+    use rustix::net::{SendAncillaryBuffer, SendAncillaryMessage, SendFlags, sendmsg};
+    use std::mem::MaybeUninit;
+    use std::os::fd::AsFd;
+    let Some(fd) = fd else {
+        return stream.write_all(frame).await;
+    };
+    let socket: &tokio::net::UnixStream = stream.as_ref();
+    let sent = loop {
+        socket.writable().await?;
+        let result = socket.try_io(tokio::io::Interest::WRITABLE, || {
+            let mut space = [MaybeUninit::uninit(); rustix::cmsg_space!(ScmRights(1))];
+            let mut control = SendAncillaryBuffer::new(&mut space);
+            let fds = [fd.as_fd()];
+            control.push(SendAncillaryMessage::ScmRights(&fds));
+            sendmsg(
+                socket,
+                &[std::io::IoSlice::new(frame)],
+                &mut control,
+                SendFlags::NOSIGNAL,
+            )
+            .map_err(std::io::Error::from)
+        });
+        match result {
+            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => continue,
+            other => break other?,
+        }
+    };
+    // The descriptor travelled with the first bytes; the rest of a partly
+    // sent frame follows as plain data.
+    stream.write_all(&frame[sent..]).await
 }
 
 async fn read_unix_incoming(mut reader: tokio::net::unix::OwnedReadHalf) {
@@ -110,8 +166,8 @@ fn handle_incoming(msg: CompositorToAppd) {
         CompositorToAppd::SurfaceReady { session_id } => {
             tracing::debug!(session_id, "SurfaceReady from compositor");
         }
-        CompositorToAppd::ClientDisconnected { pid } => {
-            tracing::debug!(pid, "ClientDisconnected from compositor");
+        CompositorToAppd::ClientDisconnected { session_id } => {
+            tracing::debug!(session_id, "ClientDisconnected from compositor");
         }
     }
 }
