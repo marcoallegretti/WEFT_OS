@@ -9,7 +9,11 @@ use std::{
 };
 
 #[cfg(unix)]
-use smithay::reexports::calloop::{Interest, Mode, PostAction, channel, generic::Generic};
+use smithay::reexports::calloop::{
+    Interest, LoopHandle, Mode, PostAction, RegistrationToken, channel,
+    generic::Generic,
+    timer::{TimeoutAction, Timer},
+};
 #[cfg(unix)]
 use smithay::reexports::wayland_server::backend::{ClientId, DisconnectReason};
 
@@ -47,6 +51,9 @@ pub struct WeftAppdIpc {
     /// Bytes for appd that did not fit in the socket buffer, sent before
     /// anything else so frames stay whole.
     out_buf: Vec<u8>,
+    /// Retries `flush` while `out_buf` holds bytes; armed only then.
+    flush_retry: Option<RegistrationToken>,
+    loop_handle: Option<LoopHandle<'static, WeftCompositorState>>,
 }
 
 #[cfg(unix)]
@@ -62,6 +69,8 @@ impl WeftAppdIpc {
             reported: HashSet::new(),
             disconnected: None,
             out_buf: Vec::new(),
+            flush_retry: None,
+            loop_handle: None,
         }
     }
 
@@ -71,6 +80,7 @@ impl WeftAppdIpc {
                 if self.write_stream.is_some() {
                     self.out_buf.extend_from_slice(&frame);
                     self.flush();
+                    self.schedule_flush();
                 }
             }
             Err(e) => tracing::warn!(?e, "failed to encode compositor IPC message"),
@@ -112,6 +122,32 @@ impl WeftAppdIpc {
             self.write_stream = None;
             self.out_buf.clear();
         }
+    }
+
+    /// Retries the flush until appd has taken every queued byte, so the
+    /// last frames of a burst do not wait for unrelated traffic.
+    fn schedule_flush(&mut self) {
+        if self.out_buf.is_empty() || self.flush_retry.is_some() {
+            return;
+        }
+        let Some(handle) = &self.loop_handle else {
+            return;
+        };
+        let retry = Timer::from_duration(std::time::Duration::from_millis(20));
+        self.flush_retry = handle
+            .insert_source(retry, |_, _, state| {
+                let Some(ipc) = state.appd_ipc.as_mut() else {
+                    return TimeoutAction::Drop;
+                };
+                ipc.flush();
+                if ipc.out_buf.is_empty() {
+                    ipc.flush_retry = None;
+                    TimeoutAction::Drop
+                } else {
+                    TimeoutAction::ToDuration(std::time::Duration::from_millis(20))
+                }
+            })
+            .ok();
     }
 
     /// Reports a session's first toplevel to appd.
@@ -327,6 +363,9 @@ pub fn setup(state: &mut WeftCompositorState) -> anyhow::Result<()> {
 
     tracing::info!(path = %socket_path.display(), "compositor IPC socket open");
 
+    if let Some(ipc) = state.appd_ipc.as_mut() {
+        ipc.loop_handle = Some(state.loop_handle.clone());
+    }
     // Clients bound to a session report their disconnection here.
     let (sender, receiver) = channel::channel::<(u64, ClientId)>();
     if let Some(ipc) = state.appd_ipc.as_mut() {

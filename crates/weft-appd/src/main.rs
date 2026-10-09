@@ -218,25 +218,30 @@ async fn run() -> anyhow::Result<()> {
     }
 
     if let Some(app_ids) = load_session() {
-        // Apps need the compositor connection; give it a moment to come up.
-        let compositor = registry.lock().await.compositor_tx.clone();
-        if let Some(compositor) = compositor {
-            let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
-            while !compositor.is_connected() && tokio::time::Instant::now() < deadline {
-                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        // Restoring runs beside the request loops, so waiting for the
+        // compositor delays neither clients nor shutdown.
+        let registry = Arc::clone(&registry);
+        tokio::spawn(async move {
+            // Apps need the compositor connection; give it a moment.
+            let compositor = registry.lock().await.compositor_tx.clone();
+            if let Some(compositor) = compositor {
+                let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
+                while !compositor.is_connected() && tokio::time::Instant::now() < deadline {
+                    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                }
             }
-        }
-        tracing::info!(count = app_ids.len(), "restoring previous session");
-        for app_id in app_ids {
-            let _ = dispatch(
-                crate::ipc::Request::LaunchApp {
-                    app_id,
-                    surface_id: 0,
-                },
-                &registry,
-            )
-            .await;
-        }
+            tracing::info!(count = app_ids.len(), "restoring previous session");
+            for app_id in app_ids {
+                let _ = dispatch(
+                    crate::ipc::Request::LaunchApp {
+                        app_id,
+                        surface_id: 0,
+                    },
+                    &registry,
+                )
+                .await;
+            }
+        });
     }
 
     #[cfg(unix)]
