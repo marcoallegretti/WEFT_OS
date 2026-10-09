@@ -37,6 +37,10 @@ fn main() -> anyhow::Result<()> {
             let app_id = args.get(2).context("usage: weft-pack uninstall <app_id>")?;
             uninstall_package(app_id)?;
         }
+        Some("rollback") => {
+            let app_id = args.get(2).context("usage: weft-pack rollback <app_id>")?;
+            rollback_package(&resolve_install_root()?, app_id)?;
+        }
         Some("list") => {
             list_installed();
         }
@@ -120,6 +124,7 @@ fn main() -> anyhow::Result<()> {
                 "                                           --claim-data: adopt app data with no owner"
             );
             eprintln!("  weft-pack uninstall    <app_id>          remove installed package");
+            eprintln!("  weft-pack rollback     <app_id>          activate the previous revision");
             eprintln!("  weft-pack list                           list installed packages");
             eprintln!(
                 "  weft-pack build-image   <dir> [--out <img>] create EROFS image with mkfs.erofs"
@@ -418,19 +423,47 @@ fn install_staged(
         }
         let _ = std::fs::remove_dir(&dest);
     }
-    if dest.exists() {
-        anyhow::bail!(
-            "package '{}' is already installed at {}; remove it first",
-            app_id,
-            dest.display()
-        );
-    }
+    // A package installed before revisions existed is replaced by the new
+    // revision only while no session runs from it, since it is not kept.
+    let legacy = match active(store_root, app_id)? {
+        Some(Active::Directory(dir)) => Some(
+            weft_ipc_types::store::try_claim(&dir)
+                .with_context(|| format!("open {}", dir.display()))?
+                .with_context(|| {
+                    format!("{app_id} is running from {}; close it first", dir.display())
+                })?,
+        ),
+        _ => None,
+    };
     let admission = admit(staging, app_id, mode, &data_home, claim_data)?;
     let owner = admission.owner;
-    place(staging, &dest, admission)?;
-    println!("installed {} -> {} ({owner})", app_id, dest.display());
+    let revision = place(staging, store_root, app_id, admission)?;
+    drop(legacy);
+    collect(store_root, app_id);
+    println!(
+        "installed {app_id} -> {} (revision {}, {owner})",
+        dest.display(),
+        &revision[..12]
+    );
     Ok(())
 }
+
+/// The active package of `app_id` in `store_root`.
+fn active(
+    store_root: &Path,
+    app_id: &str,
+) -> anyhow::Result<Option<weft_ipc_types::store::Active>> {
+    Ok(weft_ipc_types::store::active(store_root, app_id)?)
+}
+
+use weft_ipc_types::store::Active;
+
+/// How long a leftover staging, unpacking or removal directory must be
+/// unchanged before it counts as abandoned by an interrupted operation.
+const ABANDONED_AFTER: std::time::Duration = std::time::Duration::from_secs(3600);
+
+/// The revision a store keeps for rollback, a link next to the revisions.
+const PREVIOUS_LINK: &str = "previous";
 
 /// The owner a staged package was admitted under, and the owner record this
 /// installation created, if any.
@@ -439,17 +472,301 @@ struct Admission {
     created_record: Option<PathBuf>,
 }
 
-/// Makes the staged package available at `dest`. If that fails, the staging
-/// copy is removed, and so is an owner record this installation created, so
+/// Makes the staged package the active revision of `app_id` and returns
+/// the revision's name. The package becomes an immutable revision named by
+/// its content digest (identical content is installed once), and one rename
+/// of the store's link activates it, so an interruption at any point leaves
+/// the previously active revision, or none on a first installation, in
+/// place. The revision active before is kept for rollback and for the
+/// sessions running from it. If anything fails, the staging copy, a new
+/// revision and an owner record this installation created are removed, so
 /// a failed first installation leaves no claim on the app ID.
-fn place(staging: &Path, dest: &Path, admission: Admission) -> anyhow::Result<()> {
-    if let Err(e) = weft_ipc_types::package::rename_no_replace(staging, dest) {
+fn place(
+    staging: &Path,
+    store_root: &Path,
+    app_id: &str,
+    admission: Admission,
+) -> anyhow::Result<String> {
+    let mut created_revision = None;
+    let result = (|| {
+        let revision = hex::encode(
+            weft_ipc_types::trust::content_digest(staging)
+                .with_context(|| format!("read {}", staging.display()))?,
+        );
+        let revisions = weft_ipc_types::store::revisions_of(store_root, app_id);
+        create_store(&revisions)?;
+        let dir = revisions.join(&revision);
+        sync_tree(staging)?;
+        match weft_ipc_types::package::rename_no_replace(staging, &dir) {
+            Ok(()) => created_revision = Some(dir.clone()),
+            // The same content is already installed; it is activated as is.
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+                let _ = std::fs::remove_dir_all(staging);
+            }
+            Err(e) => {
+                return Err(e)
+                    .with_context(|| format!("move {} -> {}", staging.display(), dir.display()));
+            }
+        }
+        sync_dir(&revisions)?;
+        activate(store_root, app_id, &revision)?;
+        Ok(revision)
+    })();
+    if result.is_err() {
         let _ = std::fs::remove_dir_all(staging);
+        if let Some(dir) = &created_revision {
+            let _ = std::fs::remove_dir_all(dir);
+        }
         if let Some(record) = &admission.created_record {
             let _ = std::fs::remove_file(record);
         }
-        return Err(e).with_context(|| format!("move {} -> {}", staging.display(), dest.display()));
     }
+    result
+}
+
+/// Makes `revision` the active revision of `app_id`. The revision active
+/// before becomes the one kept for rollback. Its link is written first, so
+/// an interruption between the two steps keeps both revisions. A package
+/// directory from before revisions existed is exchanged with the new link in
+/// one step and then removed; the caller holds it so no session runs from it.
+fn activate(store_root: &Path, app_id: &str, revision: &str) -> anyhow::Result<()> {
+    use weft_ipc_types::store::{link_target, revisions_of};
+    let revisions = revisions_of(store_root, app_id);
+    let current = active(store_root, app_id)?;
+    if let Some(Active::Revision { name, .. }) = &current
+        && name != revision
+    {
+        replace_link(&revisions, PREVIOUS_LINK, Path::new(name))?;
+    }
+    let dest = store_root.join(app_id);
+    let link = temporary_link(store_root, app_id, &link_target(app_id, revision))?;
+    let switched = match &current {
+        Some(Active::Directory(_)) => exchange(&link, &dest),
+        _ => std::fs::rename(&link, &dest),
+    };
+    if let Err(e) = switched {
+        let _ = std::fs::remove_file(&link);
+        return Err(e).with_context(|| format!("activate {}", dest.display()));
+    }
+    sync_dir(store_root)?;
+    if let Some(Active::Directory(_)) = current {
+        // The earlier package directory now has the temporary name.
+        std::fs::remove_dir_all(&link)
+            .with_context(|| format!("remove the replaced package at {}", link.display()))?;
+    }
+    Ok(())
+}
+
+/// Creates a symbolic link to `target` under a fresh temporary name in
+/// `store_root`, named so the collection of `app_id` can recognise it.
+fn temporary_link(store_root: &Path, app_id: &str, target: &Path) -> anyhow::Result<PathBuf> {
+    let link = store_root.join(format!(
+        ".link-{app_id}-{}",
+        hex::encode(rand::random::<[u8; 8]>())
+    ));
+    #[cfg(unix)]
+    std::os::unix::fs::symlink(target, &link)
+        .with_context(|| format!("create {}", link.display()))?;
+    #[cfg(not(unix))]
+    anyhow::bail!("installing packages requires a Unix host");
+    Ok(link)
+}
+
+/// Points the link `name` in `dir` at `target`, replacing it in one rename.
+fn replace_link(dir: &Path, name: &str, target: &Path) -> anyhow::Result<()> {
+    let temporary = dir.join(format!(
+        ".{name}-{}",
+        hex::encode(rand::random::<[u8; 8]>())
+    ));
+    #[cfg(unix)]
+    std::os::unix::fs::symlink(target, &temporary)
+        .with_context(|| format!("create {}", temporary.display()))?;
+    if let Err(e) = std::fs::rename(&temporary, dir.join(name)) {
+        let _ = std::fs::remove_file(&temporary);
+        return Err(e).with_context(|| format!("update {}", dir.join(name).display()));
+    }
+    sync_dir(dir)
+}
+
+#[cfg(target_os = "linux")]
+fn exchange(a: &Path, b: &Path) -> std::io::Result<()> {
+    use rustix::fs::{CWD, RenameFlags, renameat_with};
+    renameat_with(CWD, a, CWD, b, RenameFlags::EXCHANGE).map_err(std::io::Error::from)
+}
+
+#[cfg(not(target_os = "linux"))]
+fn exchange(_a: &Path, _b: &Path) -> std::io::Result<()> {
+    Err(std::io::Error::other(
+        "replacing a package directory requires Linux",
+    ))
+}
+
+/// Flushes a directory's entries to disk.
+fn sync_dir(dir: &Path) -> anyhow::Result<()> {
+    std::fs::File::open(dir)
+        .and_then(|d| d.sync_all())
+        .with_context(|| format!("sync {}", dir.display()))
+}
+
+/// Flushes every file and directory of a staged package to disk, so a
+/// revision that is activated is complete even after a crash.
+fn sync_tree(dir: &Path) -> anyhow::Result<()> {
+    for entry in std::fs::read_dir(dir).with_context(|| format!("read {}", dir.display()))? {
+        let entry = entry?;
+        let path = entry.path();
+        if entry.file_type()?.is_dir() {
+            sync_tree(&path)?;
+        } else {
+            std::fs::File::open(&path)
+                .and_then(|f| f.sync_all())
+                .with_context(|| format!("sync {}", path.display()))?;
+        }
+    }
+    sync_dir(dir)
+}
+
+/// The revision of `app_id` kept for rollback, if any.
+fn previous_revision(store_root: &Path, app_id: &str) -> Option<String> {
+    let revisions = weft_ipc_types::store::revisions_of(store_root, app_id);
+    std::fs::read_link(revisions.join(PREVIOUS_LINK))
+        .ok()?
+        .to_str()
+        .filter(|name| weft_ipc_types::store::is_revision_name(name))
+        .filter(|name| std::fs::symlink_metadata(revisions.join(name)).is_ok_and(|m| m.is_dir()))
+        .map(str::to_owned)
+}
+
+/// Removes what package operations on `app_id` no longer need, keeping the
+/// active revision, the one kept for rollback and every revision a session
+/// is running from: other revisions, temporary links, and staging,
+/// unpacking and removal directories that interrupted operations left
+/// behind. The caller holds the owner lock of `app_id`. Failures are
+/// reported and leave the entry for the next operation.
+fn collect(store_root: &Path, app_id: &str) {
+    use weft_ipc_types::store::{is_revision_name, revisions_of, try_claim};
+    let revisions = revisions_of(store_root, app_id);
+    let mut keep = Vec::new();
+    if let Ok(Some(Active::Revision { name, .. })) = active(store_root, app_id) {
+        keep.push(name);
+    }
+    keep.extend(previous_revision(store_root, app_id));
+    if let Ok(entries) = std::fs::read_dir(&revisions) {
+        for entry in entries.flatten() {
+            let name = entry.file_name();
+            let Some(name) = name.to_str() else { continue };
+            let path = entry.path();
+            if name == PREVIOUS_LINK {
+                // A link to a revision that is gone keeps nothing.
+                if previous_revision(store_root, app_id).is_none() {
+                    let _ = std::fs::remove_file(&path);
+                }
+                continue;
+            }
+            if name.starts_with('.') {
+                // A link replacement that was interrupted.
+                if std::fs::symlink_metadata(&path).is_ok_and(|m| m.file_type().is_symlink()) {
+                    let _ = std::fs::remove_file(&path);
+                }
+                continue;
+            }
+            if !is_revision_name(name) || keep.iter().any(|k| k == name) {
+                continue;
+            }
+            match try_claim(&path) {
+                Ok(Some(claim)) => {
+                    remove_claimed(store_root, &path);
+                    drop(claim);
+                }
+                Ok(None) => println!("kept revision {} for a running session", &name[..12]),
+                Err(e) => eprintln!("cannot inspect {}: {e}", path.display()),
+            }
+        }
+    }
+    let _ = std::fs::remove_dir(&revisions);
+    let link_prefix = format!(".link-{app_id}-");
+    if let Ok(entries) = std::fs::read_dir(store_root) {
+        for entry in entries.flatten() {
+            let name = entry.file_name();
+            let Some(name) = name.to_str() else { continue };
+            let path = entry.path();
+            if name.starts_with(&link_prefix) {
+                // A temporary link of an interrupted activation.
+                if std::fs::symlink_metadata(&path).is_ok_and(|m| m.file_type().is_symlink()) {
+                    let _ = std::fs::remove_file(&path);
+                } else if let Ok(Some(claim)) = try_claim(&path) {
+                    // A replaced package directory whose removal was cut short.
+                    remove_claimed(store_root, &path);
+                    drop(claim);
+                }
+            } else if [".staging-", ".unpack-", ".trash-"]
+                .iter()
+                .any(|p| name.starts_with(p))
+                && abandoned(&path)
+            {
+                let _ = std::fs::remove_dir_all(&path);
+            }
+        }
+    }
+}
+
+/// Whether a temporary directory has been left unchanged long enough to be
+/// abandoned.
+fn abandoned(path: &Path) -> bool {
+    std::fs::symlink_metadata(path)
+        .and_then(|m| m.modified())
+        .ok()
+        .and_then(|t| t.elapsed().ok())
+        .is_some_and(|age| age >= ABANDONED_AFTER)
+}
+
+/// Removes a claimed package directory: it is first renamed out of the way,
+/// so no launch can find it half removed.
+fn remove_claimed(store_root: &Path, dir: &Path) {
+    let trash = store_root.join(format!(".trash-{}", hex::encode(rand::random::<[u8; 8]>())));
+    match std::fs::rename(dir, &trash) {
+        Ok(()) => {
+            if let Err(e) = std::fs::remove_dir_all(&trash) {
+                eprintln!("cannot remove {}: {e}", trash.display());
+            }
+        }
+        Err(e) => eprintln!("cannot remove {}: {e}", dir.display()),
+    }
+}
+
+/// Makes the revision kept for rollback the active revision of `app_id`
+/// again; the revision it replaces is kept in turn. The kept revision must
+/// still satisfy the app's owner record: a revision by a verified publisher
+/// is checked against the trust store again, so a revoked key cannot be
+/// rolled back to.
+fn rollback_package(store_root: &Path, app_id: &str) -> anyhow::Result<()> {
+    anyhow::ensure!(
+        weft_ipc_types::package::is_valid_app_id(app_id),
+        "'{app_id}' is not a valid app ID"
+    );
+    let data_home = weft_ipc_types::package::data_home()
+        .context("cannot locate the data home to check who owns the app ID")?;
+    let _lock = weft_ipc_types::trust::lock_owner(&data_home, app_id)?;
+    let Some(Active::Revision { .. }) = active(store_root, app_id)? else {
+        anyhow::bail!("{app_id} has no installed revision to roll back from");
+    };
+    let previous = previous_revision(store_root, app_id)
+        .with_context(|| format!("{app_id} has no earlier revision to roll back to"))?;
+    let dir = weft_ipc_types::store::revisions_of(store_root, app_id).join(&previous);
+    let record = weft_ipc_types::trust::owner_record_path(&data_home, app_id);
+    match weft_ipc_types::trust::read_owner(&record)? {
+        Some(Owner::Development) => {}
+        Some(Owner::Verified(key)) => {
+            let signer = TrustStore::load(&TrustStore::directories())?.signer(&dir)?;
+            anyhow::ensure!(
+                signer.as_ref() == Some(&key),
+                "the earlier revision of {app_id} is no longer signed by a trusted key of its owner"
+            );
+        }
+        None => anyhow::bail!("{app_id} has no recorded owner"),
+    }
+    activate(store_root, app_id, &previous)?;
+    collect(store_root, app_id);
+    println!("rolled {app_id} back to revision {}", &previous[..12]);
     Ok(())
 }
 
@@ -534,45 +851,40 @@ fn uninstall_package_from(app_id: &str, store_root: &Path) -> anyhow::Result<()>
         None => None,
     };
     let target = store_root.join(app_id);
-    if !target.exists() {
-        // An installation interrupted between recording its owner and placing
-        // the package leaves a record with nothing installed; with no data
-        // either, it holds the ID for nothing and is released.
-        if let Some(home) = &data_home
-            && !installed_in_another_store(app_id, store_root)
-            && release_owner_without_data(home, app_id)
-        {
-            println!("released {app_id}, which was not installed");
-            return Ok(());
-        }
-        anyhow::bail!(
-            "package '{}' is not installed at {}",
-            app_id,
-            target.display()
-        );
-    }
-    // A `data` directory is never removed with the package: packages cannot
-    // ship one, so it holds app data from an earlier version. It is moved to
-    // the app data directory when this is the user store and the package
-    // declares app data (or its manifest cannot be read); otherwise uninstall
-    // stops and leaves everything in place.
-    if std::fs::symlink_metadata(target.join("data")).is_ok() {
-        let may_hold_app_data = load_manifest(&target).map_or(true, |m| declares_app_data(&m));
-        if !(may_hold_app_data && is_user_store(store_root)) {
+    match active(store_root, app_id)? {
+        None => {
+            // Revisions left by sessions that ran past an earlier uninstall
+            // are removed now that nothing uses them.
+            collect(store_root, app_id);
+            // An installation interrupted between recording its owner and
+            // placing the package leaves a record with nothing installed;
+            // with no data either, it holds the ID for nothing and is
+            // released.
+            if let Some(home) = &data_home
+                && !installed_in_another_store(app_id, store_root)
+                && release_owner_without_data(home, app_id)
+            {
+                println!("released {app_id}, which was not installed");
+                return Ok(());
+            }
             anyhow::bail!(
-                "{} contains a 'data' directory that may hold app data; move it aside before \
-                 uninstalling",
+                "package '{}' is not installed at {}",
+                app_id,
                 target.display()
             );
         }
-        move_app_data_out(app_id, &target)?;
-    }
-    // Moving the data removes a package directory it leaves empty.
-    match std::fs::remove_dir_all(&target) {
-        Err(e) if e.kind() != std::io::ErrorKind::NotFound => {
-            return Err(e).with_context(|| format!("remove {}", target.display()));
+        // New launches no longer find the app; sessions running from one of
+        // its revisions keep it until they end and a later operation on the
+        // app removes it.
+        Some(Active::Revision { .. }) => {
+            std::fs::remove_file(&target)
+                .with_context(|| format!("remove {}", target.display()))?;
+            sync_dir(store_root)?;
+            let revisions = weft_ipc_types::store::revisions_of(store_root, app_id);
+            let _ = std::fs::remove_file(revisions.join(PREVIOUS_LINK));
+            collect(store_root, app_id);
         }
-        _ => {}
+        Some(Active::Directory(_)) => uninstall_directory(app_id, store_root, &target)?,
     }
     // The owner record keeps the app ID, and the data with it, for its owner
     // while the data remains; with no data left, the ID is free again.
@@ -582,6 +894,43 @@ fn uninstall_package_from(app_id: &str, store_root: &Path) -> anyhow::Result<()>
         release_owner_without_data(home, app_id);
     }
     println!("uninstalled {}", app_id);
+    Ok(())
+}
+
+/// Removes a package directory installed before revisions existed, which
+/// only happens while no session runs from it.
+fn uninstall_directory(app_id: &str, store_root: &Path, target: &Path) -> anyhow::Result<()> {
+    let _claim = weft_ipc_types::store::try_claim(target)
+        .with_context(|| format!("open {}", target.display()))?
+        .with_context(|| {
+            format!(
+                "{app_id} is running from {}; close it first",
+                target.display()
+            )
+        })?;
+    // A `data` directory is never removed with the package: packages cannot
+    // ship one, so it holds app data from an earlier version. It is moved to
+    // the app data directory when this is the user store and the package
+    // declares app data (or its manifest cannot be read); otherwise uninstall
+    // stops and leaves everything in place.
+    if std::fs::symlink_metadata(target.join("data")).is_ok() {
+        let may_hold_app_data = load_manifest(target).map_or(true, |m| declares_app_data(&m));
+        if !(may_hold_app_data && is_user_store(store_root)) {
+            anyhow::bail!(
+                "{} contains a 'data' directory that may hold app data; move it aside before \
+                 uninstalling",
+                target.display()
+            );
+        }
+        move_app_data_out(app_id, target)?;
+    }
+    // Moving the data removes a package directory it leaves empty.
+    match std::fs::remove_dir_all(target) {
+        Err(e) if e.kind() != std::io::ErrorKind::NotFound => {
+            return Err(e).with_context(|| format!("remove {}", target.display()));
+        }
+        _ => {}
+    }
     Ok(())
 }
 
@@ -1099,6 +1448,246 @@ mod tests {
         })
     }
 
+    /// Writes a package whose UI holds `marker`, so each marker is a
+    /// different revision.
+    fn write_revision(src: &Path, app_id: &str, marker: &str) {
+        let _ = std::fs::remove_dir_all(src);
+        write_package(src, app_id, "");
+        std::fs::write(src.join("ui/index.html"), marker).unwrap();
+    }
+
+    fn active_ui(store: &Path, app_id: &str) -> String {
+        std::fs::read_to_string(store.join(app_id).join("ui/index.html")).unwrap()
+    }
+
+    fn revision_count(store: &Path, app_id: &str) -> usize {
+        std::fs::read_dir(weft_ipc_types::store::revisions_of(store, app_id)).map_or(0, |d| {
+            d.flatten()
+                .filter(|e| {
+                    weft_ipc_types::store::is_revision_name(&e.file_name().to_string_lossy())
+                })
+                .count()
+        })
+    }
+
+    fn active_dir(store: &Path, app_id: &str) -> PathBuf {
+        active(store, app_id).unwrap().unwrap().dir().to_path_buf()
+    }
+
+    #[test]
+    fn an_update_keeps_the_previous_revision_and_collects_older_ones() {
+        let home = temp_root("update");
+        let store = home.join("store");
+        let app_id = "org.weft.test.update";
+        let src = home.join("src");
+        let install = || {
+            with_home(&home, || {
+                install_package_to(&src, &store, InstallMode::Development)
+            })
+        };
+        write_revision(&src, app_id, "one");
+        install().unwrap();
+        let one = active_dir(&store, app_id);
+        write_revision(&src, app_id, "two");
+        install().unwrap();
+        assert_eq!(active_ui(&store, app_id), "two");
+        assert!(one.is_dir(), "the previous revision is kept for rollback");
+        write_revision(&src, app_id, "three");
+        install().unwrap();
+        assert_eq!(active_ui(&store, app_id), "three");
+        assert!(
+            !one.exists(),
+            "a revision neither active nor previous is removed"
+        );
+        assert_eq!(revision_count(&store, app_id), 2);
+        assert!(!staging_left(&store));
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn a_revision_a_session_runs_from_is_kept_until_it_ends() {
+        let home = temp_root("pinned");
+        let store = home.join("store");
+        let app_id = "org.weft.test.pinned";
+        let src = home.join("src");
+        let install = || {
+            with_home(&home, || {
+                install_package_to(&src, &store, InstallMode::Development)
+            })
+        };
+        write_revision(&src, app_id, "one");
+        install().unwrap();
+        let one = active_dir(&store, app_id);
+        let session = weft_ipc_types::store::pin(&one).unwrap();
+        for marker in ["two", "three", "four"] {
+            write_revision(&src, app_id, marker);
+            install().unwrap();
+        }
+        assert_eq!(
+            std::fs::read_to_string(one.join("ui/index.html")).unwrap(),
+            "one",
+            "the running session keeps its bytes"
+        );
+        // Uninstalling stops new launches but not the session.
+        with_home(&home, || uninstall_package_from(app_id, &store)).unwrap();
+        assert!(active(&store, app_id).unwrap().is_none());
+        assert!(one.is_dir());
+        drop(session);
+        // Once it has ended, the next operation on the app removes it.
+        let _ = with_home(&home, || uninstall_package_from(app_id, &store));
+        assert!(!one.exists());
+        assert_eq!(revision_count(&store, app_id), 0);
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn a_failed_update_keeps_the_active_revision() {
+        let home = temp_root("failed_update");
+        let store = home.join("store");
+        let app_id = "org.weft.test.failed";
+        let src = home.join("src");
+        write_revision(&src, app_id, "good");
+        with_home(&home, || {
+            install_package_to(&src, &store, InstallMode::Development)
+        })
+        .unwrap();
+        // A broken component, then the same ID under another owner.
+        write_revision(&src, app_id, "broken");
+        std::fs::write(src.join("app.wasm"), b"not wasm").unwrap();
+        assert!(
+            with_home(&home, || install_package_to(
+                &src,
+                &store,
+                InstallMode::Development
+            ))
+            .is_err()
+        );
+        // Signed by a trusted publisher, which does not own the ID.
+        write_revision(&src, app_id, "other owner");
+        sign_package(&src, &key(&home, "other", 7, true)).unwrap();
+        let refused = with_trust(&home, || {
+            install_package_to(&src, &store, InstallMode::Verified)
+        });
+        assert!(
+            refused
+                .as_ref()
+                .is_err_and(|e| e.to_string().contains("belongs to")),
+            "{refused:?}"
+        );
+        assert_eq!(active_ui(&store, app_id), "good");
+        assert_eq!(revision_count(&store, app_id), 1);
+        assert!(!staging_left(&store));
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn rollback_switches_to_the_kept_revision_and_back() {
+        let home = temp_root("rollback");
+        let store = home.join("store");
+        let app_id = "org.weft.test.rollback";
+        let src = home.join("src");
+        let rollback = || with_home(&home, || rollback_package(&store, app_id));
+        write_revision(&src, app_id, "one");
+        with_home(&home, || {
+            install_package_to(&src, &store, InstallMode::Development)
+        })
+        .unwrap();
+        assert!(
+            rollback().is_err(),
+            "a first installation has nothing to roll back to"
+        );
+        write_revision(&src, app_id, "two");
+        with_home(&home, || {
+            install_package_to(&src, &store, InstallMode::Development)
+        })
+        .unwrap();
+        rollback().unwrap();
+        assert_eq!(active_ui(&store, app_id), "one");
+        rollback().unwrap();
+        assert_eq!(active_ui(&store, app_id), "two");
+        assert_eq!(revision_count(&store, app_id), 2);
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn a_package_directory_from_before_revisions_is_replaced_unless_in_use() {
+        let home = temp_root("legacy_update");
+        let store = home.join("store");
+        let app_id = "org.weft.test.legacy";
+        write_revision(&store.join(app_id), app_id, "old");
+        let src = home.join("src");
+        write_revision(&src, app_id, "new");
+        let install = || {
+            with_home(&home, || {
+                install_package_to(&src, &store, InstallMode::Development)
+            })
+        };
+        let session = weft_ipc_types::store::pin(&store.join(app_id)).unwrap();
+        assert!(
+            install().is_err(),
+            "a running package directory is not replaced"
+        );
+        assert!(matches!(
+            active(&store, app_id).unwrap(),
+            Some(Active::Directory(_))
+        ));
+        assert_eq!(active_ui(&store, app_id), "old");
+        drop(session);
+        install().unwrap();
+        assert!(matches!(
+            active(&store, app_id).unwrap(),
+            Some(Active::Revision { .. })
+        ));
+        assert_eq!(active_ui(&store, app_id), "new");
+        let leftovers: Vec<_> = std::fs::read_dir(&store)
+            .unwrap()
+            .flatten()
+            .map(|e| e.file_name())
+            .filter(|n| n != ".revisions" && n.to_str() != Some(app_id))
+            .collect();
+        assert!(leftovers.is_empty(), "{leftovers:?}");
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn leftovers_of_interrupted_operations_are_removed() {
+        let home = temp_root("leftovers");
+        let store = home.join("store");
+        let app_id = "org.weft.test.leftovers";
+        let src = home.join("src");
+        write_revision(&src, app_id, "one");
+        with_home(&home, || {
+            install_package_to(&src, &store, InstallMode::Development)
+        })
+        .unwrap();
+        let revisions = weft_ipc_types::store::revisions_of(&store, app_id);
+        // An activation and a link update cut short, an old staging copy and
+        // a recent one that may belong to an installation in progress.
+        #[cfg(unix)]
+        {
+            std::os::unix::fs::symlink("x", store.join(format!(".link-{app_id}-0"))).unwrap();
+            std::os::unix::fs::symlink("x", revisions.join(".previous-0")).unwrap();
+        }
+        let old = store.join(".staging-old");
+        std::fs::create_dir(&old).unwrap();
+        std::fs::File::open(&old)
+            .unwrap()
+            .set_modified(std::time::SystemTime::now() - 2 * ABANDONED_AFTER)
+            .unwrap();
+        let recent = store.join(".staging-recent");
+        std::fs::create_dir(&recent).unwrap();
+        write_revision(&src, app_id, "two");
+        with_home(&home, || {
+            install_package_to(&src, &store, InstallMode::Development)
+        })
+        .unwrap();
+        assert!(std::fs::symlink_metadata(store.join(format!(".link-{app_id}-0"))).is_err());
+        assert!(std::fs::symlink_metadata(revisions.join(".previous-0")).is_err());
+        assert!(!old.exists());
+        assert!(recent.exists());
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
     #[test]
     fn only_packages_signed_by_a_trusted_key_install_as_verified() {
         let home = temp_root("verified");
@@ -1248,33 +1837,41 @@ mod tests {
     #[test]
     fn a_failed_placement_leaves_no_claim_on_the_id() {
         let home = temp_root("placement");
-        let staging = home.join(".staging-x");
-        let dest = home.join("org.weft.test.placed");
-        std::fs::create_dir_all(&staging).unwrap();
-        std::fs::create_dir_all(dest.join("ui")).unwrap();
-        let record = home.join("owners/org.weft.test.placed");
+        let store = home.join("store");
+        let app_id = "org.weft.test.placed";
+        let staging = store.join(".staging-x");
+        write_package(&staging, app_id, "");
+        // Something that is not a package where the app's link would go.
+        std::fs::write(store.join(app_id), "not a package").unwrap();
+        let record = home.join("owners").join(app_id);
         weft_ipc_types::trust::write_owner(&record, Owner::Development).unwrap();
 
         let admission = Admission {
             owner: Owner::Development,
             created_record: Some(record.clone()),
         };
-        assert!(place(&staging, &dest, admission).is_err());
+        assert!(place(&staging, &store, app_id, admission).is_err());
         assert!(!staging.exists());
         assert!(!record.exists());
+        assert_eq!(
+            std::fs::read_to_string(store.join(app_id)).unwrap(),
+            "not a package",
+            "what was there is untouched"
+        );
+        let revisions = weft_ipc_types::store::revisions_of(&store, app_id);
         assert!(
-            dest.join("ui").is_dir(),
-            "the existing package is untouched"
+            std::fs::read_dir(&revisions).map_or(true, |mut d| d.next().is_none()),
+            "the new revision is removed"
         );
 
         // A record that existed before this installation is kept.
-        std::fs::create_dir_all(&staging).unwrap();
+        write_package(&staging, app_id, "");
         weft_ipc_types::trust::write_owner(&record, Owner::Development).unwrap();
         let admission = Admission {
             owner: Owner::Development,
             created_record: None,
         };
-        assert!(place(&staging, &dest, admission).is_err());
+        assert!(place(&staging, &store, app_id, admission).is_err());
         assert!(record.exists());
         let _ = std::fs::remove_dir_all(&home);
     }
@@ -1537,12 +2134,10 @@ mod tests {
     fn uninstall_keeps_app_data_from_the_user_store() {
         let home = temp_root("keep");
         let app_id = "com.example.keep";
-        write_package(&home.join("src"), app_id, APP_DATA);
         let store = home.join(".local/share/weft/apps");
-        with_home(&home, || {
-            install_package_to(&home.join("src"), &store, InstallMode::Development)
-        })
-        .unwrap();
+        // A package directory from before revisions existed, with the data an
+        // earlier weft-appd kept inside it.
+        write_package(&store.join(app_id), app_id, APP_DATA);
         let legacy = store.join(app_id).join("data");
         std::fs::create_dir_all(&legacy).unwrap();
         std::fs::write(legacy.join("notes.txt"), "first\nsecond").unwrap();
@@ -1562,10 +2157,7 @@ mod tests {
         }
 
         // A second copy cannot be merged: uninstall refuses and removes nothing.
-        with_home(&home, || {
-            install_package_to(&home.join("src"), &store, InstallMode::Development)
-        })
-        .unwrap();
+        write_package(&store.join(app_id), app_id, APP_DATA);
         std::fs::create_dir_all(&legacy).unwrap();
         assert!(with_home(&home, || uninstall_package_from(app_id, &store)).is_err());
         assert!(legacy.is_dir() && kept.is_dir());
@@ -1577,12 +2169,8 @@ mod tests {
         let home = temp_root("refuse");
         let app_id = "com.example.refuse";
         // No app-data capability: the data directory is left and uninstall stops.
-        write_package(&home.join("src"), app_id, "");
         let store = home.join(".local/share/weft/apps");
-        with_home(&home, || {
-            install_package_to(&home.join("src"), &store, InstallMode::Development)
-        })
-        .unwrap();
+        write_package(&store.join(app_id), app_id, "");
         std::fs::create_dir_all(store.join(app_id).join("data")).unwrap();
         std::fs::write(store.join(app_id).join("data/x"), "x").unwrap();
         assert!(with_home(&home, || uninstall_package_from(app_id, &store)).is_err());
@@ -1593,12 +2181,8 @@ mod tests {
         std::fs::remove_dir_all(store.join(app_id)).unwrap();
 
         // Another store: earlier versions never kept data there, so it stops too.
-        write_package(&home.join("src2"), app_id, APP_DATA);
         let other = home.join("other-store");
-        with_home(&home, || {
-            install_package_to(&home.join("src2"), &other, InstallMode::Development)
-        })
-        .unwrap();
+        write_package(&other.join(app_id), app_id, APP_DATA);
         std::fs::create_dir_all(other.join(app_id).join("data")).unwrap();
         assert!(with_home(&home, || uninstall_package_from(app_id, &other)).is_err());
         assert!(other.join(app_id).join("data").is_dir());
@@ -1855,7 +2439,11 @@ entry = "ui/index.html"
             assert!(store.join(&app_id).join("app.wasm").exists());
             assert!(store.join(&app_id).join("wapp.toml").exists());
             assert!(store.join(&app_id).join("ui").join("index.html").exists());
-            assert!(install_package_to(&src, &store, InstallMode::Development).is_err());
+            // The store links the app to an immutable revision; installing
+            // the same content again keeps that revision.
+            let revision = std::fs::read_link(store.join(&app_id)).unwrap();
+            assert!(install_package_to(&src, &store, InstallMode::Development).is_ok());
+            assert_eq!(std::fs::read_link(store.join(&app_id)).unwrap(), revision);
             let _ = fs::remove_dir_all(&src);
             let _ = fs::remove_dir_all(&store);
         });
