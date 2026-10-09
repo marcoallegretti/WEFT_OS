@@ -22,7 +22,7 @@ The guest is the validation target for:
 
 ## Host versus target boundary
 
-The Windows host is acceptable for editing, documentation, and workspace validation.
+The Windows host is acceptable for editing and documentation. Builds and tests are validated on Linux only; CI does not build on Windows.
 
 The Linux guest is authoritative for:
 
