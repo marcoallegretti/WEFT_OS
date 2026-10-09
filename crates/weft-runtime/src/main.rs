@@ -591,11 +591,10 @@ fn apply_seccomp_filter() -> anyhow::Result<()> {
     Ok(())
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(feature = "wasmtime-runtime")))]
 mod tests {
     use super::*;
 
-    #[cfg(not(feature = "wasmtime-runtime"))]
     #[test]
     fn engine_disabled_build_refuses_to_run_components() {
         let err = run_module(
