@@ -18,18 +18,38 @@ pub const MAX_CLIPBOARD: usize = 1024 * 1024;
 pub const MAX_TITLE: usize = 256;
 pub const MAX_BODY: usize = 4096;
 
+/// What a helper's output streams are connected to.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Output {
+    /// Read: up to the limit from standard output, and standard error for
+    /// the failure message.
+    Captured,
+    /// Discarded, for a helper that leaves a process running which would
+    /// keep the streams open, as `wl-copy` does to serve the selection.
+    Discarded,
+}
+
 /// Runs `command` with `input` on its standard input and returns at most
 /// `max_output` bytes of its standard output, or why it failed.
-fn run(mut command: Command, input: Option<Vec<u8>>, max_output: usize) -> Result<Vec<u8>, String> {
+fn run(
+    mut command: Command,
+    input: Option<Vec<u8>>,
+    max_output: usize,
+    output: Output,
+) -> Result<Vec<u8>, String> {
     let program = command.get_program().to_string_lossy().into_owned();
+    let stream = || match output {
+        Output::Captured => Stdio::piped(),
+        Output::Discarded => Stdio::null(),
+    };
     let mut child = command
         .stdin(if input.is_some() {
             Stdio::piped()
         } else {
             Stdio::null()
         })
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
+        .stdout(stream())
+        .stderr(stream())
         .spawn()
         .map_err(|e| format!("cannot run {program}: {e}"))?;
     if let (Some(mut stdin), Some(input)) = (child.stdin.take(), input) {
@@ -96,7 +116,7 @@ fn run(mut command: Command, input: Option<Vec<u8>>, max_output: usize) -> Resul
 pub fn clipboard_read() -> Result<String, String> {
     let mut command = Command::new("wl-paste");
     command.args(["--no-newline", "--type", "text/plain;charset=utf-8"]);
-    let data = run(command, None, MAX_CLIPBOARD)?;
+    let data = run(command, None, MAX_CLIPBOARD, Output::Captured)?;
     String::from_utf8(data).map_err(|_| "the clipboard does not hold UTF-8 text".to_owned())
 }
 
@@ -106,7 +126,13 @@ pub fn clipboard_write(text: &str) -> Result<(), String> {
     }
     let mut command = Command::new("wl-copy");
     command.args(["--type", "text/plain;charset=utf-8"]);
-    run(command, Some(text.as_bytes().to_vec()), 0).map(|_| ())
+    run(
+        command,
+        Some(text.as_bytes().to_vec()),
+        0,
+        Output::Discarded,
+    )
+    .map(|_| ())
 }
 
 /// Checks a notification before it is sent.
@@ -145,7 +171,7 @@ pub fn notify(app_id: &str, title: &str, body: &str, icon: Option<&str>) -> Resu
         command.arg(format!("--icon={icon}"));
     }
     command.arg("--").arg(title).arg(body);
-    run(command, None, 0).map(|_| ())
+    run(command, None, 0, Output::Captured).map(|_| ())
 }
 
 #[cfg(test)]
@@ -175,23 +201,38 @@ mod tests {
         let mut slow = Command::new("sleep");
         slow.arg("30");
         let started = Instant::now();
-        let error = run(slow, None, 0).unwrap_err();
+        let error = run(slow, None, 0, Output::Captured).unwrap_err();
         assert!(error.contains("did not finish"), "{error}");
         assert!(started.elapsed() < HELPER_TIMEOUT + Duration::from_secs(2));
 
         let mut chatty = Command::new("head");
         chatty.args(["-c", "2000", "/dev/zero"]);
         assert!(
-            run(chatty, None, 1000)
+            run(chatty, None, 1000, Output::Captured)
                 .unwrap_err()
                 .contains("more than 1000 bytes")
         );
 
         let mut echo = Command::new("cat");
         echo.stdin(Stdio::piped());
-        assert_eq!(run(echo, Some(b"text".to_vec()), 100).unwrap(), b"text");
+        assert_eq!(
+            run(echo, Some(b"text".to_vec()), 100, Output::Captured).unwrap(),
+            b"text"
+        );
+
+        // A helper that leaves a process behind returns once it exits
+        // itself when its streams are discarded.
+        let mut forking = Command::new("sh");
+        forking.args(["-c", "sleep 30 & exit 0"]);
+        let started = Instant::now();
+        assert!(run(forking, None, 0, Output::Discarded).is_ok());
+        assert!(started.elapsed() < Duration::from_secs(2));
 
         let failing = Command::new("false");
-        assert!(run(failing, None, 0).unwrap_err().contains("exited"));
+        assert!(
+            run(failing, None, 0, Output::Captured)
+                .unwrap_err()
+                .contains("exited")
+        );
     }
 }
