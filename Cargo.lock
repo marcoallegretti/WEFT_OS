@@ -10455,10 +10455,8 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "bitflags 2.11.0",
- "serde",
  "servo",
  "softbuffer",
- "toml 0.8.23",
  "tracing",
  "tracing-subscriber",
  "wayland-backend",

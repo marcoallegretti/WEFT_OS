@@ -628,7 +628,12 @@ fn resolve_weft_system_url(url: &ServoUrl) -> Option<ServoUrl> {
 
 /// Shows the UI document `ui` of `app_id`, the file weft-appd resolved from
 /// the package; the shell never looks for the package itself.
-pub fn run(app_id: &str, session_id: u64, ws_port: u16, ui: &std::path::Path) -> anyhow::Result<()> {
+pub fn run(
+    app_id: &str,
+    session_id: u64,
+    ws_port: u16,
+    ui: &std::path::Path,
+) -> anyhow::Result<()> {
     let url = ServoUrl::from_file_path(ui)
         .map_err(|()| anyhow::anyhow!("{} is not an absolute path", ui.display()))?;
     tracing::info!(%app_id, %url, "showing application UI");

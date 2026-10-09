@@ -219,7 +219,10 @@ mod tests {
     fn image_companions_share_the_image_name() {
         let files = ImageFiles::in_store(Path::new("/store"), "org.weft.demo.notes");
         assert_eq!(files.image, Path::new("/store/org.weft.demo.notes.app.img"));
-        assert_eq!(files.hash_tree, Path::new("/store/org.weft.demo.notes.app.hash"));
+        assert_eq!(
+            files.hash_tree,
+            Path::new("/store/org.weft.demo.notes.app.hash")
+        );
         assert_eq!(
             files.root_hash,
             Path::new("/store/org.weft.demo.notes.app.roothash")

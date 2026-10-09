@@ -1275,7 +1275,10 @@ entry = "ui/index.html"
         std::fs::write(tmp.with_extension("wasm"), b"\0asm\x01\0\0\0").unwrap();
         std::os::unix::fs::symlink("index.html", tmp.join("ui/linked.html")).unwrap();
         let manifest = std::fs::read_to_string(tmp.join("wapp.toml")).unwrap();
-        let escaping = format!("../{}", tmp.with_extension("wasm").file_name().unwrap().display());
+        let escaping = format!(
+            "../{}",
+            tmp.with_extension("wasm").file_name().unwrap().display()
+        );
         std::fs::write(
             tmp.join("wapp.toml"),
             manifest
@@ -1286,8 +1289,14 @@ entry = "ui/index.html"
         let msg = check_package(&tmp).unwrap_err().to_string();
         let _ = std::fs::remove_dir_all(&tmp);
         let _ = std::fs::remove_file(tmp.with_extension("wasm"));
-        assert!(msg.contains("runtime.module") && msg.contains("not a relative path"), "{msg}");
-        assert!(msg.contains("ui.entry") && msg.contains("symbolic link"), "{msg}");
+        assert!(
+            msg.contains("runtime.module") && msg.contains("not a relative path"),
+            "{msg}"
+        );
+        assert!(
+            msg.contains("ui.entry") && msg.contains("symbolic link"),
+            "{msg}"
+        );
     }
 
     #[test]

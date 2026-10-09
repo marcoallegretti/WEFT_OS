@@ -597,7 +597,12 @@ async fn resolve_launch(
         Ok((package, grants))
     })
     .await
-    .unwrap_or_else(|e| Err(grants::Refusal::new(500, format!("package resolution failed: {e}"))))
+    .unwrap_or_else(|e| {
+        Err(grants::Refusal::new(
+            500,
+            format!("package resolution failed: {e}"),
+        ))
+    })
 }
 
 pub(crate) fn app_store_roots() -> Vec<std::path::PathBuf> {
@@ -688,6 +693,22 @@ mod tests {
         ENV_LOCK.get_or_init(|| tokio::sync::Mutex::new(()))
     }
 
+    /// Writes a complete package `id` into `dir`; `extra` adds lines to its
+    /// `[package]` table.
+    fn write_test_package(dir: &std::path::Path, id: &str, extra: &str) {
+        std::fs::create_dir_all(dir.join("ui")).unwrap();
+        std::fs::write(dir.join("app.wasm"), b"\0asm\x01\0\0\0").unwrap();
+        std::fs::write(dir.join("ui/index.html"), b"<p>").unwrap();
+        std::fs::write(
+            dir.join("wapp.toml"),
+            format!(
+                "[package]\nid = \"{id}\"\nname = \"T\"\nversion = \"0.1.0\"\n{extra}\n\
+                 [runtime]\nmodule = \"app.wasm\"\n[ui]\nentry = \"ui/index.html\"\n"
+            ),
+        )
+        .unwrap();
+    }
+
     fn make_registry() -> Registry {
         Arc::new(Mutex::new(SessionRegistry::default()))
     }
@@ -762,12 +783,11 @@ mod tests {
         let _env = env_lock().lock().await;
         let store = std::env::temp_dir().join(format!("weft_refuse_{}", std::process::id()));
         let app_dir = store.join("org.example.gpu");
-        std::fs::create_dir_all(&app_dir).unwrap();
-        std::fs::write(
-            app_dir.join("wapp.toml"),
-            "[package]\nid = \"org.example.gpu\"\ncapabilities = [\"hw:gpu:compute\"]\n",
-        )
-        .unwrap();
+        write_test_package(
+            &app_dir,
+            "org.example.gpu",
+            "capabilities = [\"hw:gpu:compute\"]",
+        );
         let prior_store = std::env::var("WEFT_APP_STORE").ok();
         let prior_bin = std::env::var("WEFT_RUNTIME_BIN").ok();
         // SAFETY: env_lock is held and the runtime is current_thread.
@@ -1163,12 +1183,7 @@ mod tests {
         use_test_runtime_dir();
         let dir = std::env::temp_dir().join(format!("weft_test_relay_{}", std::process::id()));
         let app = dir.join("store/org.example.relay");
-        std::fs::create_dir_all(&app).unwrap();
-        std::fs::write(
-            app.join("wapp.toml"),
-            "[package]\nid = \"org.example.relay\"\n",
-        )
-        .unwrap();
+        write_test_package(&app, "org.example.relay", "");
         // The runtime reports ready and exits without connecting to the relay.
         let child = dir.join("child.sh");
         std::fs::write(
@@ -1559,7 +1574,7 @@ mod tests {
             std::time::Duration::from_secs(20),
             runtime::supervise(
                 session_id,
-                "test.app",
+                launch::LaunchPackage::unresolved("test.app"),
                 grants::SessionGrants::default(),
                 Arc::clone(&registry),
                 abort_rx,

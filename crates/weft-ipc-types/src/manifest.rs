@@ -62,7 +62,8 @@ impl Manifest {
     /// Reads `<package_root>/wapp.toml`.
     pub fn read(package_root: &Path) -> Result<Self, ManifestError> {
         let path = package_root.join(MANIFEST_FILE);
-        let text = std::fs::read_to_string(&path).map_err(|e| ManifestError::Io(path.clone(), e))?;
+        let text =
+            std::fs::read_to_string(&path).map_err(|e| ManifestError::Io(path.clone(), e))?;
         toml::from_str(&text).map_err(|e| ManifestError::Parse(path, e))
     }
 
@@ -112,8 +113,8 @@ pub fn entry_path(package_root: &Path, entry: &str) -> Result<PathBuf, EntryErro
     let mut path = package_root.to_path_buf();
     while let Some(component) = components.next() {
         path.push(component);
-        let metadata = std::fs::symlink_metadata(&path)
-            .map_err(|_| EntryError::NotAFile(entry.to_owned()))?;
+        let metadata =
+            std::fs::symlink_metadata(&path).map_err(|_| EntryError::NotAFile(entry.to_owned()))?;
         if metadata.file_type().is_symlink() {
             return Err(EntryError::Link(entry.to_owned()));
         }
@@ -130,10 +131,7 @@ mod tests {
     use super::*;
 
     fn package(name: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!(
-            "weft_manifest_{name}_{}",
-            std::process::id()
-        ));
+        let dir = std::env::temp_dir().join(format!("weft_manifest_{name}_{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(dir.join("ui")).unwrap();
         std::fs::write(dir.join("app.wasm"), b"\0asm").unwrap();
@@ -155,7 +153,13 @@ mod tests {
     #[test]
     fn entries_must_stay_inside_the_package() {
         let dir = package("contained");
-        for entry in ["", "/etc/passwd", "../app.wasm", "ui/../app.wasm", "./app.wasm"] {
+        for entry in [
+            "",
+            "/etc/passwd",
+            "../app.wasm",
+            "ui/../app.wasm",
+            "./app.wasm",
+        ] {
             assert_eq!(
                 entry_path(&dir, entry),
                 Err(EntryError::NotContained(entry.to_owned())),

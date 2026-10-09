@@ -48,14 +48,13 @@ pub(crate) fn resolve(app_id: &str) -> Result<LaunchPackage, Refusal> {
             return from_root(app_id, dir, None);
         }
     }
-    Err(Refusal::new(404, format!("package {app_id} is not installed")))
+    Err(Refusal::new(
+        404,
+        format!("package {app_id} is not installed"),
+    ))
 }
 
-fn from_root(
-    app_id: &str,
-    root: PathBuf,
-    image: Option<Mount>,
-) -> Result<LaunchPackage, Refusal> {
+fn from_root(app_id: &str, root: PathBuf, image: Option<Mount>) -> Result<LaunchPackage, Refusal> {
     let manifest = Manifest::read(&root).map_err(|e| Refusal::new(403, e.to_string()))?;
     if manifest.package.id != app_id {
         return Err(Refusal::new(
@@ -112,10 +111,8 @@ mod tests {
     /// A store holding a directory install of `ID`, with WEFT_APP_STORE
     /// pointing at it. Callers hold env_lock.
     fn store(name: &str, manifest_id: &str, module: &str) -> PathBuf {
-        let store = std::env::temp_dir().join(format!(
-            "weft_appd_launch_{name}_{}",
-            std::process::id()
-        ));
+        let store =
+            std::env::temp_dir().join(format!("weft_appd_launch_{name}_{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&store);
         let package = store.join(ID);
         std::fs::create_dir_all(package.join("ui")).unwrap();
@@ -172,7 +169,11 @@ mod tests {
         let refused = refusal(resolve(ID));
         finish(&store);
         assert_eq!(refused.code, 403);
-        assert!(refused.message.contains("org.weft.test.other"), "{}", refused.message);
+        assert!(
+            refused.message.contains("org.weft.test.other"),
+            "{}",
+            refused.message
+        );
     }
 
     #[test]
@@ -183,7 +184,11 @@ mod tests {
         let refused = refusal(resolve(ID));
         finish(&store);
         assert_eq!(refused.code, 403);
-        assert!(refused.message.contains("runtime.module"), "{}", refused.message);
+        assert!(
+            refused.message.contains("runtime.module"),
+            "{}",
+            refused.message
+        );
     }
 
     #[test]
@@ -233,7 +238,11 @@ mod tests {
 
         for refused in [&partial, &failed, &absent, &malformed] {
             assert_eq!(refused.code, 500, "{}", refused.message);
-            assert!(refused.message.contains("verified image"), "{}", refused.message);
+            assert!(
+                refused.message.contains("verified image"),
+                "{}",
+                refused.message
+            );
         }
         assert!(partial.message.contains(".app.hash"), "{}", partial.message);
         assert_eq!(mountpoints, 0, "a failed mount left its mountpoint behind");

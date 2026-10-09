@@ -6,9 +6,9 @@ use weft_ipc_types::AppdToCompositor;
 
 use crate::Registry;
 use crate::compositor_client::CompositorSender;
+use crate::ipc::{AppStateKind, Response};
 use crate::launch::LaunchPackage;
 use crate::mount::Mount;
-use crate::ipc::{AppStateKind, Response};
 
 /// The per-session relay between the component's IPC socket and the app
 /// bridge. It belongs to the session: closing it stops the relay task and
@@ -378,15 +378,15 @@ pub(crate) async fn supervise(
     tokio::spawn(drain_stdout(runtime_stdout, session_id));
 
     let bridge_token = registry.lock().await.bridge_token(session_id);
-    let mut app_shell = match spawn_app_shell(&shell_bin, session_id, &package, &token, bridge_token)
-    {
-        Ok(child) => child,
-        Err(e) => {
-            return session
-                .settle(&registry, &format!("failed to spawn app shell: {e}"))
-                .await;
-        }
-    };
+    let mut app_shell =
+        match spawn_app_shell(&shell_bin, session_id, &package, &token, bridge_token) {
+            Ok(child) => child,
+            Err(e) => {
+                return session
+                    .settle(&registry, &format!("failed to spawn app shell: {e}"))
+                    .await;
+            }
+        };
     let shell_stdout = app_shell.stdout.take().expect("stdout piped");
     tokio::spawn(drain_stderr(
         app_shell.stderr.take().expect("stderr piped"),

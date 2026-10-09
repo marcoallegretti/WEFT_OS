@@ -56,7 +56,10 @@ pub(crate) fn mount(app_id: &str, files: &ImageFiles) -> Result<Mount, String> {
     for path in [&files.image, &files.hash_tree, &files.root_hash] {
         let is_file = std::fs::symlink_metadata(path).is_ok_and(|m| m.file_type().is_file());
         if !is_file {
-            return Err(format!("{} is missing or not a regular file", path.display()));
+            return Err(format!(
+                "{} is missing or not a regular file",
+                path.display()
+            ));
         }
     }
     let root_hash = std::fs::read_to_string(&files.root_hash)
@@ -99,7 +102,7 @@ pub(crate) fn mount(app_id: &str, files: &ImageFiles) -> Result<Mount, String> {
 /// A dm-verity root hash in hex, as `veritysetup format` prints it.
 fn is_root_hash(text: &str) -> bool {
     (64..=128).contains(&text.len())
-        && text.len() % 2 == 0
+        && text.len().is_multiple_of(2)
         && text.bytes().all(|b| b.is_ascii_hexdigit())
 }
 
@@ -111,7 +114,13 @@ mod tests {
     fn root_hashes_are_hex_digests() {
         assert!(is_root_hash(&"a".repeat(64)));
         assert!(is_root_hash(&"0F".repeat(64)));
-        for bad in ["", "abc", &"g".repeat(64), &"a".repeat(65), &"a".repeat(130)] {
+        for bad in [
+            "",
+            "abc",
+            &"g".repeat(64),
+            &"a".repeat(65),
+            &"a".repeat(130),
+        ] {
             assert!(!is_root_hash(bad), "{bad:?}");
         }
     }
