@@ -415,7 +415,13 @@ async fn handle_connection(
 pub(crate) fn session_ipc_socket_path(session_id: u64) -> Option<PathBuf> {
     let runtime_dir = std::env::var("XDG_RUNTIME_DIR").ok()?;
     let dir = PathBuf::from(runtime_dir).join("weft");
-    std::fs::create_dir_all(&dir).ok()?;
+    // Created accessible to the user only, so session sockets are private
+    // whatever the umask.
+    let mut builder = std::fs::DirBuilder::new();
+    builder.recursive(true);
+    #[cfg(unix)]
+    std::os::unix::fs::DirBuilderExt::mode(&mut builder, 0o700);
+    builder.create(&dir).ok()?;
     Some(dir.join(format!("ipc-{session_id}.sock")))
 }
 
@@ -634,11 +640,25 @@ mod tests {
 
     static ENV_LOCK: std::sync::OnceLock<tokio::sync::Mutex<()>> = std::sync::OnceLock::new();
 
-    /// Points XDG_RUNTIME_DIR at a private directory for the session's IPC
-    /// socket. Callers hold env_lock.
+    /// Points XDG_RUNTIME_DIR at a directory private to this test process,
+    /// since session sockets are named by session ID and every test registry
+    /// starts at 1. Directories of test processes that have ended are
+    /// removed. Callers hold env_lock.
     fn use_test_runtime_dir() {
-        let dir =
-            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/test-runtime-dir");
+        let base = std::env::temp_dir().join("weft-appd-tests");
+        if let Ok(entries) = std::fs::read_dir(&base) {
+            for entry in entries.flatten() {
+                let alive = entry
+                    .file_name()
+                    .to_str()
+                    .and_then(|pid| pid.parse::<u32>().ok())
+                    .is_some_and(|pid| std::path::Path::new(&format!("/proc/{pid}")).exists());
+                if !alive {
+                    let _ = std::fs::remove_dir_all(entry.path());
+                }
+            }
+        }
+        let dir = base.join(std::process::id().to_string());
         std::fs::create_dir_all(&dir).unwrap();
         // SAFETY: env_lock serialises the tests that change the environment,
         // and std serialises the environment accesses themselves.
@@ -1047,25 +1067,15 @@ mod tests {
         use_test_runtime_dir();
         let dir = std::env::temp_dir().join(format!("weft_test_ipc_close_{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
-        // The runtime connects to its IPC socket ($4), closes the connection
-        // and keeps running; the app shell just reports ready.
-        let runtime = dir.join("runtime.sh");
+        // Both children report ready and keep running; the test plays the
+        // component, connecting to the session's IPC socket and closing it.
+        let child = dir.join("child.sh");
         std::fs::write(
-            &runtime,
-            "#!/bin/sh\necho READY $WEFT_READY_TOKEN\n\
-             python3 -c 'import socket,sys; s=socket.socket(socket.AF_UNIX); \
-             s.connect(sys.argv[1]); s.close()' \"$4\"\nexec sleep 30\n",
-        )
-        .unwrap();
-        let shell = dir.join("shell.sh");
-        std::fs::write(
-            &shell,
+            &child,
             "#!/bin/sh\necho READY $WEFT_READY_TOKEN\nexec sleep 30\n",
         )
         .unwrap();
-        for script in [&runtime, &shell] {
-            std::fs::set_permissions(script, std::fs::Permissions::from_mode(0o755)).unwrap();
-        }
+        std::fs::set_permissions(&child, std::fs::Permissions::from_mode(0o755)).unwrap();
         let prior: Vec<_> = [
             "WEFT_RUNTIME_BIN",
             "WEFT_APP_SHELL_BIN",
@@ -1076,25 +1086,38 @@ mod tests {
         .collect();
         // SAFETY: env_lock serialises the tests that change the environment.
         unsafe {
-            std::env::set_var("WEFT_RUNTIME_BIN", &runtime);
-            std::env::set_var("WEFT_APP_SHELL_BIN", &shell);
+            std::env::set_var("WEFT_RUNTIME_BIN", &child);
+            std::env::set_var("WEFT_APP_SHELL_BIN", &child);
             std::env::set_var("WEFT_DISABLE_CGROUP", "1");
         }
 
         let registry = make_registry();
+        let mut rx = registry.lock().await.subscribe();
         let session_id = registry.lock().await.launch("test.app");
         let abort_rx = registry.lock().await.register_abort(session_id);
-        let finished = tokio::time::timeout(
-            std::time::Duration::from_secs(15),
-            runtime::supervise(
-                session_id,
-                "test.app",
-                grants::SessionGrants::default(),
-                Arc::clone(&registry),
-                abort_rx,
-                None,
-            ),
-        )
+        let socket = session_ipc_socket_path(session_id).unwrap();
+        let component = async {
+            // Connect once the session is running, then close the connection.
+            loop {
+                if let Ok(Response::AppReady { session_id: id, .. }) = rx.recv().await
+                    && id == session_id
+                {
+                    break;
+                }
+            }
+            drop(tokio::net::UnixStream::connect(&socket).await.unwrap());
+        };
+        let supervised = runtime::supervise(
+            session_id,
+            "test.app",
+            grants::SessionGrants::default(),
+            Arc::clone(&registry),
+            abort_rx,
+            None,
+        );
+        let finished = tokio::time::timeout(std::time::Duration::from_secs(15), async {
+            tokio::join!(supervised, component)
+        })
         .await;
 
         for (key, value) in prior {

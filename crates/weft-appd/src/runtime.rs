@@ -44,7 +44,12 @@ pub(crate) fn spawn_ipc_relay(
     let listener = tokio::net::UnixListener::bind(&socket_path)?;
     {
         use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&socket_path, std::fs::Permissions::from_mode(0o600))?;
+        if let Err(e) =
+            std::fs::set_permissions(&socket_path, std::fs::Permissions::from_mode(0o600))
+        {
+            let _ = std::fs::remove_file(&socket_path);
+            return Err(e);
+        }
     }
     let (html_to_wasm_tx, mut html_to_wasm_rx) = tokio::sync::mpsc::channel::<String>(64);
     let task = tokio::spawn(async move {
@@ -396,6 +401,9 @@ pub(crate) async fn supervise(
         }
         status = session.runtime.as_mut().expect("runtime spawned").wait() => {
             Err(format!("runtime exited before the app shell was ready ({status:?})"))
+        }
+        _ = session.relay.as_mut().expect("relay opened").ended() => {
+            Err("component closed its IPC connection before the session was ready".to_owned())
         }
     };
     let shell_stdout = match shell_stdout {
