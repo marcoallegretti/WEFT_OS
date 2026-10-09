@@ -307,21 +307,37 @@ fn install_into(
 }
 
 /// Creates the store and any missing parents at 0755 whatever the umask, so
-/// a store created by a root install is readable by every user.
+/// a store created by a root install is readable by every user. Each new
+/// directory is created private and its mode set through a descriptor that
+/// does not follow links, so only the directory just created is changed.
 fn create_store(store_root: &Path) -> anyhow::Result<()> {
     let mut missing: Vec<&Path> = store_root
         .ancestors()
+        .filter(|dir| !dir.as_os_str().is_empty())
         .take_while(|dir| std::fs::symlink_metadata(dir).is_err())
         .collect();
     missing.reverse();
     for dir in missing {
-        match std::fs::create_dir(dir) {
+        let mut builder = std::fs::DirBuilder::new();
+        #[cfg(unix)]
+        std::os::unix::fs::DirBuilderExt::mode(&mut builder, 0o700);
+        match builder.create(dir) {
             Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
             other => other.with_context(|| format!("create {}", dir.display()))?,
         }
         #[cfg(unix)]
-        std::fs::set_permissions(dir, std::os::unix::fs::PermissionsExt::from_mode(0o755))
-            .with_context(|| format!("set the mode of {}", dir.display()))?;
+        {
+            use rustix::fs::{CWD, Mode, OFlags};
+            let created = rustix::fs::openat(
+                CWD,
+                dir,
+                OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+                Mode::empty(),
+            )
+            .with_context(|| format!("open {}", dir.display()))?;
+            rustix::fs::fchmod(&created, Mode::from_raw_mode(0o755))
+                .with_context(|| format!("set the mode of {}", dir.display()))?;
+        }
     }
     anyhow::ensure!(
         store_root.is_dir(),
@@ -1339,6 +1355,32 @@ mod tests {
         assert_eq!(owner_of(&home, app_id), Some(Owner::Development));
         with_home(&home, || uninstall_package_from(app_id, &user_store)).unwrap();
         assert_eq!(owner_of(&home, app_id), None);
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_missing_store_is_created_readable_by_everyone() {
+        use std::os::unix::fs::PermissionsExt;
+        let home = temp_root("new_store");
+        std::fs::create_dir_all(&home).unwrap();
+        let mode = |p: &Path| std::fs::metadata(p).unwrap().permissions().mode() & 0o777;
+        // An absolute store with missing parents.
+        let absolute = home.join("a/b/store");
+        create_store(&absolute).unwrap();
+        for dir in [home.join("a"), home.join("a/b"), absolute.clone()] {
+            assert_eq!(mode(&dir), 0o755, "{}", dir.display());
+        }
+        // A relative store none of whose components exist yet.
+        let relative = PathBuf::from(format!("weft-pack-store-{}/sub", std::process::id()));
+        let _ = std::fs::remove_dir_all(relative.parent().unwrap());
+        create_store(&relative).unwrap();
+        assert_eq!(mode(&relative), 0o755);
+        std::fs::remove_dir_all(relative.parent().unwrap()).unwrap();
+        // An existing store is left as it is.
+        std::fs::set_permissions(&absolute, std::fs::Permissions::from_mode(0o750)).unwrap();
+        create_store(&absolute).unwrap();
+        assert_eq!(mode(&absolute), 0o750);
         let _ = std::fs::remove_dir_all(&home);
     }
 
