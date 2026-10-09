@@ -80,6 +80,15 @@
     font-size: 12px;
     color: #444;
   }
+  #closing {
+    display: none;
+    align-items: center;
+    gap: 8px;
+    flex-shrink: 0;
+    font-size: 13px;
+  }
+  #closing.shown { display: flex; }
+  #closing span { flex: 1; }
   #charcount {
     font-size: 12px;
     color: #444;
@@ -95,6 +104,12 @@
     <button class="primary" id="save">Save</button>
   </div>
 </header>
+<div id="closing" role="alertdialog" aria-label="Unsaved changes">
+  <span>These notes have unsaved changes.</span>
+  <button class="primary" id="close-save">Save and close</button>
+  <button id="close-discard">Close without saving</button>
+  <button id="close-cancel">Cancel</button>
+</div>
 <textarea id="editor" placeholder="Start typing…" spellcheck="false"></textarea>
 <footer>
   <span id="status">connecting…</span>
@@ -121,6 +136,8 @@
   var lastSent = null;
   var loading = null; // timer of the outstanding load, if any
   var encoder = new TextEncoder();
+  var closing = document.getElementById('closing');
+  var closeAfterSave = false;
 
   function setStatus(msg) { statusEl.textContent = msg; }
   function countChars() { charEl.textContent = editor.value.length + ' chars'; }
@@ -137,6 +154,40 @@
     pending = null;
     setLoaded(rev !== null);
   }
+
+  // Close policy ("ask" in wapp.toml): when the window is asked to close
+  // with unsaved changes, the close is cancelled and the user chooses to
+  // save first, close without saving, or keep editing. The window closes
+  // after a save only once the save is acknowledged; a failed save keeps
+  // it open with the error shown.
+  function unsaved() {
+    return pending !== null || (rev !== null && editor.value !== saved);
+  }
+
+  function hideClosing() {
+    closing.classList.remove('shown');
+    closeAfterSave = false;
+  }
+
+  window.addEventListener('weftclose', function (e) {
+    if (!unsaved()) return;
+    e.preventDefault();
+    closeAfterSave = false;
+    closing.classList.add('shown');
+  });
+
+  document.getElementById('close-save').addEventListener('click', function () {
+    closeAfterSave = true;
+    if (!pending) saveButton.click();
+    // The save could not start (status says why): stay open.
+    if (!pending) hideClosing();
+  });
+
+  document.getElementById('close-discard').addEventListener('click', function () {
+    window.close();
+  });
+
+  document.getElementById('close-cancel').addEventListener('click', hideClosing);
 
   saveButton.addEventListener('click', function () {
     if (!window.weftIpc || pending) return;
@@ -162,6 +213,7 @@
       text: request.text,
       timer: setTimeout(function () {
         finishSave();
+        hideClosing();
         setStatus('not saved: no reply; try again');
       }, REPLY_TIMEOUT),
     };
@@ -225,8 +277,15 @@
       rev = msg.rev;
       finishSave();
       setStatus(editor.value === saved ? 'saved' : 'saved; newer changes are not saved yet');
+      if (closeAfterSave) {
+        if (editor.value === saved) window.close();
+        else hideClosing();
+      }
     } else if (msg.op === 'error') {
-      if (pending && msg.seq === pending.seq) finishSave();
+      if (pending && msg.seq === pending.seq) {
+        finishSave();
+        hideClosing();
+      }
       if (loading && msg.seq === undefined) finishLoad();
       setStatus(msg.conflict
         ? 'not saved: changed in another window. Copy your text, then Discard to reload.'

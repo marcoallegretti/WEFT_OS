@@ -1400,6 +1400,129 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
+    async fn an_app_that_cancels_a_close_keeps_running() {
+        use std::os::unix::fs::PermissionsExt;
+        let _env = env_lock().lock().await;
+        use_test_runtime_dir();
+        let dir = std::env::temp_dir().join(format!("weft_test_cancel_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let app = dir.join("store/org.example.cancel");
+        write_test_package(&app, "org.example.cancel", "");
+        let runtime = dir.join("runtime.sh");
+        std::fs::write(
+            &runtime,
+            "#!/bin/sh\necho READY $WEFT_READY_TOKEN\nexec sleep 30\n",
+        )
+        .unwrap();
+        // The app shell declines the close once, after a forged report.
+        let shell = dir.join("shell.sh");
+        std::fs::write(
+            &shell,
+            "#!/bin/sh\necho READY $WEFT_READY_TOKEN\nsleep 1\n\
+             echo CLOSE_CANCELLED 00000000000000000000000000000000\nsleep 1\n\
+             echo CLOSE_CANCELLED $WEFT_READY_TOKEN\nexec sleep 30\n",
+        )
+        .unwrap();
+        for script in [&runtime, &shell] {
+            std::fs::set_permissions(script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        let vars = [
+            ("WEFT_RUNTIME_BIN", runtime.clone().into_os_string()),
+            ("WEFT_APP_SHELL_BIN", shell.clone().into_os_string()),
+            ("WEFT_DISABLE_CGROUP", "1".into()),
+            ("WEFT_APP_STORE", dir.join("store").into_os_string()),
+        ];
+        let prior: Vec<_> = vars
+            .iter()
+            .map(|(k, _)| (*k, std::env::var_os(k)))
+            .collect();
+        for (key, value) in &vars {
+            // SAFETY: env_lock is held on a current_thread runtime.
+            unsafe { std::env::set_var(key, value) };
+        }
+
+        let registry = make_registry();
+        let (tx, _compositor) = tokio::sync::mpsc::channel(8);
+        registry.lock().await.compositor_tx = Some(compositor_client::CompositorSender::new(
+            tx,
+            std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true)),
+        ));
+        let mut rx = registry.lock().await.subscribe();
+        let ack = dispatch(
+            Request::LaunchApp {
+                app_id: "org.example.cancel".into(),
+                surface_id: 0,
+            },
+            &registry,
+        )
+        .await;
+        let Response::LaunchAck { session_id, .. } = ack else {
+            panic!("{ack:?}");
+        };
+        let ready = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            while !matches!(rx.recv().await, Ok(Response::AppReady { .. })) {}
+        })
+        .await;
+        let started = std::time::Instant::now();
+        dispatch(Request::TerminateApp { session_id }, &registry).await;
+        // The session is running again once the genuine report arrives.
+        let resumed = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            loop {
+                match rx.recv().await {
+                    Ok(Response::AppState {
+                        state: AppStateKind::Running,
+                        ..
+                    }) => return true,
+                    Ok(Response::AppState {
+                        state: AppStateKind::Stopped,
+                        ..
+                    }) => return false,
+                    _ => {}
+                }
+            }
+        })
+        .await;
+        let resumed_after = started.elapsed();
+        let state = registry.lock().await.state(session_id);
+        // A second request asks again; this time nothing declines it.
+        dispatch(Request::TerminateApp { session_id }, &registry).await;
+        let stopped = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            while !matches!(
+                rx.recv().await,
+                Ok(Response::AppState {
+                    state: AppStateKind::Stopped,
+                    ..
+                })
+            ) {}
+        })
+        .await;
+
+        for (key, value) in prior {
+            // SAFETY: as above.
+            unsafe {
+                match value {
+                    Some(v) => std::env::set_var(key, v),
+                    None => std::env::remove_var(key),
+                }
+            }
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(ready.is_ok(), "the session did not become ready");
+        assert_eq!(
+            resumed,
+            Ok(true),
+            "the cancelled close did not resume the session"
+        );
+        // The forged report one second in did not count.
+        assert!(
+            resumed_after >= std::time::Duration::from_millis(1500),
+            "{resumed_after:?}"
+        );
+        assert!(matches!(state, AppStateKind::Running), "{state:?}");
+        assert!(stopped.is_ok(), "the second close did not stop the session");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
     async fn an_app_that_ignores_a_close_is_terminated_after_the_timeout() {
         use std::os::unix::fs::PermissionsExt;
         let _env = env_lock().lock().await;

@@ -6,7 +6,7 @@
 
 use std::path::{Path, PathBuf};
 
-use weft_ipc_types::manifest::{MANIFEST_FILE, Manifest, ManifestError, entry_path};
+use weft_ipc_types::manifest::{ClosePolicy, MANIFEST_FILE, Manifest, ManifestError, entry_path};
 use weft_ipc_types::package::{ImageFiles, is_valid_app_id};
 
 use crate::grants::Refusal;
@@ -20,6 +20,8 @@ pub(crate) struct LaunchPackage {
     pub(crate) module: PathBuf,
     /// The UI document, from `[ui].entry`.
     pub(crate) ui_entry: PathBuf,
+    /// What a user close does, from `[ui].close`.
+    pub(crate) close: ClosePolicy,
     pub(crate) capabilities: Vec<String>,
     /// The image the package root is mounted from, held for as long as the
     /// session runs.
@@ -110,6 +112,7 @@ fn from_root(app_id: &str, root: PathBuf, image: Option<Mount>) -> Result<Launch
         capabilities: manifest.capabilities().to_vec(),
         module,
         ui_entry,
+        close: manifest.ui.close,
         root,
         image,
     })
@@ -125,6 +128,7 @@ impl LaunchPackage {
             root: PathBuf::from("/nonexistent"),
             module: PathBuf::from("/nonexistent/app.wasm"),
             ui_entry: PathBuf::from("/nonexistent/ui/index.html"),
+            close: ClosePolicy::Immediate,
             capabilities: Vec::new(),
             image: None,
         }
