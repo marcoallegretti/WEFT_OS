@@ -161,17 +161,45 @@ pub fn is_public(ip: std::net::IpAddr) -> bool {
                 || (a == 198 && (18..20).contains(&b)))
         }
         IpAddr::V6(v6) => {
+            let seg = v6.segments();
+            let embedded = |high: u16, low: u16| {
+                IpAddr::V4(std::net::Ipv4Addr::new(
+                    (high >> 8) as u8,
+                    high as u8,
+                    (low >> 8) as u8,
+                    low as u8,
+                ))
+            };
+            // Forms that carry an IPv4 address are judged by that address:
+            // mapped and compatible addresses, 6to4 and NAT64.
             if let Some(v4) = v6.to_ipv4_mapped() {
                 return is_public(IpAddr::V4(v4));
             }
-            let first = v6.segments()[0];
+            if seg[..6] == [0; 6] && !(seg[6] == 0 && seg[7] <= 1) {
+                return is_public(embedded(seg[6], seg[7]));
+            }
+            if seg[0] == 0x2002 {
+                return is_public(embedded(seg[1], seg[2]));
+            }
+            if seg[..6] == [0x0064, 0xff9b, 0, 0, 0, 0] {
+                return is_public(embedded(seg[6], seg[7]));
+            }
             !(v6.is_unspecified()
                 || v6.is_loopback()
                 || v6.is_multicast()
-                || (first & 0xfe00) == 0xfc00
-                || (first & 0xffc0) == 0xfe80
-                || (first == 0x2001 && v6.segments()[1] == 0x0db8)
-                || (first == 0x0064 && v6.segments()[1] == 0xff9b))
+                // Unique local, link-local and the deprecated site-local.
+                || (seg[0] & 0xfe00) == 0xfc00
+                || (seg[0] & 0xffc0) == 0xfe80
+                || (seg[0] & 0xffc0) == 0xfec0
+                // NAT64 for local use, discard-only.
+                || (seg[0] == 0x0064 && seg[1] == 0xff9b)
+                || (seg[0] == 0x0100 && seg[1..4] == [0, 0, 0])
+                // Teredo, benchmarking, ORCHID and documentation.
+                || (seg[0] == 0x2001 && seg[1] == 0)
+                || (seg[0] == 0x2001 && seg[1] == 0x0002 && seg[2] == 0)
+                || (seg[0] == 0x2001 && (seg[1] & 0xfff0) == 0x0010)
+                || (seg[0] == 0x2001 && seg[1] == 0x0db8)
+                || (seg[0] & 0xfff0) == 0x3ff0)
         }
     }
 }
@@ -214,7 +242,15 @@ mod tests {
 
     #[test]
     fn only_public_unicast_addresses_are_public() {
-        for public in ["93.184.216.34", "1.1.1.1", "2606:4700::1111"] {
+        // NAT64 and 6to4 forms of a public address are public, so DNS64
+        // networks keep working.
+        for public in [
+            "93.184.216.34",
+            "1.1.1.1",
+            "2606:4700::1111",
+            "64:ff9b::5db8:d822",
+            "2002:5db8:d822::1",
+        ] {
             assert!(is_public(public.parse().unwrap()), "{public}");
         }
         for local in [
@@ -238,7 +274,17 @@ mod tests {
             "::ffff:127.0.0.1",
             "::ffff:10.0.0.1",
             "64:ff9b::a00:1",
+            "64:ff9b:1::1",
             "2001:db8::1",
+            "fec0::1",
+            "::7f00:1",
+            "2002:7f00:1::",
+            "2002:a00:1::",
+            "2001::1",
+            "2001:2::1",
+            "2001:10::1",
+            "3fff::1",
+            "100::1",
         ] {
             assert!(!is_public(local.parse().unwrap()), "{local}");
         }

@@ -445,6 +445,8 @@ fn host_fetch(
     }
     let agent = ureq::AgentBuilder::new()
         .resolver(GrantedResolver(reach))
+        // A proxy would be connected to instead of the checked address.
+        .try_proxy_from_env(false)
         .redirects(0)
         .timeout_connect(Duration::from_secs(10))
         .timeout(Duration::from_secs(30))
@@ -498,7 +500,7 @@ impl ureq::Resolver for GrantedResolver {
                 std::io::ErrorKind::PermissionDenied,
                 format!(
                     "{netloc} resolves only to addresses on this machine or a local network, \
-                     which a fetch grant for a name does not cover"
+                     which only a grant naming that address covers"
                 ),
             ));
         }
