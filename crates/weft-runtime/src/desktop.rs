@@ -24,9 +24,11 @@ enum Output {
     /// Read: up to the limit from standard output, and standard error for
     /// the failure message.
     Captured,
-    /// Discarded, for a helper that leaves a process running which would
-    /// keep the streams open, as `wl-copy` does to serve the selection.
-    Discarded,
+    /// Standard output discarded and standard error read only when the
+    /// helper fails, for a helper that leaves a process running which
+    /// keeps its streams open after succeeding, as `wl-copy` does to
+    /// serve the selection; it fails, if at all, before that.
+    ErrorsOnly,
 }
 
 /// Runs `command` with `input` on its standard input and returns at most
@@ -38,18 +40,17 @@ fn run(
     output: Output,
 ) -> Result<Vec<u8>, String> {
     let program = command.get_program().to_string_lossy().into_owned();
-    let stream = || match output {
-        Output::Captured => Stdio::piped(),
-        Output::Discarded => Stdio::null(),
-    };
     let mut child = command
         .stdin(if input.is_some() {
             Stdio::piped()
         } else {
             Stdio::null()
         })
-        .stdout(stream())
-        .stderr(stream())
+        .stdout(match output {
+            Output::Captured => Stdio::piped(),
+            Output::ErrorsOnly => Stdio::null(),
+        })
+        .stderr(Stdio::piped())
         .spawn()
         .map_err(|e| format!("cannot run {program}: {e}"))?;
     if let (Some(mut stdin), Some(input)) = (child.stdin.take(), input) {
@@ -93,10 +94,19 @@ fn run(
                     HELPER_TIMEOUT.as_secs()
                 ));
             }
-            Err(e) => return Err(e.to_string()),
+            Err(e) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(e.to_string());
+            }
         }
     };
     let output = stdout.join().unwrap_or_default();
+    // Checked first: a helper whose output is cut off at the limit may die
+    // of the broken pipe.
+    if output.len() > max_output {
+        return Err(format!("{program} returned more than {max_output} bytes"));
+    }
     if !status.success() {
         let message = String::from_utf8_lossy(&stderr.join().unwrap_or_default())
             .trim()
@@ -104,18 +114,16 @@ fn run(
         return Err(if message.is_empty() {
             format!("{program} exited with {status}")
         } else {
-            message
+            format!("{program}: {message}")
         });
-    }
-    if output.len() > max_output {
-        return Err(format!("{program} returned more than {max_output} bytes"));
     }
     Ok(output)
 }
 
 pub fn clipboard_read() -> Result<String, String> {
     let mut command = Command::new("wl-paste");
-    command.args(["--no-newline", "--type", "text/plain;charset=utf-8"]);
+    // Any text type; the content must still be UTF-8.
+    command.args(["--no-newline", "--type", "text"]);
     let data = run(command, None, MAX_CLIPBOARD, Output::Captured)?;
     String::from_utf8(data).map_err(|_| "the clipboard does not hold UTF-8 text".to_owned())
 }
@@ -130,7 +138,7 @@ pub fn clipboard_write(text: &str) -> Result<(), String> {
         command,
         Some(text.as_bytes().to_vec()),
         0,
-        Output::Discarded,
+        Output::ErrorsOnly,
     )
     .map(|_| ())
 }
@@ -162,6 +170,12 @@ fn is_icon_name(icon: &str) -> bool {
             .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.'))
 }
 
+fn escape_markup(text: &str) -> String {
+    text.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+}
+
 /// Sends a notification attributed to `app_id`.
 pub fn notify(app_id: &str, title: &str, body: &str, icon: Option<&str>) -> Result<(), String> {
     check_notification(title, body, icon)?;
@@ -170,13 +184,23 @@ pub fn notify(app_id: &str, title: &str, body: &str, icon: Option<&str>) -> Resu
     if let Some(icon) = icon {
         command.arg(format!("--icon={icon}"));
     }
-    command.arg("--").arg(title).arg(body);
+    // Notification servers may render markup in the body, including links
+    // and images, so it is sent as plain text.
+    command.arg("--").arg(title).arg(escape_markup(body));
     run(command, None, 0, Output::Captured).map(|_| ())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn notification_bodies_are_plain_text() {
+        assert_eq!(
+            escape_markup("<a href=\"x\">a & b</a>"),
+            "&lt;a href=\"x\"&gt;a &amp; b&lt;/a&gt;"
+        );
+    }
 
     #[test]
     fn notifications_are_bounded_and_icons_are_theme_names() {
@@ -206,15 +230,15 @@ mod tests {
         assert!(started.elapsed() < HELPER_TIMEOUT + Duration::from_secs(2));
 
         let mut chatty = Command::new("head");
-        chatty.args(["-c", "2000", "/dev/zero"]);
+        // Far more than a pipe holds, so the cut-off kills the writer.
+        chatty.args(["-c", "10000000", "/dev/zero"]);
         assert!(
             run(chatty, None, 1000, Output::Captured)
                 .unwrap_err()
                 .contains("more than 1000 bytes")
         );
 
-        let mut echo = Command::new("cat");
-        echo.stdin(Stdio::piped());
+        let echo = Command::new("cat");
         assert_eq!(
             run(echo, Some(b"text".to_vec()), 100, Output::Captured).unwrap(),
             b"text"
@@ -225,8 +249,15 @@ mod tests {
         let mut forking = Command::new("sh");
         forking.args(["-c", "sleep 30 & exit 0"]);
         let started = Instant::now();
-        assert!(run(forking, None, 0, Output::Discarded).is_ok());
+        assert!(run(forking, None, 0, Output::ErrorsOnly).is_ok());
         assert!(started.elapsed() < Duration::from_secs(2));
+
+        let mut failing = Command::new("sh");
+        failing.args(["-c", "echo no display >&2; exit 1"]);
+        assert_eq!(
+            run(failing, None, 0, Output::ErrorsOnly).unwrap_err(),
+            "sh: no display"
+        );
 
         let failing = Command::new("false");
         assert!(
