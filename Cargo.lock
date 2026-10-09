@@ -10524,6 +10524,7 @@ dependencies = [
  "rmp-serde",
  "rustix 1.1.4",
  "serde",
+ "toml 0.8.23",
 ]
 
 [[package]]
@@ -10541,10 +10542,8 @@ dependencies = [
  "ed25519-dalek",
  "hex",
  "rand 0.8.5",
- "serde",
  "sha2",
  "tar",
- "toml 0.8.23",
  "weft-ipc-types",
  "zstd",
 ]

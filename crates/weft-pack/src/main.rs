@@ -1,34 +1,8 @@
 use std::path::{Path, PathBuf};
 
 use anyhow::Context;
-use serde::Deserialize;
-
-#[derive(Debug, Deserialize)]
-struct Manifest {
-    package: PackageMeta,
-    runtime: RuntimeMeta,
-    ui: UiMeta,
-}
-
-#[derive(Debug, Deserialize)]
-struct PackageMeta {
-    id: String,
-    name: String,
-    version: String,
-    description: Option<String>,
-    author: Option<String>,
-    capabilities: Option<Vec<String>>,
-}
-
-#[derive(Debug, Deserialize)]
-struct RuntimeMeta {
-    module: String,
-}
-
-#[derive(Debug, Deserialize)]
-struct UiMeta {
-    entry: String,
-}
+use weft_ipc_types::manifest::{Manifest, entry_path};
+use weft_ipc_types::package::ImageFiles;
 
 fn main() -> anyhow::Result<()> {
     let args: Vec<String> = std::env::args().collect();
@@ -177,22 +151,17 @@ fn check_package(dir: &Path) -> anyhow::Result<String> {
             ));
         }
 
-        let wasm_path = dir.join(&m.runtime.module);
-        if !wasm_path.exists() {
-            errors.push(format!(
-                "runtime.module '{}' not found",
-                wasm_path.display()
-            ));
-        } else if !is_wasm_module(&wasm_path) {
-            errors.push(format!(
+        match entry_path(dir, &m.runtime.module) {
+            Err(e) => errors.push(format!("runtime.module: {e}")),
+            Ok(wasm_path) if !is_wasm_module(&wasm_path) => errors.push(format!(
                 "runtime.module '{}' is not a valid Wasm module (bad magic bytes)",
                 wasm_path.display()
-            ));
+            )),
+            Ok(_) => {}
         }
 
-        let ui_path = dir.join(&m.ui.entry);
-        if !ui_path.exists() {
-            errors.push(format!("ui.entry '{}' not found", ui_path.display()));
+        if let Err(e) = entry_path(dir, &m.ui.entry) {
+            errors.push(format!("ui.entry: {e}"));
         }
 
         for cap in m.package.capabilities.iter().flatten() {
@@ -210,10 +179,7 @@ fn check_package(dir: &Path) -> anyhow::Result<String> {
 }
 
 fn load_manifest(dir: &Path) -> anyhow::Result<Manifest> {
-    let manifest_path = dir.join("wapp.toml");
-    let text = std::fs::read_to_string(&manifest_path)
-        .with_context(|| format!("read {}", manifest_path.display()))?;
-    toml::from_str(&text).with_context(|| format!("parse {}", manifest_path.display()))
+    Ok(Manifest::read(dir)?)
 }
 
 fn print_info(m: &Manifest) {
@@ -447,11 +413,7 @@ fn list_installed() {
         };
         let mut pkgs: Vec<(String, String, String)> = Vec::new();
         for entry in entries.flatten() {
-            let manifest_path = entry.path().join("wapp.toml");
-            let Ok(contents) = std::fs::read_to_string(&manifest_path) else {
-                continue;
-            };
-            let Ok(m) = toml::from_str::<Manifest>(&contents) else {
+            let Ok(m) = Manifest::read(&entry.path()) else {
                 continue;
             };
             if seen.insert(m.package.id.clone()) {
@@ -488,10 +450,9 @@ fn copy_dir(src: &Path, dst: &Path) -> anyhow::Result<()> {
 fn build_image(dir: &Path, out_path: Option<&Path>) -> anyhow::Result<()> {
     let manifest = load_manifest(dir)?;
     let app_id = &manifest.package.id;
-    let default_name = format!("{app_id}.app.img");
     let output = match out_path {
         Some(p) => p.to_path_buf(),
-        None => PathBuf::from(&default_name),
+        None => ImageFiles::in_store(Path::new(""), app_id).image,
     };
     if output.exists() {
         anyhow::bail!("{} already exists", output.display());
@@ -509,9 +470,10 @@ fn build_image(dir: &Path, out_path: Option<&Path>) -> anyhow::Result<()> {
 }
 
 fn build_verity(img: &Path, hash_out: Option<&Path>) -> anyhow::Result<()> {
-    let stem = img.file_stem().context("no file stem")?.to_string_lossy();
-    let default_hash = img.with_file_name(format!("{stem}.hash"));
-    let hash_path = hash_out.map(|p| p.to_path_buf()).unwrap_or(default_hash);
+    let companions = ImageFiles::for_image(img);
+    let hash_path = hash_out
+        .map(|p| p.to_path_buf())
+        .unwrap_or(companions.hash_tree);
     if hash_path.exists() {
         anyhow::bail!("{} already exists", hash_path.display());
     }
@@ -535,7 +497,7 @@ fn build_verity(img: &Path, hash_out: Option<&Path>) -> anyhow::Result<()> {
         .find(|l| l.starts_with("Root hash:"))
         .context("root hash not found in veritysetup output")?;
     let hash_value = root_hash.trim_start_matches("Root hash:").trim();
-    let roothash_path = img.with_extension("roothash");
+    let roothash_path = companions.root_hash;
     std::fs::write(&roothash_path, hash_value)
         .with_context(|| format!("write {}", roothash_path.display()))?;
     println!("hash image:  {}", hash_path.display());
@@ -1302,6 +1264,30 @@ entry = "ui/index.html"
             ),
         )
         .unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn check_package_refuses_entries_outside_the_package() {
+        let tmp = std::env::temp_dir().join(format!("weft_pack_entries_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        make_valid_package(&tmp, "com.example.entries", "");
+        std::fs::write(tmp.with_extension("wasm"), b"\0asm\x01\0\0\0").unwrap();
+        std::os::unix::fs::symlink("index.html", tmp.join("ui/linked.html")).unwrap();
+        let manifest = std::fs::read_to_string(tmp.join("wapp.toml")).unwrap();
+        let escaping = format!("../{}", tmp.with_extension("wasm").file_name().unwrap().display());
+        std::fs::write(
+            tmp.join("wapp.toml"),
+            manifest
+                .replace("module = \"app.wasm\"", &format!("module = \"{escaping}\""))
+                .replace("ui/index.html", "ui/linked.html"),
+        )
+        .unwrap();
+        let msg = check_package(&tmp).unwrap_err().to_string();
+        let _ = std::fs::remove_dir_all(&tmp);
+        let _ = std::fs::remove_file(tmp.with_extension("wasm"));
+        assert!(msg.contains("runtime.module") && msg.contains("not a relative path"), "{msg}");
+        assert!(msg.contains("ui.entry") && msg.contains("symbolic link"), "{msg}");
     }
 
     #[test]

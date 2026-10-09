@@ -19,6 +19,7 @@ mod compositor_client {
 }
 mod grants;
 mod ipc;
+mod launch;
 mod mount;
 mod runtime;
 mod ws;
@@ -442,20 +443,19 @@ pub(crate) async fn dispatch(req: Request, registry: &Registry) -> Response {
             app_id,
             surface_id: _,
         } => {
-            // The package's capabilities are granted before a session exists;
-            // a package this host cannot satisfy is refused, not started.
-            let grants = if !weft_ipc_types::package::is_valid_app_id(&app_id) {
-                Err(grants::Refusal {
-                    code: 400,
-                    message: "invalid app ID".to_owned(),
-                })
+            // The package is resolved and its capabilities granted before a
+            // session exists; a package this host cannot satisfy is refused,
+            // not started.
+            let launch = if !weft_ipc_types::package::is_valid_app_id(&app_id) {
+                Err(grants::Refusal::new(400, "invalid app ID"))
             } else if std::env::var("WEFT_RUNTIME_BIN").is_ok() {
-                grants::for_app(&app_id)
+                resolve_launch(app_id.clone()).await.map(Some)
             } else {
-                Ok(grants::SessionGrants::default())
+                Ok(None)
             };
-            let grants = match grants {
-                Ok(grants) => grants,
+            let (package, grants) = match launch {
+                Ok(Some((package, grants))) => (Some(package), grants),
+                Ok(None) => (None, grants::SessionGrants::default()),
                 Err(refusal) => {
                     tracing::warn!(%app_id, error = %refusal.message, "launch refused");
                     return Response::Error {
@@ -469,7 +469,9 @@ pub(crate) async fn dispatch(req: Request, registry: &Registry) -> Response {
             let abort_rx = registry.lock().await.register_abort(session_id);
             let compositor_tx = registry.lock().await.compositor_tx.clone();
 
-            if std::env::var("WEFT_RUNTIME_BIN").is_err() {
+            // Without a configured runtime, nothing was resolved and the
+            // session stops at once.
+            let Some(package) = package else {
                 let _ = registry.lock().await.broadcast().send(Response::LaunchAck {
                     session_id,
                     app_id: app_id.clone(),
@@ -484,12 +486,12 @@ pub(crate) async fn dispatch(req: Request, registry: &Registry) -> Response {
                     state: AppStateKind::Stopped,
                 });
                 return Response::LaunchAck { session_id, app_id };
-            }
+            };
             let reg = Arc::clone(registry);
-            let aid = app_id.clone();
             tokio::spawn(async move {
                 if let Err(e) =
-                    runtime::supervise(session_id, &aid, grants, reg, abort_rx, compositor_tx).await
+                    runtime::supervise(session_id, package, grants, reg, abort_rx, compositor_tx)
+                        .await
                 {
                     tracing::warn!(session_id, error = %e, "runtime supervisor error");
                 }
@@ -576,6 +578,28 @@ pub(crate) async fn dispatch(req: Request, registry: &Registry) -> Response {
     }
 }
 
+/// Resolves the package of `app_id` and derives its grants. Resolution may
+/// mount an image, so it runs off the async workers; a refused launch
+/// releases the mount the same way.
+async fn resolve_launch(
+    app_id: String,
+) -> Result<(launch::LaunchPackage, grants::SessionGrants), grants::Refusal> {
+    tokio::task::spawn_blocking(move || {
+        let package = launch::resolve(&app_id)?;
+        let grants = grants::derive(&app_id, &package.capabilities, grants::HostDirs::from_env)?;
+        tracing::info!(
+            %app_id,
+            version = %package.version,
+            root = %package.root().display(),
+            image = package.image.is_some(),
+            "package resolved"
+        );
+        Ok((package, grants))
+    })
+    .await
+    .unwrap_or_else(|e| Err(grants::Refusal::new(500, format!("package resolution failed: {e}"))))
+}
+
 pub(crate) fn app_store_roots() -> Vec<std::path::PathBuf> {
     if let Ok(explicit) = std::env::var("WEFT_APP_STORE") {
         return vec![std::path::PathBuf::from(explicit)];
@@ -594,18 +618,6 @@ pub(crate) fn app_store_roots() -> Vec<std::path::PathBuf> {
     roots
 }
 
-#[derive(serde::Deserialize)]
-struct WappPackage {
-    id: String,
-    name: String,
-    version: String,
-}
-
-#[derive(serde::Deserialize)]
-struct WappManifest {
-    package: WappPackage,
-}
-
 fn scan_installed_apps() -> Vec<AppInfo> {
     let mut seen = std::collections::HashSet::new();
     let mut apps = Vec::new();
@@ -614,11 +626,7 @@ fn scan_installed_apps() -> Vec<AppInfo> {
             continue;
         };
         for entry in entries.flatten() {
-            let manifest_path = entry.path().join("wapp.toml");
-            let Ok(contents) = std::fs::read_to_string(&manifest_path) else {
-                continue;
-            };
-            let Ok(m) = toml::from_str::<WappManifest>(&contents) else {
+            let Ok(m) = weft_ipc_types::manifest::Manifest::read(&entry.path()) else {
                 continue;
             };
             if seen.insert(m.package.id.clone()) {
@@ -655,7 +663,7 @@ mod tests {
     /// since session sockets are named by session ID and every test registry
     /// starts at 1. Directories of test processes that have ended are
     /// removed. Callers hold env_lock.
-    fn use_test_runtime_dir() {
+    pub(crate) fn use_test_runtime_dir() {
         let base = std::env::temp_dir().join("weft-appd-tests");
         if let Ok(entries) = std::fs::read_dir(&base) {
             for entry in entries.flatten() {
@@ -1120,7 +1128,7 @@ mod tests {
         };
         let supervised = runtime::supervise(
             session_id,
-            "test.app",
+            launch::LaunchPackage::unresolved("test.app"),
             grants::SessionGrants::default(),
             Arc::clone(&registry),
             abort_rx,
@@ -1267,7 +1275,7 @@ mod tests {
 
         runtime::supervise(
             session_id,
-            "test.app",
+            launch::LaunchPackage::unresolved("test.app"),
             grants::SessionGrants::default(),
             Arc::clone(&registry),
             abort_rx,
@@ -1342,7 +1350,7 @@ mod tests {
 
         runtime::supervise(
             session_id,
-            "test.abort.startup",
+            launch::LaunchPackage::unresolved("test.abort.startup"),
             grants::SessionGrants::default(),
             Arc::clone(&registry),
             abort_rx,
@@ -1392,7 +1400,7 @@ mod tests {
 
         runtime::supervise(
             session_id,
-            "test.spawn.fail",
+            launch::LaunchPackage::unresolved("test.spawn.fail"),
             grants::SessionGrants::default(),
             Arc::clone(&registry),
             abort_rx,

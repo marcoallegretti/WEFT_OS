@@ -17,7 +17,7 @@ fn main() -> anyhow::Result<()> {
     let args: Vec<String> = std::env::args().collect();
     if args.len() < 3 {
         anyhow::bail!(
-            "usage: weft-runtime <app_id> <session_id> \
+            "usage: weft-runtime <app_id> <session_id> --module PATH \
              [--preopen HOST::GUEST::ro|rw]... [--grant CAPABILITY]... [--ipc-socket PATH]"
         );
     }
@@ -29,6 +29,7 @@ fn main() -> anyhow::Result<()> {
     let mut preopen: Vec<Preopen> = Vec::new();
     let mut grants = Grants::default();
     let mut ipc_socket: Option<String> = None;
+    let mut module: Option<PathBuf> = None;
 
     let mut i = 3usize;
     while i < args.len() {
@@ -41,6 +42,12 @@ fn main() -> anyhow::Result<()> {
             "--grant" => {
                 i += 1;
                 grants.add(args.get(i).context("--grant requires an argument")?)?;
+            }
+            "--module" => {
+                i += 1;
+                module = Some(PathBuf::from(
+                    args.get(i).context("--module requires an argument")?,
+                ));
             }
             "--ipc-socket" => {
                 i += 1;
@@ -60,13 +67,9 @@ fn main() -> anyhow::Result<()> {
 
     tracing::info!(session_id, %app_id, "weft-runtime starting");
 
-    let pkg_dir = resolve_package(app_id)?;
-    tracing::info!(path = %pkg_dir.display(), "package resolved");
-
-    let wasm_path = pkg_dir.join("app.wasm");
-    if !wasm_path.exists() {
-        anyhow::bail!("app.wasm not found at {}", wasm_path.display());
-    }
+    // weft-appd resolves the package and passes the component it selected;
+    // the runtime never looks for the package itself.
+    let wasm_path = module.context("--module is required")?;
 
     tracing::info!(session_id, %app_id, wasm = %wasm_path.display(), "executing module");
     run_module(&wasm_path, &preopen, grants, ipc_socket.as_deref())?;
@@ -83,17 +86,6 @@ fn ready_line() -> String {
         Ok(token) => format!("READY {token}"),
         Err(_) => "READY".to_owned(),
     }
-}
-
-fn resolve_package(app_id: &str) -> anyhow::Result<PathBuf> {
-    for store_root in package_store_roots() {
-        let pkg_dir = store_root.join(app_id);
-        let manifest = pkg_dir.join("wapp.toml");
-        if manifest.exists() {
-            return Ok(pkg_dir);
-        }
-    }
-    anyhow::bail!("package '{}' not found in any package store", app_id)
 }
 
 #[cfg(not(feature = "wasmtime-runtime"))]
@@ -599,28 +591,6 @@ fn apply_seccomp_filter() -> anyhow::Result<()> {
     Ok(())
 }
 
-fn package_store_roots() -> Vec<PathBuf> {
-    if let Ok(explicit) = std::env::var("WEFT_APP_STORE") {
-        return vec![PathBuf::from(explicit)];
-    }
-
-    let mut roots = Vec::new();
-
-    if let Ok(home) = std::env::var("HOME") {
-        roots.push(
-            PathBuf::from(home)
-                .join(".local")
-                .join("share")
-                .join("weft")
-                .join("apps"),
-        );
-    }
-
-    roots.push(PathBuf::from("/usr/share/weft/apps"));
-
-    roots
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -636,76 +606,5 @@ mod tests {
         )
         .expect_err("a build without wasmtime-runtime must not report success");
         assert!(err.to_string().contains("wasmtime-runtime"));
-    }
-
-    #[test]
-    fn package_store_roots_includes_system_path() {
-        let roots = package_store_roots();
-        assert!(
-            roots
-                .iter()
-                .any(|p| p == &PathBuf::from("/usr/share/weft/apps"))
-        );
-    }
-
-    #[test]
-    fn package_store_roots_uses_weft_app_store_when_set() {
-        // SAFETY: test binary is single-threaded at this point.
-        unsafe { std::env::set_var("WEFT_APP_STORE", "/custom/store") };
-        let roots = package_store_roots();
-        assert_eq!(roots, vec![PathBuf::from("/custom/store")]);
-        unsafe { std::env::remove_var("WEFT_APP_STORE") };
-    }
-
-    #[test]
-    fn resolve_package_finds_installed_package() {
-        use std::fs;
-        let store =
-            std::env::temp_dir().join(format!("weft_runtime_resolve_{}", std::process::id()));
-        let pkg_dir = store.join("com.example.resolve");
-        fs::create_dir_all(&pkg_dir).unwrap();
-        fs::write(
-            pkg_dir.join("wapp.toml"),
-            "[package]\nid=\"com.example.resolve\"\n",
-        )
-        .unwrap();
-
-        let prior = std::env::var("WEFT_APP_STORE").ok();
-        unsafe { std::env::set_var("WEFT_APP_STORE", &store) };
-
-        let result = resolve_package("com.example.resolve");
-
-        unsafe {
-            match prior {
-                Some(v) => std::env::set_var("WEFT_APP_STORE", v),
-                None => std::env::remove_var("WEFT_APP_STORE"),
-            }
-        }
-        let _ = fs::remove_dir_all(&store);
-
-        assert!(result.is_ok());
-        assert!(result.unwrap().ends_with("com.example.resolve"));
-    }
-
-    #[test]
-    fn resolve_package_errors_on_unknown_id() {
-        let store =
-            std::env::temp_dir().join(format!("weft_runtime_resolve_empty_{}", std::process::id()));
-        let _ = std::fs::create_dir_all(&store);
-
-        let prior = std::env::var("WEFT_APP_STORE").ok();
-        unsafe { std::env::set_var("WEFT_APP_STORE", &store) };
-
-        let result = resolve_package("com.does.not.exist");
-
-        unsafe {
-            match prior {
-                Some(v) => std::env::set_var("WEFT_APP_STORE", v),
-                None => std::env::remove_var("WEFT_APP_STORE"),
-            }
-        }
-        let _ = std::fs::remove_dir_all(&store);
-
-        assert!(result.is_err());
     }
 }

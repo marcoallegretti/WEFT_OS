@@ -16,15 +16,15 @@ System UI host. Renders one WebView pointing at `system-ui.html` using the embed
 
 ### weft-app-shell
 
-Per-application Servo host. Spawned by `weft-appd` after the Wasm runtime signals READY. Takes `<app_id>` and `<session_id>` as arguments. Resolves `weft-app://<app_id>/ui/index.html` and injects the `weftIpc` WebSocket bridge into the page. The bridge authenticates with the per-session token from `WEFT_BRIDGE_TOKEN` and can only exchange messages with its own session. It is installed only in top-level documents inside the application's UI directory, and top-level navigation outside that directory is denied; framed documents never receive the bridge. Every resource the page loads (subresources, `fetch()`, XHR, redirects and WebSocket handshakes) is checked by the shell: the page may load files inside its UI directory, inline `data:`, `blob:` and `about:` resources, and the session bridge; any other local file or network destination fails with a network error. Network access belongs to the Wasm component, under its fetch grants. Registers with the compositor as window type `application`. Exits when the appd session ends.
+Per-application Servo host. Spawned by `weft-appd` after the Wasm runtime signals READY. Takes `<app_id>`, `<session_id>` and `--ui <path>`, the UI document weft-appd resolved from the package; it never looks for the package itself. Injects the `weftIpc` WebSocket bridge into the page. The bridge authenticates with the per-session token from `WEFT_BRIDGE_TOKEN` and can only exchange messages with its own session. It is installed only in top-level documents inside the application's UI directory, and top-level navigation outside that directory is denied; framed documents never receive the bridge. Every resource the page loads (subresources, `fetch()`, XHR, redirects and WebSocket handshakes) is checked by the shell: the page may load files inside its UI directory, inline `data:`, `blob:` and `about:` resources, and the session bridge; any other local file or network destination fails with a network error. Network access belongs to the Wasm component, under its fetch grants. Registers with the compositor as window type `application`. Exits when the appd session ends.
 
 ### weft-appd
 
-Session supervisor. Listens on a Unix socket (MessagePack protocol) and a WebSocket port (JSON). For each session: spawns `weft-runtime` and waits for its READY, spawns `weft-app-shell` (`WEFT_APP_SHELL_BIN` is required) and waits for its READY, and only then reports the session running (`APP_READY`). A child reports readiness by printing `READY <token>` on stdout, where the token is a random per-session value appd passes in `WEFT_READY_TOKEN`; Wasm guests and pages share those stdout streams but cannot read the token, so their output cannot fake readiness. Each wait times out after 30 seconds. If either child fails to start, fails to become ready or exits, or the session is terminated, the whole session is stopped: both children, the IPC relay (its task, socket and registered sender), the file portal, the compositor association and any image mount are released. The IPC relay is created with the session in `$XDG_RUNTIME_DIR/weft` (a session cannot start without it); its socket is accessible only to the user and accepts a single connection, which the session's runtime makes before it starts the component. If that connection closes while the session runs, the session is stopped. `IPC_FORWARD` on the Unix socket never waits: it reports an error when the session has no relay or its queue is full. appd applies cgroup resource limits to the runtime via systemd-run when available.
+Session supervisor. Listens on a Unix socket (MessagePack protocol) and a WebSocket port (JSON). Before a session exists, appd resolves the package once (see [Package resolution](#package-resolution)) and derives its grants from that package's manifest; the runtime and the app shell receive the resolved component and UI document and do not search the stores themselves. For each session: spawns `weft-runtime` and waits for its READY, spawns `weft-app-shell` (`WEFT_APP_SHELL_BIN` is required) and waits for its READY, and only then reports the session running (`APP_READY`). A child reports readiness by printing `READY <token>` on stdout, where the token is a random per-session value appd passes in `WEFT_READY_TOKEN`; Wasm guests and pages share those stdout streams but cannot read the token, so their output cannot fake readiness. Each wait times out after 30 seconds. If either child fails to start, fails to become ready or exits, or the session is terminated, the whole session is stopped: both children, the IPC relay (its task, socket and registered sender), the file portal, the compositor association and any image mount are released. The IPC relay is created with the session in `$XDG_RUNTIME_DIR/weft` (a session cannot start without it); its socket is accessible only to the user and accepts a single connection, which the session's runtime makes before it starts the component. If that connection closes while the session runs, the session is stopped. `IPC_FORWARD` on the Unix socket never waits: it reports an error when the session has no relay or its queue is full. appd applies cgroup resource limits to the runtime via systemd-run when available.
 
 ### weft-runtime
 
-WASI Preview 2 + Component Model execution host (Wasmtime 30). Loads `app.wasm` from the installed package directory. Provides host imports for `weft:app/notify`, `weft:app/ipc`, `weft:app/fetch`, `weft:app/notifications`, and `weft:app/clipboard`. Preopens filesystem paths according to capabilities declared in `wapp.toml`.
+WASI Preview 2 + Component Model execution host (Wasmtime 30). Runs the component weft-appd passes with `--module <path>`, the package's `[runtime].module`. Provides host imports for `weft:app/notify`, `weft:app/ipc`, `weft:app/fetch`, `weft:app/notifications`, and `weft:app/clipboard`. Preopens filesystem paths according to capabilities declared in `wapp.toml`.
 
 ### weft-pack
 
@@ -36,7 +36,7 @@ Per-session file proxy. Runs as a separate process with a path allowlist derived
 
 ### weft-mount-helper
 
-Setuid helper binary. Calls `veritysetup` and mounts EROFS images for dm-verity-protected packages.
+Setuid helper binary. Calls `veritysetup` and mounts EROFS images for dm-verity-protected packages. Its device-mapper device is named after the mountpoint, which weft-appd names with a random token in `$XDG_RUNTIME_DIR/weft/mnt`. The helper does not yet restrict its callers or the images and mountpoints they pass, so it is not part of a supported installation.
 
 ## Process Topology
 
@@ -46,8 +46,8 @@ systemd
 ├── weft-servo-shell (user, after compositor)
 └── weft-appd (user, after compositor + servo-shell)
     └── per-session:
-        ├── weft-runtime <app_id> <session_id> [--preopen HOST::GUEST::ro|rw]... [--grant CAP]... [--ipc-socket ...]
-        ├── weft-app-shell <app_id> <session_id>
+        ├── weft-runtime <app_id> <session_id> --ipc-socket <path> --module <path> [--preopen HOST::GUEST::ro|rw]... [--grant CAP]...
+        ├── weft-app-shell <app_id> <session_id> --ui <path>
         └── weft-file-portal <socket> [--allow ...] [--allow-read ...]
 ```
 
@@ -109,6 +109,17 @@ Package store roots (in priority order):
 1. `$WEFT_APP_STORE` (if set)
 2. `~/.local/share/weft/apps/`
 3. `/usr/share/weft/apps/`
+
+### Package resolution
+
+`weft-appd` resolves a launch once, in the first store root that holds the app:
+
+- **Verified image:** `<root>/<id>.app.img` with its dm-verity hash tree `<id>.app.hash` and root hash `<id>.app.roothash`, the names `weft-pack build-image` and `build-verity` produce. When any of the three exists, the image must mount through `weft-mount-helper`; a missing companion, a malformed root hash, a missing helper or a failed mount refuses the launch, and appd never falls back to a directory install. The mount belongs to the session and is released when the session stops.
+- **Directory install:** `<root>/<id>/wapp.toml`.
+
+The manifest in the selected package root must declare the requested ID. `[runtime].module` and `[ui].entry` must be relative paths of plain components, without symbolic links, naming regular files inside that root. The component, the UI document and the capabilities all come from that one manifest. A refused launch reports 400 (invalid ID), 404 (not installed), 403 (invalid package) or 500 (the image cannot be used).
+
+A directory install can still be changed by its owner while a session runs, and nothing verifies its content at launch.
 
 ## App data
 

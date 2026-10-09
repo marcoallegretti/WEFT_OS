@@ -54,20 +54,21 @@ fn require_root() -> anyhow::Result<()> {
     }
 }
 
+/// The device-mapper name for an image mounted at `mountpoint`: `weft-`
+/// followed by the mountpoint's last component. weft-appd names each
+/// mountpoint with a random token, so concurrent sessions get distinct
+/// devices. Device-mapper names are limited to 127 bytes.
 fn device_name(mountpoint: &Path) -> String {
-    let s = mountpoint.to_string_lossy();
-    let sanitized: String = s
+    let leaf = mountpoint
+        .file_name()
+        .map(|name| name.to_string_lossy())
+        .unwrap_or_default();
+    let sanitized: String = leaf
         .chars()
         .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
+        .take(120)
         .collect();
-    let suffix: String = sanitized
-        .trim_matches('-')
-        .chars()
-        .take(26)
-        .collect::<String>()
-        .trim_end_matches('-')
-        .to_string();
-    format!("weft-{suffix}")
+    format!("weft-{sanitized}")
 }
 
 fn cmd_mount(
@@ -145,18 +146,20 @@ mod tests {
     use super::*;
 
     #[test]
-    fn device_name_sanitizes_path() {
-        let mp = Path::new("/run/weft/mounts/com.example.myapp");
-        let name = device_name(mp);
-        assert!(name.starts_with("weft-"));
-        assert!(name.chars().all(|c| c.is_ascii_alphanumeric() || c == '-'));
-        assert!(name.len() <= 31);
+    fn device_names_follow_the_mountpoint_name() {
+        let name = device_name(Path::new("/run/user/1000/weft/mnt/0123abcd"));
+        assert_eq!(name, "weft-0123abcd");
+        assert_ne!(
+            device_name(Path::new("/run/user/1000/weft/mnt/aaaa")),
+            device_name(Path::new("/run/user/1000/weft/mnt/bbbb"))
+        );
     }
 
     #[test]
-    fn device_name_truncates_long_paths() {
-        let mp = Path::new("/run/weft/mounts/com.example.averylongappidthatexceedsthemaximum");
-        let name = device_name(mp);
-        assert!(name.len() <= 31);
+    fn device_names_are_sanitized_and_bounded() {
+        let long = format!("/mnt/{}", "x.y".repeat(100));
+        let name = device_name(Path::new(&long));
+        assert!(name.len() <= 127);
+        assert!(name.chars().all(|c| c.is_ascii_alphanumeric() || c == '-'));
     }
 }
