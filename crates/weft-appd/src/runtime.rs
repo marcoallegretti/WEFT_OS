@@ -23,6 +23,7 @@ pub(crate) async fn spawn_ipc_relay(
             let _ = std::fs::remove_file(&socket_path);
             return;
         };
+        tracing::debug!(session_id, "IPC relay: component connected");
         let (reader, writer) = tokio::io::split(stream);
         let mut reader = BufReader::new(reader);
         let mut writer = BufWriter::new(writer);
@@ -79,10 +80,15 @@ const READY_TIMEOUT: Duration = Duration::from_secs(30);
 /// the host process environment.
 const READY_TOKEN_ENV: &str = "WEFT_READY_TOKEN";
 
+/// Environment variable carrying the session's application bridge credential
+/// to weft-app-shell.
+const BRIDGE_TOKEN_ENV: &str = "WEFT_BRIDGE_TOKEN";
+
 /// Longest line read from a child's output; longer lines are split.
 const MAX_LINE: u64 = 64 * 1024;
 
-fn readiness_token() -> std::io::Result<String> {
+/// A random 128-bit credential as 32 hex characters.
+pub(crate) fn random_token() -> std::io::Result<String> {
     use std::io::Read;
     let mut bytes = [0u8; 16];
     std::fs::File::open("/dev/urandom")?.read_exact(&mut bytes)?;
@@ -212,8 +218,15 @@ fn spawn_app_shell(
     session_id: u64,
     app_id: &str,
     token: &str,
+    bridge_token: Option<String>,
 ) -> std::io::Result<tokio::process::Child> {
-    let child = tokio::process::Command::new(bin)
+    let mut command = tokio::process::Command::new(bin);
+    if let Some(bridge_token) = bridge_token {
+        // The page holds this credential; it must differ from the readiness
+        // token, which page output could otherwise use to fake readiness.
+        command.env(BRIDGE_TOKEN_ENV, bridge_token);
+    }
+    let child = command
         .arg(app_id)
         .arg(session_id.to_string())
         .env(READY_TOKEN_ENV, token)
@@ -273,7 +286,7 @@ pub(crate) async fn supervise(
         tracing::warn!(session_id, %app_id, "WEFT_APP_SHELL_BIN not set; no UI host to start");
         return stop_unstarted(&registry, session_id).await;
     };
-    let token = match readiness_token() {
+    let token = match random_token() {
         Ok(token) => token,
         Err(e) => {
             tracing::error!(session_id, %app_id, error = %e, "cannot create readiness token");
@@ -372,7 +385,9 @@ pub(crate) async fn supervise(
     };
     tokio::spawn(drain_stdout(runtime_stdout, session_id));
 
-    let mut app_shell = match spawn_app_shell(&shell_bin, session_id, app_id, &token) {
+    let bridge_token = registry.lock().await.bridge_token(session_id);
+    let mut app_shell = match spawn_app_shell(&shell_bin, session_id, app_id, &token, bridge_token)
+    {
         Ok(child) => child,
         Err(e) => {
             return session

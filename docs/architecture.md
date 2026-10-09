@@ -12,11 +12,11 @@ Smithay-based Wayland compositor. Implements the `zweft-shell-unstable-v1` proto
 
 ### weft-servo-shell
 
-System UI host. Renders one WebView pointing at `system-ui.html` using the embedded Servo engine (feature-gated behind `servo-embed`). Connects to the compositor as window type `panel`. Dispatches the `zweft_shell_manager_v1` event queue each frame. Forwards navigation gestures received from the compositor to `weft-appd` over WebSocket.
+System UI host. Renders one WebView pointing at `system-ui.html` using the embedded Servo engine (feature-gated behind `servo-embed`). Connects to the compositor as window type `panel`. Dispatches the `zweft_shell_manager_v1` event queue each frame. Forwards navigation gestures received from the compositor to `weft-appd` over WebSocket. Reads the appd WebSocket port and system token from `$XDG_RUNTIME_DIR/weft/` and hands both to the page through `window.weftAppdEndpoint(port, token)`; the shell hands the token only to the system UI document and denies top-level navigation away from it, and the launcher shows package names as text, never markup.
 
 ### weft-app-shell
 
-Per-application Servo host. Spawned by `weft-appd` after the Wasm runtime signals READY. Takes `<app_id>` and `<session_id>` as arguments. Resolves `weft-app://<app_id>/ui/index.html` and injects the `weftIpc` WebSocket bridge into the page. Registers with the compositor as window type `application`. Exits when the appd session ends.
+Per-application Servo host. Spawned by `weft-appd` after the Wasm runtime signals READY. Takes `<app_id>` and `<session_id>` as arguments. Resolves `weft-app://<app_id>/ui/index.html` and injects the `weftIpc` WebSocket bridge into the page. The bridge authenticates with the per-session token from `WEFT_BRIDGE_TOKEN` and can only exchange messages with its own session. It is installed only in top-level documents inside the application's UI directory, and top-level navigation outside that directory is denied; framed documents never receive the bridge. Registers with the compositor as window type `application`. Exits when the appd session ends.
 
 ### weft-appd
 
@@ -56,9 +56,16 @@ systemd
 | Channel | Protocol | Purpose |
 |---|---|---|
 | weft-appd Unix socket | MessagePack | appd ↔ other system daemons |
-| weft-appd WebSocket (:7410) | JSON | system-ui.html ↔ appd (gesture events, app lifecycle) |
+| weft-appd WebSocket (:7410) | JSON | system-ui.html and servo-shell ↔ appd (system role: gestures, app lifecycle); app pages ↔ their session (app role) |
 | per-session IPC socket | newline-delimited JSON | weft-runtime ↔ weft-app-shell (weft:app/ipc) |
 | weft-file-portal socket | JSON-lines | weft-runtime ↔ file proxy |
+
+### WebSocket roles
+
+Every WebSocket connection must complete the upgrade and send `HELLO` as its first message within 5 seconds, or appd closes it; a first message that is not a valid `HELLO` is answered with an error (code 401) before the connection is closed. Messages are limited to 1 MiB.
+
+- `{"type":"HELLO","role":"system","token":"<hex>"}` — the token is the content of `$XDG_RUNTIME_DIR/weft/appd.systoken` (mode 0600), regenerated each time appd starts. A system client may launch, terminate and query sessions. It receives lifecycle broadcasts but never application messages, and cannot inject them (`IPC_FORWARD` is refused with code 403).
+- `{"type":"HELLO","role":"app","session_id":<n>,"token":"<hex>"}` — the token is the session's bridge token, passed to `weft-app-shell` in `WEFT_BRIDGE_TOKEN` and distinct from its readiness token. An app client may only send `{"type":"APP_MESSAGE","payload":"<string>"}` (at most 64 KiB, no newlines); the payload goes to its own session's Wasm component. It receives only its own session's replies, as `APP_MESSAGE`, and is disconnected when the session stops.
 
 ## Capability Enforcement
 
@@ -95,6 +102,7 @@ Package store roots (in priority order):
 | `WEFT_RUNTIME_BIN` | — | Path to `weft-runtime` binary |
 | `WEFT_APP_SHELL_BIN` | — | Path to `weft-app-shell` binary; required to launch apps |
 | `WEFT_READY_TOKEN` | set by appd | Per-session readiness token passed to `weft-runtime` and `weft-app-shell` |
+| `WEFT_BRIDGE_TOKEN` | set by appd | Per-session token `weft-app-shell` uses to join its session on the appd WebSocket |
 | `WEFT_FILE_PORTAL_BIN` | — | Path to `weft-file-portal` binary |
 | `WEFT_MOUNT_HELPER` | — | Path to `weft-mount-helper` binary |
 | `WEFT_APP_STORE` | — | Override package store root |
