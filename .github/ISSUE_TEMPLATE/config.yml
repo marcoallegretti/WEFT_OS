@@ -1,0 +1,5 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Contribution guide
+    url: https://github.com/marcoallegretti/WEFT_OS/blob/main/CONTRIBUTING.md
+    about: Read the contribution workflow, ownership and validation guidance before opening an issue or pull request.

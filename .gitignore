@@ -1,4 +1,5 @@
 /target/
+__pycache__/
 /.windsurf/
 /docu_dev/
 
