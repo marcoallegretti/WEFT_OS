@@ -12,7 +12,7 @@ path = "src/main.rs"
 default = []
 wasmtime-runtime = ["dep:wasmtime", "dep:wasmtime-wasi", "dep:cap-std"]
 seccomp = ["dep:seccompiler", "dep:libc"]
-net-fetch = ["dep:ureq"]
+net-fetch = ["dep:ureq", "dep:url"]
 
 [dependencies]
 anyhow = "1.0"
@@ -24,3 +24,5 @@ cap-std = { version = "3", optional = true }
 seccompiler = { version = "0.4", optional = true }
 libc = { version = "0.2", optional = true }
 ureq = { version = "2", optional = true }
+url = { version = "2", optional = true }
+weft-ipc-types = { path = "../weft-ipc-types" }

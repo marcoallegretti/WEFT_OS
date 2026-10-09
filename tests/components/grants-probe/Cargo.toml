@@ -1,0 +1,12 @@
+[package]
+name = "weft-grants-probe"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[[bin]]
+name = "app"
+path = "src/main.rs"
+
+[dependencies]
+wit-bindgen = "0.53"

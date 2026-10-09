@@ -9,6 +9,7 @@ name = "weft-pack"
 path = "src/main.rs"
 
 [dependencies]
+weft-ipc-types = { path = "../weft-ipc-types" }
 anyhow = "1.0"
 serde = { version = "1", features = ["derive"] }
 toml = "0.8"
