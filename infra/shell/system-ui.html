@@ -321,10 +321,7 @@
           if (msg.state === 'stopped') {
             removeTaskbarEntry(msg.session_id);
           } else if (msg.state === 'stopping') {
-            setTaskbarEntryClosing(msg.session_id, true);
-          } else if (msg.state === 'running') {
-            // The app declined the close, for example to save first.
-            setTaskbarEntryClosing(msg.session_id, false);
+            setTaskbarEntryClosing(msg.session_id);
           }
         } else if (msg.type === 'RUNNING_APPS') {
           msg.sessions.forEach(function (s) {
@@ -382,6 +379,10 @@
         });
       }
 
+      // Longer than weft-appd's close timeout, so an app that neither closes
+      // nor declines has already been terminated.
+      var FORCE_QUIT_DELAY = 6000;
+
       function ensureTaskbarEntry(sessionId, appId) {
         var id = 'task-' + sessionId;
         if (document.getElementById(id)) { return; }
@@ -397,11 +398,23 @@
         close.className = 'task-close';
         close.textContent = '×';
         close.title = 'Close';
+        // The first click asks the app to close; it may decline, for example
+        // to offer saving. An app still running once it has had time to
+        // answer can then be force quit, losing what it has not saved.
         close.addEventListener('click', function (e) {
           e.stopPropagation();
-          if (ws && ws.readyState === WebSocket.OPEN) {
-            ws.send(JSON.stringify({ type: 'TERMINATE_APP', session_id: sessionId }));
-          }
+          if (!ws || ws.readyState !== WebSocket.OPEN) { return; }
+          var force = close.dataset.force === '1';
+          ws.send(JSON.stringify({ type: 'TERMINATE_APP', session_id: sessionId, force: force }));
+          if (force || close.dataset.asked) { return; }
+          close.dataset.asked = '1';
+          setTimeout(function () {
+            if (!document.getElementById(el.id) || el.dataset.closing) { return; }
+            close.dataset.force = '1';
+            close.textContent = 'Force quit';
+            close.title = 'Force quit: changes the app has not saved are lost';
+            close.style.color = '#ff6b6b';
+          }, FORCE_QUIT_DELAY);
         });
         el.appendChild(span);
         el.appendChild(close);
@@ -417,17 +430,15 @@
         taskbar.insertBefore(el, clock);
       }
 
-      // The app has been asked to close and may take a few seconds, for
-      // example to save; the entry stays until the session has stopped. An
-      // app that declines the close is shown as running again.
-      function setTaskbarEntryClosing(sessionId, closing) {
+      // The session is ending; its entry stays until it has stopped.
+      function setTaskbarEntryClosing(sessionId) {
         var el = document.getElementById('task-' + sessionId);
-        if (!el || Boolean(el.dataset.closing) === closing) { return; }
-        if (closing) { el.dataset.closing = '1'; } else { delete el.dataset.closing; }
-        el.style.opacity = closing ? '0.5' : '';
-        el.classList.toggle('closing', closing);
+        if (!el || el.dataset.closing) { return; }
+        el.dataset.closing = '1';
+        el.style.opacity = '0.5';
+        el.title += ' (closing)';
         var close = el.querySelector('.task-close');
-        if (close) { close.style.display = closing ? 'none' : ''; }
+        if (close) { close.style.display = 'none'; }
       }
 
       function removeTaskbarEntry(sessionId) {

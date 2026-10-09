@@ -158,8 +158,10 @@
   // Close policy ("ask" in wapp.toml): when the window is asked to close
   // with unsaved changes, the close is cancelled and the user chooses to
   // save first, close without saving, or keep editing. The window closes
-  // after a save only once the save is acknowledged; a failed save keeps
-  // it open with the error shown.
+  // after a save only once the save is acknowledged, saving again first if
+  // the text changed meanwhile; a failed save keeps it open with the error
+  // shown. Text typed while the notes are not loaded cannot be saved, so it
+  // does not hold the window open.
   function unsaved() {
     return pending !== null || (rev !== null && editor.value !== saved);
   }
@@ -172,7 +174,7 @@
   window.addEventListener('weftclose', function (e) {
     if (!unsaved()) return;
     e.preventDefault();
-    closeAfterSave = false;
+    // Asked again while the prompt is up, keep the user's choice so far.
     closing.classList.add('shown');
   });
 
@@ -190,7 +192,11 @@
   document.getElementById('close-cancel').addEventListener('click', hideClosing);
 
   saveButton.addEventListener('click', function () {
-    if (!window.weftIpc || pending) return;
+    if (pending) return;
+    if (!window.weftIpc) {
+      setStatus('not saved: not connected');
+      return;
+    }
     if (rev === null) {
       setStatus('the notes have not loaded; use Discard to reload them');
       return;
@@ -279,7 +285,9 @@
       setStatus(editor.value === saved ? 'saved' : 'saved; newer changes are not saved yet');
       if (closeAfterSave) {
         if (editor.value === saved) window.close();
-        else hideClosing();
+        // Text typed after this save began is saved before closing.
+        else saveButton.click();
+        if (!pending && editor.value !== saved) hideClosing();
       }
     } else if (msg.op === 'error') {
       if (pending && msg.seq === pending.seq) {

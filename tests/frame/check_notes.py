@@ -20,11 +20,12 @@ sequence, quotes, a tab and non-ASCII characters, launches
    usable: after the file is repaired, Discard loads it and it can be edited
    and saved again.
 6. Notes declares the `ask` close policy. With unsaved changes, a close
-   request (TERMINATE_APP or Alt+F4) is cancelled and a prompt is shown: the
+   request (TERMINATE_APP or Alt+F4) is declined and a prompt is shown: the
    session keeps running and Cancel keeps the text; "Save and close" stores
    the text before the app shell exits cleanly; "Close without saving"
-   leaves the stored notes unchanged. Without unsaved changes, Notes closes
-   at once.
+   leaves the stored notes unchanged. A forced TERMINATE_APP ends a session
+   whose close was declined at once, saving nothing. Without unsaved
+   changes, Notes closes at once.
 
 Requires Xvfb, xwd, ImageMagick's convert and xdotool.
 """
@@ -121,6 +122,15 @@ def wait_for_state(appd, session_id, state, timeout):
         raise AssertionError(f"session {session_id} did not become {state}")
 
 
+def wait_for_decline(desktop, session_id, timeout=10):
+    marker = f"the application declined the close session_id={session_id}"
+    deadline = time.monotonic() + timeout
+    while marker not in desktop.log_text("appd"):
+        if time.monotonic() > deadline:
+            raise AssertionError(f"session {session_id} did not decline the close")
+        time.sleep(0.2)
+
+
 def stop_reason(desktop, session_id):
     marker = f"stopping session session_id={session_id} reason=\""
     for line in desktop.log_text("appd").splitlines():
@@ -143,9 +153,9 @@ def check_close_policy(desktop, appd, page, act, notes, session_id):
 
     stored = notes.read_text(encoding="utf-8")
     type_at_end(" unsaved")
-    # The page cancels the close: the session is running again.
+    # The page declines the close; the session keeps running.
     appd.send({"type": "TERMINATE_APP", "session_id": session_id})
-    wait_for_state(appd, session_id, "running", 10)
+    wait_for_decline(desktop, session_id)
     buttons = wait_for_prompt(desktop, page, True)
     click(buttons[2])  # Cancel
     wait_for_prompt(desktop, page, False)
@@ -160,7 +170,7 @@ def check_close_policy(desktop, appd, page, act, notes, session_id):
     if notes.read_text(encoding="utf-8") != stored + " unsaved":
         raise AssertionError("Save and close did not store the text before closing")
     reason = stop_reason(desktop, session_id)
-    if reason is None or not reason.startswith("app shell exited (") or "(0)" not in reason:
+    if reason is None or not reason.startswith("closed on request; app shell exited"):
         raise AssertionError(f"Notes did not exit cleanly after saving: {reason}")
 
     # Close without saving keeps the stored notes.
@@ -169,12 +179,30 @@ def check_close_policy(desktop, appd, page, act, notes, session_id):
     act("search", "--class", "weft-compositor", "windowfocus", "--sync")
     type_at_end(" dropped")
     appd.send({"type": "TERMINATE_APP", "session_id": session_id})
-    wait_for_state(appd, session_id, "running", 10)
+    wait_for_decline(desktop, session_id)
     buttons = wait_for_prompt(desktop, page, True)
     click(buttons[1])  # Close without saving
     wait_for_state(appd, session_id, "stopped", 20)
     if notes.read_text(encoding="utf-8") != stored + " unsaved":
         raise AssertionError("closing without saving changed the stored notes")
+
+    # A forced stop ends a session that declined its close, without asking.
+    session_id = launch(appd)
+    time.sleep(2)
+    act("search", "--class", "weft-compositor", "windowfocus", "--sync")
+    type_at_end(" forced")
+    appd.send({"type": "TERMINATE_APP", "session_id": session_id})
+    wait_for_decline(desktop, session_id)
+    wait_for_prompt(desktop, page, True)
+    forced = time.monotonic()
+    appd.send({"type": "TERMINATE_APP", "session_id": session_id, "force": True})
+    wait_for_state(appd, session_id, "stopped", 10)
+    if time.monotonic() - forced > 3:
+        raise AssertionError("a forced stop waited for the application")
+    if stop_reason(desktop, session_id) != "terminated by force":
+        raise AssertionError(f"a forced stop reported {stop_reason(desktop, session_id)!r}")
+    if notes.read_text(encoding="utf-8") != stored + " unsaved":
+        raise AssertionError("a forced stop changed the stored notes")
 
     # Without unsaved changes, a close request closes Notes at once.
     session_id = launch(appd)
