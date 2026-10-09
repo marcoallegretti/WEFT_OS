@@ -119,6 +119,7 @@
   var seq = 0;
   var pending = null;
   var lastSent = null;
+  var loading = null; // timer of the outstanding load, if any
   var encoder = new TextEncoder();
 
   function setStatus(msg) { statusEl.textContent = msg; }
@@ -169,15 +170,32 @@
     setStatus('saving…');
   });
 
+  // Loads the stored notes into a read-only editor. Only one load is
+  // outstanding at a time; a failed or unanswered load can be retried with
+  // Discard.
+  function load(status) {
+    rev = null;
+    lastSent = null;
+    setLoaded(false);
+    loading = setTimeout(function () {
+      loading = null;
+      setStatus('the notes did not load; use Discard to retry');
+    }, REPLY_TIMEOUT);
+    send({ op: 'load' });
+    setStatus(status);
+  }
+
+  function finishLoad() {
+    clearTimeout(loading);
+    loading = null;
+  }
+
   // Discard reloads the stored notes, replacing unsaved edits.
   document.getElementById('discard').addEventListener('click', function () {
-    if (!window.weftIpc || pending || rev === null) return;
+    if (!window.weftIpc || pending || loading) return;
     editor.value = saved;
     countChars();
-    rev = null;
-    setLoaded(false);
-    send({ op: 'load' });
-    setStatus('reloading…');
+    load('reloading…');
   });
 
   document.addEventListener('keydown', function (e) {
@@ -193,14 +211,15 @@
     if (msg.op === 'loaded') {
       // Only the reply to the outstanding load applies; the editor is
       // read-only until it arrives, so it never replaces newer text.
-      if (rev !== null) return;
+      if (!loading) return;
+      finishLoad();
       editor.value = msg.text;
       countChars();
       saved = msg.text;
       rev = msg.rev;
       setLoaded(true);
       setStatus('');
-    } else if (msg.op === 'saved' && lastSent && msg.seq === lastSent.seq) {
+    } else if (msg.op === 'saved' && !loading && lastSent && msg.seq === lastSent.seq) {
       // Also accepts an acknowledgement that arrives after the timeout.
       saved = lastSent.text;
       rev = msg.rev;
@@ -208,6 +227,7 @@
       setStatus(editor.value === saved ? 'saved' : 'saved; newer changes are not saved yet');
     } else if (msg.op === 'error') {
       if (pending && msg.seq === pending.seq) finishSave();
+      if (loading && msg.seq === undefined) finishLoad();
       setStatus(msg.conflict
         ? 'not saved: changed in another window. Copy your text, then Discard to reload.'
         : 'error: ' + msg.message);
@@ -217,7 +237,7 @@
   function setupIpc() {
     if (!window.weftIpc) { setTimeout(setupIpc, 50); return; }
     window.weftIpc.onmessage = onMessage;
-    send({ op: 'load' });
+    load('');
   }
 
   setLoaded(false);

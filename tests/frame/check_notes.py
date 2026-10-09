@@ -16,6 +16,9 @@ sequence, quotes, a tab and non-ASCII characters, launches
 4. Discard reloads the stored text. Keys typed while that reload is in
    flight (runtime paused again) must be ignored, so a following save stores
    the reloaded text plus only what was typed afterwards.
+5. A load that fails (the stored notes are not valid UTF-8) leaves Discard
+   usable: after the file is repaired, Discard loads it and it can be edited
+   and saved again.
 
 Requires Xvfb, xwd, ImageMagick's convert and xdotool.
 """
@@ -136,6 +139,22 @@ def run(args, desktop, home, xdotool):
     act("type", "--delay", "40", "!")
     act("key", "ctrl+s")
     wait_for_file(notes, other + "!")
+    notes.write_bytes(b"\xff not text")
+    act("mousemove", "--sync", *DISCARD)
+    act("click", "1")
+    time.sleep(2)
+    if notes.read_bytes() != b"\xff not text":
+        raise AssertionError("a failed load changed the stored notes")
+    notes.write_text("repaired", encoding="utf-8")
+    act("click", "1")
+    time.sleep(2)
+    act("mousemove", "--sync", "100", "300")
+    act("click", "1")
+    act("key", "ctrl+End")
+    act("type", "--delay", "40", "?")
+    act("key", "ctrl+s")
+    wait_for_file(notes, "repaired?")
+
     leftovers = [p.name for p in notes.parent.iterdir() if p.name != "notes.txt"]
     if leftovers:
         raise AssertionError(f"files left beside the notes: {leftovers}")

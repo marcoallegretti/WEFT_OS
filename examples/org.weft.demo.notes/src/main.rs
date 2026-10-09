@@ -79,13 +79,20 @@ impl SaveLock {
                 .open(LOCK_PATH)
             {
                 Ok(mut file) => {
-                    let _ = file.write_all(token.as_bytes());
+                    if let Err(e) = file.write_all(token.as_bytes()) {
+                        let _ = std::fs::remove_file(LOCK_PATH);
+                        return Err(format!("cannot lock notes: {e}"));
+                    }
                     return Ok(SaveLock { token });
                 }
                 Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
-                    // A lock older than STALE_LOCK (or of unknown age) was left
-                    // by an ended session. Renaming it away is atomic, so only
-                    // one save can take it over.
+                    // A lock older than STALE_LOCK was left by an ended session
+                    // (wasmtime-wasi reports modification times, so an unknown
+                    // age does not occur in practice). Renaming it away is
+                    // atomic, so only one save can take it over. Two saves that
+                    // both see it stale within the same instant could still
+                    // both proceed; that needs an abandoned lock and two
+                    // windows saving at once.
                     let stale = std::fs::metadata(LOCK_PATH)
                         .and_then(|m| m.modified())
                         .map(|t| t.elapsed().is_ok_and(|age| age > STALE_LOCK))
@@ -112,7 +119,8 @@ impl Drop for SaveLock {
     }
 }
 
-/// Removes staging files left by saves that ended before their rename. Only
+/// Removes staging files left by saves that ended before their rename, and
+/// stale locks whose removal failed. Only
 /// called with the lock held, when no other save is in progress.
 fn remove_abandoned_staging() {
     let Ok(entries) = std::fs::read_dir("/data") else {
@@ -121,7 +129,9 @@ fn remove_abandoned_staging() {
     for entry in entries.flatten() {
         let name = entry.file_name();
         let name = name.to_string_lossy();
-        if name.starts_with(".notes.txt.") && name.ends_with(".saving") {
+        let abandoned = (name.starts_with(".notes.txt.") && name.ends_with(".saving"))
+            || (name.starts_with(".notes.lock.") && name.ends_with(".stale"));
+        if abandoned {
             let _ = std::fs::remove_file(entry.path());
         }
     }
