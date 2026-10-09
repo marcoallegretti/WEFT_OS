@@ -186,10 +186,22 @@ fn prepare_app_data(app_id: &str, dir: &Path, host: &HostDirs) -> Result<(), Ref
         }
         Ok(Migration::NotNeeded) => {}
         Err(e @ MigrationError::Conflict { .. }) => return Err(Refusal::new(409, e.to_string())),
+        Err(MigrationError::Io(e)) => {
+            return Err(Refusal::new(
+                500,
+                format!(
+                    "cannot move app data from {} to {}: {e}",
+                    legacy.display(),
+                    dir.display()
+                ),
+            ));
+        }
         Err(e) => return Err(Refusal::new(500, e.to_string())),
     }
     let mut builder = std::fs::DirBuilder::new();
     builder.recursive(true);
+    #[cfg(unix)]
+    std::os::unix::fs::DirBuilderExt::mode(&mut builder, 0o700);
     builder
         .create(dir)
         .and_then(|()| weft_ipc_types::package::make_private(dir))

@@ -112,12 +112,12 @@ Package store roots (in priority order):
 
 ## App data
 
-Each app's private data lives in `$XDG_DATA_HOME/weft/app-data/<id>` (`~/.local/share/weft/app-data/<id>` by default), apart from installed packages. Installing, updating or uninstalling a package never removes it. `weft-appd` creates the directory when a session with an app-data capability starts and makes it accessible only to the user (mode 0700). `weft-appd` and `weft-pack` must run with the same `HOME` and `XDG_DATA_HOME` to agree on this location; the systemd unit allows `weft-appd` to write under `~/.local/share/weft`.
+Each app's private data lives in `$XDG_DATA_HOME/weft/app-data/<id>` (`~/.local/share/weft/app-data/<id>` by default), apart from installed packages. Installing, updating or uninstalling a package never removes it. `weft-appd` creates the directory when a session with an app-data capability starts and makes it accessible only to the user (mode 0700); a symbolic link in its place is refused rather than followed. `weft-appd` and `weft-pack` must run with the same `HOME` and `XDG_DATA_HOME` to agree on this location; the systemd unit allows `weft-appd` to write under `~/.local/share/weft`.
 
 Earlier versions kept app data inside the user package store, in `~/.local/share/weft/apps/<id>/data`, for apps declaring an app-data capability. That directory is moved to the new location in a single rename, which never replaces an existing directory:
 
 - by `weft-appd`, on the first launch with an app-data capability;
-- by `weft-pack uninstall` and `weft-pack install`, before they touch the package directory, for packages in the user store that declare an app-data capability.
+- by `weft-pack uninstall` and `weft-pack install`, before they touch a package directory in the user store (however its path is spelled). `uninstall` moves it when the package declares an app-data capability or its manifest cannot be read, and otherwise stops without removing anything; a `data` directory is never deleted with a package.
 
 A package directory left empty by the move is removed. Nothing is moved, and `weft-pack` stops or the launch is refused, when the new location already exists, even empty (error 409), when the old one is not a plain directory, or when the two are on different filesystems (error 500); the message names both locations so the user can keep one copy and remove the other. The system UI shows such refusals. Packages cannot contain a top-level `data` entry, so package content is never taken for app data. `tests/frame/check_app_data.py` checks that existing Notes data arrives byte for byte, that the Notes session then reads and saves it, and that a conflict is refused.
 
