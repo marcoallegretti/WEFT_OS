@@ -3,11 +3,20 @@
 //! The runtime and the app shell receive the exact files resolved here and
 //! never look for the package themselves, so the component, the UI and the
 //! capabilities a session is granted all come from the same package root.
+//!
+//! Before anything starts, the package must still be what its owner
+//! installed: a package recorded as a publisher's must carry that
+//! publisher's valid signature over its current content, and a package with
+//! no record must be signed by a trusted key. Development content, recorded
+//! as such by `weft-pack install --dev`, runs unverified.
 
 use std::path::{Path, PathBuf};
 
 use weft_ipc_types::manifest::{MANIFEST_FILE, Manifest, ManifestError, entry_path};
 use weft_ipc_types::package::{ImageFiles, is_valid_app_id};
+use weft_ipc_types::trust::{
+    Owner, TrustError, TrustStore, content_digest, owner_record_path, read_owner, read_signature,
+};
 
 use crate::grants::Refusal;
 use crate::mount::Mount;
@@ -99,6 +108,7 @@ fn from_root(app_id: &str, root: PathBuf, image: Option<Mount>) -> Result<Launch
             ),
         ));
     }
+    verify_owner(app_id, &root)?;
     let entry = |field: &str, value: &str| {
         entry_path(&root, value).map_err(|e| Refusal::new(403, format!("{field}: {e}")))
     };
@@ -113,6 +123,57 @@ fn from_root(app_id: &str, root: PathBuf, image: Option<Mount>) -> Result<Launch
         root,
         image,
     })
+}
+
+/// Checks that the package at `root` is what its owner installed.
+fn verify_owner(app_id: &str, root: &Path) -> Result<(), Refusal> {
+    let refused = |e: TrustError| match e {
+        TrustError::Io(..) => Refusal::new(500, e.to_string()),
+        _ => Refusal::new(403, e.to_string()),
+    };
+    let data_home = weft_ipc_types::package::data_home().ok_or_else(|| {
+        Refusal::new(
+            500,
+            "cannot locate the data home holding package owner records",
+        )
+    })?;
+    let owner = read_owner(&owner_record_path(&data_home, app_id)).map_err(refused)?;
+    let trusted = TrustStore::load(&TrustStore::directories()).map_err(refused)?;
+    match owner {
+        Some(Owner::Development) => Ok(()),
+        Some(Owner::Verified(key)) => {
+            // The key must still be trusted, and its signature must cover
+            // the package's current content.
+            let signature = read_signature(root).map_err(refused)?;
+            let digest = content_digest(root).map_err(refused)?;
+            let valid = trusted.keys().contains(&key)
+                && signature.is_some_and(|sig| key.signed(&digest, &sig));
+            if valid {
+                Ok(())
+            } else {
+                Err(Refusal::new(
+                    403,
+                    format!(
+                        "{} is not signed by its owner, publisher {}, or that key is no longer \
+                         trusted; the package was changed or its key was withdrawn",
+                        root.display(),
+                        key.to_hex()
+                    ),
+                ))
+            }
+        }
+        None => match trusted.signer(root).map_err(refused)? {
+            Some(_) => Ok(()),
+            None => Err(Refusal::new(
+                403,
+                format!(
+                    "{} has no recorded owner and is not signed by a trusted key; install it \
+                     with weft-pack",
+                    root.display()
+                ),
+            )),
+        },
+    }
 }
 
 impl LaunchPackage {
@@ -160,8 +221,17 @@ mod tests {
             ),
         )
         .unwrap();
+        // The fixture is unsigned development content, recorded as such.
+        weft_ipc_types::trust::write_owner(
+            &owner_record_path(&store.join("share"), ID),
+            Owner::Development,
+        )
+        .unwrap();
         // SAFETY: callers hold env_lock, which serialises environment changes.
-        unsafe { std::env::set_var("WEFT_APP_STORE", &store) };
+        unsafe {
+            std::env::set_var("WEFT_APP_STORE", &store);
+            std::env::set_var("XDG_DATA_HOME", store.join("share"));
+        }
         store
     }
 
@@ -170,6 +240,8 @@ mod tests {
         unsafe {
             std::env::remove_var("WEFT_APP_STORE");
             std::env::remove_var("WEFT_MOUNT_HELPER");
+            std::env::remove_var("XDG_DATA_HOME");
+            std::env::remove_var("WEFT_TRUSTED_KEYS");
         }
         let _ = std::fs::remove_dir_all(store);
     }
@@ -246,6 +318,116 @@ mod tests {
                 "{}",
                 refused.message
             );
+        }
+    }
+
+    const DEMO: &str = "org.weft.demo.counter";
+
+    /// A store holding a copy of the signed Counter demo, with the demo key
+    /// trusted when `trusted`. Callers hold env_lock.
+    fn demo_store(name: &str, trusted: bool) -> PathBuf {
+        let store = store(name, ID, "app.wasm");
+        let examples = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../examples");
+        copy_tree(&examples.join(DEMO), &store.join(DEMO));
+        let keys = store.join("keys");
+        std::fs::create_dir_all(&keys).unwrap();
+        if trusted {
+            std::fs::copy(examples.join("keys/weft-sign.pub"), keys.join("demo.pub")).unwrap();
+        }
+        // SAFETY: as in `store`.
+        unsafe { std::env::set_var("WEFT_TRUSTED_KEYS", &keys) };
+        store
+    }
+
+    fn copy_tree(src: &Path, dst: &Path) {
+        std::fs::create_dir_all(dst).unwrap();
+        for entry in std::fs::read_dir(src).unwrap().flatten() {
+            let to = dst.join(entry.file_name());
+            if entry.file_type().unwrap().is_dir() {
+                copy_tree(&entry.path(), &to);
+            } else {
+                std::fs::copy(entry.path(), to).unwrap();
+            }
+        }
+    }
+
+    fn record(store: &Path, app_id: &str, owner: Owner) {
+        weft_ipc_types::trust::write_owner(&owner_record_path(&store.join("share"), app_id), owner)
+            .unwrap();
+    }
+
+    fn demo_key() -> weft_ipc_types::trust::PublisherKey {
+        weft_ipc_types::trust::PublisherKey::from_file(
+            &Path::new(env!("CARGO_MANIFEST_DIR")).join("../../examples/keys/weft-sign.pub"),
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn a_package_signed_by_its_owner_launches() {
+        let _env = crate::tests::env_lock().blocking_lock();
+        // Recorded as the publisher's, and with no record but a trusted
+        // signature.
+        let store = demo_store("signed", true);
+        let unrecorded = resolve(DEMO).map(|p| p.root);
+        record(&store, DEMO, Owner::Verified(demo_key()));
+        let recorded = resolve(DEMO).map(|p| p.root);
+        finish(&store);
+        assert_eq!(unrecorded.ok(), Some(store.join(DEMO)));
+        assert_eq!(recorded.ok(), Some(store.join(DEMO)));
+    }
+
+    #[test]
+    fn a_package_changed_after_installation_is_refused() {
+        let _env = crate::tests::env_lock().blocking_lock();
+        let store = demo_store("changed", true);
+        record(&store, DEMO, Owner::Verified(demo_key()));
+        let page = store.join(DEMO).join("ui/index.html");
+        let mut text = std::fs::read_to_string(&page).unwrap();
+        text.push_str("<script>changed</script>");
+        std::fs::write(&page, text).unwrap();
+        let changed = refusal(resolve(DEMO));
+        // Without a record, the changed package matches no trusted key.
+        std::fs::remove_file(owner_record_path(&store.join("share"), DEMO)).unwrap();
+        let unrecorded = refusal(resolve(DEMO));
+        finish(&store);
+        assert_eq!(changed.code, 403, "{}", changed.message);
+        assert!(
+            changed.message.contains("not signed by its owner"),
+            "{}",
+            changed.message
+        );
+        assert_eq!(unrecorded.code, 403, "{}", unrecorded.message);
+        assert!(
+            unrecorded.message.contains("no recorded owner"),
+            "{}",
+            unrecorded.message
+        );
+    }
+
+    #[test]
+    fn a_withdrawn_key_no_longer_launches_its_packages() {
+        let _env = crate::tests::env_lock().blocking_lock();
+        let store = demo_store("withdrawn", false);
+        record(&store, DEMO, Owner::Verified(demo_key()));
+        let refused = refusal(resolve(DEMO));
+        finish(&store);
+        assert_eq!(refused.code, 403, "{}", refused.message);
+        assert!(refused.message.contains("no longer"), "{}", refused.message);
+    }
+
+    #[test]
+    fn unsigned_content_needs_a_development_record() {
+        let _env = crate::tests::env_lock().blocking_lock();
+        let store = store("unrecorded", ID, "app.wasm");
+        std::fs::remove_file(owner_record_path(&store.join("share"), ID)).unwrap();
+        let refused = refusal(resolve(ID));
+        // Another owner's record does not admit it either.
+        record(&store, ID, Owner::Verified(demo_key()));
+        let other_owner = refusal(resolve(ID));
+        finish(&store);
+        for refused in [refused, other_owner] {
+            assert_eq!(refused.code, 403, "{}", refused.message);
         }
     }
 

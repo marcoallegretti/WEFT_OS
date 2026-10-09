@@ -75,6 +75,7 @@ def run(args, desktop, home, xdotool):
         "WEFT_RUNTIME_BIN": str(t / "weft-runtime"),
         "WEFT_APP_SHELL_BIN": str(t / "weft-app-shell"),
         "WEFT_APP_STORE": str(args.store),
+        "WEFT_TRUSTED_KEYS": str(ROOT / "examples/keys"),
         "WEFT_DISABLE_CGROUP": "1",
         "WEFT_APPD_WS_PORT": str(free_port()),
         "HOME": str(home),

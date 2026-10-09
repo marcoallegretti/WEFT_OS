@@ -712,6 +712,22 @@ mod tests {
             ),
         )
         .unwrap();
+        record_development(id);
+    }
+
+    /// Records `id` as development content in a data home private to this
+    /// test process, which XDG_DATA_HOME then points at. Callers hold
+    /// env_lock.
+    fn record_development(id: &str) {
+        let data_home =
+            std::env::temp_dir().join(format!("weft-appd-tests-data-{}", std::process::id()));
+        let record = weft_ipc_types::trust::owner_record_path(&data_home, id);
+        if !record.exists() {
+            weft_ipc_types::trust::write_owner(&record, weft_ipc_types::trust::Owner::Development)
+                .unwrap();
+        }
+        // SAFETY: callers hold env_lock, which serialises environment changes.
+        unsafe { std::env::set_var("XDG_DATA_HOME", &data_home) };
     }
 
     fn make_registry() -> Registry {

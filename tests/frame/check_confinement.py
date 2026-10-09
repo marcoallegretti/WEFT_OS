@@ -142,6 +142,12 @@ def make_package(store, http_port, ws_port, other_dir):
     (package / "outside.png").write_bytes(png())
     other.write_bytes(png())
     (package / "ui/linked").symlink_to(other_dir)
+    # The package holds a link, which weft-pack refuses to install, so it is
+    # planted directly and recorded as development content, which runs
+    # unverified: the renderer's own confinement is what this check probes.
+    record = store / "home/share/weft/owners" / APP_ID
+    record.parent.mkdir(parents=True)
+    record.write_text("development\n")
 
 
 def run(args, desktop, store, other_dir):
@@ -157,6 +163,8 @@ def run(args, desktop, store, other_dir):
             "WEFT_RUNTIME_BIN": str(t / "weft-runtime"),
             "WEFT_APP_SHELL_BIN": str(t / "weft-app-shell"),
             "WEFT_APP_STORE": str(store),
+            "HOME": str(store / "home"),
+            "XDG_DATA_HOME": str(store / "home/share"),
             "WEFT_DISABLE_CGROUP": "1",
             "WEFT_APPD_WS_PORT": str(free_port()),
         })
