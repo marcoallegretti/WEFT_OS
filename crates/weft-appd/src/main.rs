@@ -190,7 +190,7 @@ async fn run() -> anyhow::Result<()> {
     let socket_path = appd_socket_path()?;
 
     if let Some(parent) = socket_path.parent() {
-        std::fs::create_dir_all(parent).with_context(|| format!("create {}", parent.display()))?;
+        private_dir(parent).with_context(|| format!("create {}", parent.display()))?;
     }
     let _ = std::fs::remove_file(&socket_path);
 
@@ -366,7 +366,7 @@ fn system_token_path() -> std::io::Result<PathBuf> {
             .map_err(|_| std::io::Error::other("XDG_RUNTIME_DIR not set"))?,
     )
     .join("weft");
-    std::fs::create_dir_all(&dir)?;
+    private_dir(&dir)?;
     Ok(dir.join("appd.systoken"))
 }
 
@@ -375,7 +375,7 @@ fn write_ws_port(port: u16) -> anyhow::Result<()> {
     let runtime_dir = std::env::var("XDG_RUNTIME_DIR").context("XDG_RUNTIME_DIR not set")?;
     let path = PathBuf::from(runtime_dir).join("weft/appd.wsport");
     if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent).with_context(|| format!("create {}", parent.display()))?;
+        private_dir(parent).with_context(|| format!("create {}", parent.display()))?;
     }
     std::fs::write(&path, port.to_string()).with_context(|| format!("write {}", path.display()))?;
     Ok(())
@@ -415,14 +415,25 @@ async fn handle_connection(
 pub(crate) fn session_ipc_socket_path(session_id: u64) -> Option<PathBuf> {
     let runtime_dir = std::env::var("XDG_RUNTIME_DIR").ok()?;
     let dir = PathBuf::from(runtime_dir).join("weft");
-    // Created accessible to the user only, so session sockets are private
-    // whatever the umask.
+    private_dir(&dir).ok()?;
+    Some(dir.join(format!("ipc-{session_id}.sock")))
+}
+
+/// Creates appd's runtime directory (`$XDG_RUNTIME_DIR/weft`) or another of
+/// its directories, accessible to the user only whatever the umask, also
+/// when it already existed.
+pub(crate) fn private_dir(dir: &std::path::Path) -> std::io::Result<()> {
     let mut builder = std::fs::DirBuilder::new();
     builder.recursive(true);
     #[cfg(unix)]
     std::os::unix::fs::DirBuilderExt::mode(&mut builder, 0o700);
-    builder.create(&dir).ok()?;
-    Some(dir.join(format!("ipc-{session_id}.sock")))
+    builder.create(dir)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700))?;
+    }
+    Ok(())
 }
 
 pub(crate) async fn dispatch(req: Request, registry: &Registry) -> Response {

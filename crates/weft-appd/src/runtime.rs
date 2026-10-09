@@ -212,7 +212,7 @@ fn spawn_app_shell(
 fn portal_socket_path(session_id: u64) -> Option<PathBuf> {
     let runtime_dir = std::env::var("XDG_RUNTIME_DIR").ok()?;
     let dir = PathBuf::from(runtime_dir).join("weft");
-    std::fs::create_dir_all(&dir).ok()?;
+    crate::private_dir(&dir).ok()?;
     Some(dir.join(format!("portal-{session_id}.sock")))
 }
 
