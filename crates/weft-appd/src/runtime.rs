@@ -70,6 +70,22 @@ pub(crate) async fn spawn_ipc_relay(
 
 const READY_TIMEOUT: Duration = Duration::from_secs(30);
 
+/// `systemd-run` options that place the runtime in a transient user scope.
+///
+/// A scope runs the command in the foreground as systemd-run's own process,
+/// so its stdout and exit status reach appd directly. `--wait` only applies
+/// to service units; systemd rejects it together with `--scope`.
+const SYSTEMD_SCOPE_ARGS: &[&str] = &[
+    "--user",
+    "--scope",
+    "--collect",
+    "--slice=weft-apps.slice",
+    "-p",
+    "CPUQuota=200%",
+    "-p",
+    "MemoryMax=512M",
+];
+
 fn systemd_cgroup_available() -> bool {
     if std::env::var("WEFT_DISABLE_CGROUP").is_ok() {
         return false;
@@ -240,19 +256,7 @@ pub(crate) async fn supervise(
 
     let mut cmd = if systemd_cgroup_available() {
         let mut c = tokio::process::Command::new("systemd-run");
-        c.args([
-            "--user",
-            "--scope",
-            "--wait",
-            "--collect",
-            "--slice=weft-apps.slice",
-            "-p",
-            "CPUQuota=200%",
-            "-p",
-            "MemoryMax=512M",
-            "--",
-            &bin,
-        ]);
+        c.args(SYSTEMD_SCOPE_ARGS).arg("--").arg(&bin);
         c
     } else {
         tokio::process::Command::new(&bin)
@@ -435,5 +439,43 @@ async fn drain_stderr(stderr: tokio::process::ChildStderr, session_id: u64) {
     let mut lines = BufReader::new(stderr).lines();
     while let Ok(Some(line)) = lines.next_line().await {
         tracing::warn!(session_id, stderr = %line, "app stderr");
+    }
+}
+
+#[cfg(all(test, target_os = "linux"))]
+mod tests {
+    use super::SYSTEMD_SCOPE_ARGS;
+
+    /// systemd-run checks its options and their combinations before it
+    /// connects to the service manager. Run against an empty runtime
+    /// directory and bus address, it must get as far as the connection
+    /// attempt; any option error ends earlier with a different message. This
+    /// does not validate the `-p` property values, which only the manager
+    /// checks, and never starts a real scope.
+    #[test]
+    fn systemd_run_accepts_scope_options() {
+        let empty = std::env::temp_dir().join(format!("weft-scope-test-{}", std::process::id()));
+        std::fs::create_dir_all(&empty).unwrap();
+        let output = std::process::Command::new("systemd-run")
+            .args(SYSTEMD_SCOPE_ARGS)
+            .args(["--", "true"])
+            .env_clear()
+            .env("PATH", std::env::var_os("PATH").unwrap_or_default())
+            .env("LC_ALL", "C")
+            .env("XDG_RUNTIME_DIR", &empty)
+            .env(
+                "DBUS_SESSION_BUS_ADDRESS",
+                format!("unix:path={}/bus", empty.display()),
+            )
+            .output();
+        std::fs::remove_dir_all(&empty).unwrap();
+        let output = output.expect("systemd-run is required to check the scope options");
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        // systemd 255 says "Failed to connect to bus"; later releases name the
+        // transport, e.g. "Failed to connect to user scope bus via local transport".
+        assert!(
+            stderr.starts_with("Failed to connect to"),
+            "systemd-run did not reach the manager connection: {stderr}"
+        );
     }
 }
