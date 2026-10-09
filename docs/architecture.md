@@ -71,7 +71,7 @@ Every WebSocket connection must complete the upgrade and send `HELLO` as its fir
 
 Capabilities are declared in `wapp.toml` under `[package] capabilities`. One vocabulary (`weft_ipc_types::capability`) is used by `weft-pack check`, which rejects unknown strings, by `weft-appd`, which derives the session's effective grants, and by `weft-runtime`, which enforces them.
 
-`weft-appd` derives grants once, before a session exists. `LAUNCH_APP` is answered with an error and nothing starts when the app ID is malformed (code 400), the package is not installed (404), a declared capability is unknown, unsupported on this host or cannot be satisfied (403), or the host cannot provide the resources (500, for example without `HOME`). All capabilities are checked before the app's data directory is created. Without `WEFT_RUNTIME_BIN`, appd starts no processes and derives no grants. The runtime does not read the manifest; it receives the grants as arguments:
+`weft-appd` derives grants once, before a session exists. `LAUNCH_APP` is answered with an error and nothing starts when the app ID is malformed (code 400), the package is not installed (404), a declared capability is unknown, unsupported on this host or cannot be satisfied (403), app data exists in both the current and the earlier location (409), or the host cannot provide the resources (500, for example without `HOME`). All capabilities are checked before the app's data directory is created. Without `WEFT_RUNTIME_BIN`, appd starts no processes and derives no grants. The runtime does not read the manifest; it receives the grants as arguments:
 
 - `--preopen HOST::GUEST::ro|rw` for each directory, with the access mode the capability names;
 - `--grant <capability>` for each host-import capability.
@@ -80,7 +80,7 @@ Each capability-controlled host import (fetch, notifications, clipboard) checks 
 
 | Capability | Effect |
 |---|---|
-| `fs:read:app-data` / `fs:rw:app-data` | Preopen `~/.local/share/weft/apps/<id>/data` as `/data`, read-only or read-write |
+| `fs:read:app-data` / `fs:rw:app-data` | Preopen the app's data directory (see *App data*) as `/data`, read-only or read-write |
 | `fs:read:xdg-documents` / `fs:rw:xdg-documents` | Preopen the documents directory from the XDG user-dirs configuration (`XDG_DOCUMENTS_DIR`) as `/xdg/documents`; the launch fails when none is configured |
 | `net:fetch:<host>` | `weft:app/fetch` to that exact host (a lowercase DNS name or dotted IPv4 address) over HTTP or HTTPS, on any port |
 | `net:fetch:*` | `weft:app/fetch` to any host |
@@ -109,6 +109,17 @@ Package store roots (in priority order):
 1. `$WEFT_APP_STORE` (if set)
 2. `~/.local/share/weft/apps/`
 3. `/usr/share/weft/apps/`
+
+## App data
+
+Each app's private data lives in `$XDG_DATA_HOME/weft/app-data/<id>` (`~/.local/share/weft/app-data/<id>` by default), apart from installed packages. Installing, updating or uninstalling a package never removes it. `weft-appd` creates the directory when a session with an app-data capability starts and makes it accessible only to the user (mode 0700); a symbolic link in its place is refused rather than followed. `weft-appd` and `weft-pack` must run with the same `HOME` and `XDG_DATA_HOME` to agree on this location; the systemd unit allows `weft-appd` to write under `~/.local/share/weft`.
+
+Earlier versions kept app data inside the user package store, in `~/.local/share/weft/apps/<id>/data`, for apps declaring an app-data capability. That directory is moved to the new location in a single rename, which never replaces an existing directory:
+
+- by `weft-appd`, on the first launch with an app-data capability;
+- by `weft-pack uninstall` and `weft-pack install`, before they touch a package directory in the user store (however its path is spelled). `uninstall` moves it when the package declares an app-data capability or its manifest cannot be read, and otherwise stops without removing anything; a `data` directory is never deleted with a package.
+
+A package directory left empty by the move is removed. Nothing is moved, and `weft-pack` stops or the launch is refused, when the new location already exists, even empty (error 409), when the old one is not a plain directory, or when the two are on different filesystems (error 500); the message names both locations so the user can keep one copy and remove the other. The system UI shows such refusals. Packages cannot contain a top-level `data` entry, so package content is never taken for app data. `tests/frame/check_app_data.py` checks that existing Notes data arrives byte for byte, that the Notes session then reads and saves it, and that a conflict is refused.
 
 ## Environment Variables
 

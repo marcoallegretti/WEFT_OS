@@ -336,7 +336,10 @@
             },
           }));
         } else if (msg.type === 'ERROR') {
+          // Launch refusals (missing package, capability or data conflict)
+          // must reach the user; the launcher otherwise looks unresponsive.
           console.warn('appd error', msg.code, msg.message);
+          showNotification('Cannot open: ' + msg.message);
         }
       }
 

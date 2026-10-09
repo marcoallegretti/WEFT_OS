@@ -16,7 +16,9 @@ Restart=on-failure
 RestartSec=1s
 ProtectSystem=strict
 PrivateTmp=true
-ReadWritePaths=%t
+# App data and the user package store, where earlier versions kept app data.
+# %h is the home of the user the unit runs as; run it as the session user.
+ReadWritePaths=%t -%h/.local/share/weft
 
 [Install]
 WantedBy=graphical.target
