@@ -2,6 +2,8 @@ use std::path::PathBuf;
 
 use anyhow::Context;
 
+#[cfg(feature = "wasmtime-runtime")]
+mod desktop;
 mod grants;
 #[cfg(feature = "wasmtime-runtime")]
 mod ipc;
@@ -93,6 +95,7 @@ fn main() -> anyhow::Result<()> {
 
     tracing::info!(session_id, %app_id, wasm = %wasm_path.display(), "executing module");
     run_module(
+        app_id,
         &wasm_path,
         &preopen,
         grants,
@@ -116,6 +119,7 @@ fn ready_line() -> String {
 
 #[cfg(not(feature = "wasmtime-runtime"))]
 fn run_module(
+    _app_id: &str,
     _wasm_path: &std::path::Path,
     _preopen: &[Preopen],
     _grants: Grants,
@@ -129,6 +133,7 @@ fn run_module(
 
 #[cfg(feature = "wasmtime-runtime")]
 fn run_module(
+    app_id: &str,
     wasm_path: &std::path::Path,
     preopen: &[Preopen],
     grants: Grants,
@@ -241,6 +246,7 @@ fn run_module(
         .context("define weft:app/fetch#fetch")?;
 
     let notify_grants = Arc::clone(&grants);
+    let notify_app = app_id.to_owned();
     linker
         .instance("weft:app/notifications@0.1.0")
         .context("define weft:app/notifications instance")?
@@ -251,7 +257,7 @@ fn run_module(
                   -> wasmtime::Result<(Result<(), String>,)> {
                 let result = notify_grants
                     .notifications()
-                    .and_then(|()| host_notify(&title, &body, icon.as_deref()));
+                    .and_then(|()| desktop::notify(&notify_app, &title, &body, icon.as_deref()));
                 Ok((result,))
             },
         )
@@ -270,7 +276,7 @@ fn run_module(
                       -> wasmtime::Result<(Result<String, String>,)> {
                     Ok((read_grants
                         .clipboard_read()
-                        .and_then(|()| host_clipboard_read()),))
+                        .and_then(|()| desktop::clipboard_read()),))
                 },
             )
             .context("define weft:app/clipboard#read")?;
@@ -283,7 +289,7 @@ fn run_module(
                       -> wasmtime::Result<(Result<(), String>,)> {
                     Ok((write_grants
                         .clipboard_write()
-                        .and_then(|()| host_clipboard_write(&text)),))
+                        .and_then(|()| desktop::clipboard_write(&text)),))
                 },
             )
             .context("define weft:app/clipboard#write")?;
@@ -463,55 +469,6 @@ fn host_fetch(
     Err("this runtime was built without network fetch support".to_owned())
 }
 
-#[cfg(feature = "wasmtime-runtime")]
-fn host_clipboard_read() -> Result<String, String> {
-    let out = std::process::Command::new("wl-paste")
-        .arg("--no-newline")
-        .output()
-        .map_err(|e| e.to_string())?;
-    if out.status.success() {
-        String::from_utf8(out.stdout).map_err(|e| e.to_string())
-    } else {
-        Err(String::from_utf8_lossy(&out.stderr).trim().to_owned())
-    }
-}
-
-#[cfg(feature = "wasmtime-runtime")]
-fn host_clipboard_write(text: &str) -> Result<(), String> {
-    use std::io::Write;
-    let mut child = std::process::Command::new("wl-copy")
-        .stdin(std::process::Stdio::piped())
-        .spawn()
-        .map_err(|e| e.to_string())?;
-    if let Some(stdin) = child.stdin.as_mut() {
-        stdin
-            .write_all(text.as_bytes())
-            .map_err(|e| e.to_string())?;
-    }
-    let status = child.wait().map_err(|e| e.to_string())?;
-    if status.success() {
-        Ok(())
-    } else {
-        Err(format!("wl-copy exited with {status}"))
-    }
-}
-
-#[cfg(feature = "wasmtime-runtime")]
-fn host_notify(title: &str, body: &str, icon: Option<&str>) -> Result<(), String> {
-    let mut cmd = std::process::Command::new("notify-send");
-    if let Some(i) = icon {
-        cmd.arg("--icon").arg(i);
-    }
-    cmd.arg("--").arg(title).arg(body);
-    cmd.status().map_err(|e| e.to_string()).and_then(|s| {
-        if s.success() {
-            Ok(())
-        } else {
-            Err(format!("notify-send exited with {s}"))
-        }
-    })
-}
-
 #[cfg(feature = "seccomp")]
 fn apply_seccomp_filter() -> anyhow::Result<()> {
     use seccompiler::{BpfProgram, SeccompAction, SeccompFilter, SeccompRule};
@@ -578,6 +535,7 @@ mod tests {
     #[test]
     fn engine_disabled_build_refuses_to_run_components() {
         let err = run_module(
+            "org.weft.test",
             std::path::Path::new("app.wasm"),
             &[],
             Grants::default(),
