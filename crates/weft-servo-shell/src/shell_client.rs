@@ -239,10 +239,6 @@ impl ShellClient {
         Ok(!self.data.window_state.closed)
     }
 
-    pub fn window_state(&self) -> &ShellWindowState {
-        &self.data.window_state
-    }
-
     pub fn take_pending_gestures(&mut self) -> Vec<PendingGesture> {
         std::mem::take(&mut self.data.pending_gestures)
     }
