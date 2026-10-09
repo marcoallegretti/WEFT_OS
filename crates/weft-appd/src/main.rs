@@ -19,6 +19,7 @@ mod compositor_client {
 }
 mod grants;
 mod ipc;
+mod launch;
 mod mount;
 mod runtime;
 mod ws;
@@ -442,20 +443,19 @@ pub(crate) async fn dispatch(req: Request, registry: &Registry) -> Response {
             app_id,
             surface_id: _,
         } => {
-            // The package's capabilities are granted before a session exists;
-            // a package this host cannot satisfy is refused, not started.
-            let grants = if !weft_ipc_types::package::is_valid_app_id(&app_id) {
-                Err(grants::Refusal {
-                    code: 400,
-                    message: "invalid app ID".to_owned(),
-                })
+            // The package is resolved and its capabilities granted before a
+            // session exists; a package this host cannot satisfy is refused,
+            // not started.
+            let launch = if !weft_ipc_types::package::is_valid_app_id(&app_id) {
+                Err(grants::Refusal::new(400, "invalid app ID"))
             } else if std::env::var("WEFT_RUNTIME_BIN").is_ok() {
-                grants::for_app(&app_id)
+                resolve_launch(app_id.clone()).await.map(Some)
             } else {
-                Ok(grants::SessionGrants::default())
+                Ok(None)
             };
-            let grants = match grants {
-                Ok(grants) => grants,
+            let (package, grants) = match launch {
+                Ok(Some((package, grants))) => (Some(package), grants),
+                Ok(None) => (None, grants::SessionGrants::default()),
                 Err(refusal) => {
                     tracing::warn!(%app_id, error = %refusal.message, "launch refused");
                     return Response::Error {
@@ -469,7 +469,9 @@ pub(crate) async fn dispatch(req: Request, registry: &Registry) -> Response {
             let abort_rx = registry.lock().await.register_abort(session_id);
             let compositor_tx = registry.lock().await.compositor_tx.clone();
 
-            if std::env::var("WEFT_RUNTIME_BIN").is_err() {
+            // Without a configured runtime, nothing was resolved and the
+            // session stops at once.
+            let Some(package) = package else {
                 let _ = registry.lock().await.broadcast().send(Response::LaunchAck {
                     session_id,
                     app_id: app_id.clone(),
@@ -484,12 +486,12 @@ pub(crate) async fn dispatch(req: Request, registry: &Registry) -> Response {
                     state: AppStateKind::Stopped,
                 });
                 return Response::LaunchAck { session_id, app_id };
-            }
+            };
             let reg = Arc::clone(registry);
-            let aid = app_id.clone();
             tokio::spawn(async move {
                 if let Err(e) =
-                    runtime::supervise(session_id, &aid, grants, reg, abort_rx, compositor_tx).await
+                    runtime::supervise(session_id, package, grants, reg, abort_rx, compositor_tx)
+                        .await
                 {
                     tracing::warn!(session_id, error = %e, "runtime supervisor error");
                 }
@@ -576,6 +578,33 @@ pub(crate) async fn dispatch(req: Request, registry: &Registry) -> Response {
     }
 }
 
+/// Resolves the package of `app_id` and derives its grants. Resolution may
+/// mount an image, so it runs off the async workers; a refused launch
+/// releases the mount the same way.
+async fn resolve_launch(
+    app_id: String,
+) -> Result<(launch::LaunchPackage, grants::SessionGrants), grants::Refusal> {
+    tokio::task::spawn_blocking(move || {
+        let package = launch::resolve(&app_id)?;
+        let grants = grants::derive(&app_id, &package.capabilities, grants::HostDirs::from_env)?;
+        tracing::info!(
+            %app_id,
+            version = %package.version,
+            root = %package.root().display(),
+            image = package.image.is_some(),
+            "package resolved"
+        );
+        Ok((package, grants))
+    })
+    .await
+    .unwrap_or_else(|e| {
+        Err(grants::Refusal::new(
+            500,
+            format!("package resolution failed: {e}"),
+        ))
+    })
+}
+
 pub(crate) fn app_store_roots() -> Vec<std::path::PathBuf> {
     if let Ok(explicit) = std::env::var("WEFT_APP_STORE") {
         return vec![std::path::PathBuf::from(explicit)];
@@ -594,18 +623,6 @@ pub(crate) fn app_store_roots() -> Vec<std::path::PathBuf> {
     roots
 }
 
-#[derive(serde::Deserialize)]
-struct WappPackage {
-    id: String,
-    name: String,
-    version: String,
-}
-
-#[derive(serde::Deserialize)]
-struct WappManifest {
-    package: WappPackage,
-}
-
 fn scan_installed_apps() -> Vec<AppInfo> {
     let mut seen = std::collections::HashSet::new();
     let mut apps = Vec::new();
@@ -614,11 +631,7 @@ fn scan_installed_apps() -> Vec<AppInfo> {
             continue;
         };
         for entry in entries.flatten() {
-            let manifest_path = entry.path().join("wapp.toml");
-            let Ok(contents) = std::fs::read_to_string(&manifest_path) else {
-                continue;
-            };
-            let Ok(m) = toml::from_str::<WappManifest>(&contents) else {
+            let Ok(m) = weft_ipc_types::manifest::Manifest::read(&entry.path()) else {
                 continue;
             };
             if seen.insert(m.package.id.clone()) {
@@ -655,7 +668,7 @@ mod tests {
     /// since session sockets are named by session ID and every test registry
     /// starts at 1. Directories of test processes that have ended are
     /// removed. Callers hold env_lock.
-    fn use_test_runtime_dir() {
+    pub(crate) fn use_test_runtime_dir() {
         let base = std::env::temp_dir().join("weft-appd-tests");
         if let Ok(entries) = std::fs::read_dir(&base) {
             for entry in entries.flatten() {
@@ -678,6 +691,22 @@ mod tests {
 
     pub(crate) fn env_lock() -> &'static tokio::sync::Mutex<()> {
         ENV_LOCK.get_or_init(|| tokio::sync::Mutex::new(()))
+    }
+
+    /// Writes a complete package `id` into `dir`; `extra` adds lines to its
+    /// `[package]` table.
+    fn write_test_package(dir: &std::path::Path, id: &str, extra: &str) {
+        std::fs::create_dir_all(dir.join("ui")).unwrap();
+        std::fs::write(dir.join("app.wasm"), b"\0asm\x01\0\0\0").unwrap();
+        std::fs::write(dir.join("ui/index.html"), b"<p>").unwrap();
+        std::fs::write(
+            dir.join("wapp.toml"),
+            format!(
+                "[package]\nid = \"{id}\"\nname = \"T\"\nversion = \"0.1.0\"\n{extra}\n\
+                 [runtime]\nmodule = \"app.wasm\"\n[ui]\nentry = \"ui/index.html\"\n"
+            ),
+        )
+        .unwrap();
     }
 
     fn make_registry() -> Registry {
@@ -754,12 +783,11 @@ mod tests {
         let _env = env_lock().lock().await;
         let store = std::env::temp_dir().join(format!("weft_refuse_{}", std::process::id()));
         let app_dir = store.join("org.example.gpu");
-        std::fs::create_dir_all(&app_dir).unwrap();
-        std::fs::write(
-            app_dir.join("wapp.toml"),
-            "[package]\nid = \"org.example.gpu\"\ncapabilities = [\"hw:gpu:compute\"]\n",
-        )
-        .unwrap();
+        write_test_package(
+            &app_dir,
+            "org.example.gpu",
+            "capabilities = [\"hw:gpu:compute\"]",
+        );
         let prior_store = std::env::var("WEFT_APP_STORE").ok();
         let prior_bin = std::env::var("WEFT_RUNTIME_BIN").ok();
         // SAFETY: env_lock is held and the runtime is current_thread.
@@ -1120,7 +1148,7 @@ mod tests {
         };
         let supervised = runtime::supervise(
             session_id,
-            "test.app",
+            launch::LaunchPackage::unresolved("test.app"),
             grants::SessionGrants::default(),
             Arc::clone(&registry),
             abort_rx,
@@ -1155,12 +1183,7 @@ mod tests {
         use_test_runtime_dir();
         let dir = std::env::temp_dir().join(format!("weft_test_relay_{}", std::process::id()));
         let app = dir.join("store/org.example.relay");
-        std::fs::create_dir_all(&app).unwrap();
-        std::fs::write(
-            app.join("wapp.toml"),
-            "[package]\nid = \"org.example.relay\"\n",
-        )
-        .unwrap();
+        write_test_package(&app, "org.example.relay", "");
         // The runtime reports ready and exits without connecting to the relay.
         let child = dir.join("child.sh");
         std::fs::write(
@@ -1227,6 +1250,93 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
+    async fn children_receive_the_resolved_package_files() {
+        use std::os::unix::fs::PermissionsExt;
+        let _env = env_lock().lock().await;
+        use_test_runtime_dir();
+        let dir = std::env::temp_dir().join(format!("weft_test_args_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let app = dir.join("store/org.example.args");
+        write_test_package(&app, "org.example.args", "");
+        // Each child records its arguments, one per line, then reports ready.
+        let log = dir.join("args.log");
+        let child = dir.join("child.sh");
+        std::fs::write(
+            &child,
+            format!(
+                "#!/bin/sh\nprintf '%s\\n' \"$@\" -- >> '{}'\necho READY $WEFT_READY_TOKEN\nexec sleep 1\n",
+                log.display()
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&child, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let vars = [
+            ("WEFT_RUNTIME_BIN", child.clone().into_os_string()),
+            ("WEFT_APP_SHELL_BIN", child.clone().into_os_string()),
+            ("WEFT_DISABLE_CGROUP", "1".into()),
+            ("WEFT_APP_STORE", dir.join("store").into_os_string()),
+        ];
+        let prior: Vec<_> = vars
+            .iter()
+            .map(|(k, _)| (*k, std::env::var_os(k)))
+            .collect();
+        for (key, value) in &vars {
+            // SAFETY: env_lock is held on a current_thread runtime.
+            unsafe { std::env::set_var(key, value) };
+        }
+
+        let registry = make_registry();
+        let mut rx = registry.lock().await.subscribe();
+        let ack = dispatch(
+            Request::LaunchApp {
+                app_id: "org.example.args".into(),
+                surface_id: 0,
+            },
+            &registry,
+        )
+        .await;
+        let stopped = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            while !matches!(
+                rx.recv().await,
+                Ok(Response::AppState {
+                    state: AppStateKind::Stopped,
+                    ..
+                })
+            ) {}
+        })
+        .await;
+        let recorded = std::fs::read_to_string(&log).unwrap_or_default();
+
+        for (key, value) in prior {
+            // SAFETY: as above.
+            unsafe {
+                match value {
+                    Some(v) => std::env::set_var(key, v),
+                    None => std::env::remove_var(key),
+                }
+            }
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(matches!(ack, Response::LaunchAck { .. }), "{ack:?}");
+        assert!(stopped.is_ok(), "session did not stop");
+        let runs: Vec<Vec<&str>> = recorded
+            .split("--\n")
+            .filter(|run| !run.is_empty())
+            .map(|run| run.lines().collect())
+            .collect();
+        let after = |run: &[&str], flag: &str| {
+            run.iter()
+                .position(|arg| *arg == flag)
+                .and_then(|i| run.get(i + 1).map(|value| value.to_string()))
+        };
+        let module = app.join("app.wasm").display().to_string();
+        let ui = app.join("ui/index.html").display().to_string();
+        assert_eq!(runs.len(), 2, "{recorded}");
+        assert_eq!(after(&runs[0], "--module"), Some(module), "{recorded}");
+        assert_eq!(after(&runs[1], "--ui"), Some(ui), "{recorded}");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
     async fn supervisor_transitions_through_ready_to_stopped() {
         use std::os::unix::fs::PermissionsExt;
 
@@ -1267,7 +1377,7 @@ mod tests {
 
         runtime::supervise(
             session_id,
-            "test.app",
+            launch::LaunchPackage::unresolved("test.app"),
             grants::SessionGrants::default(),
             Arc::clone(&registry),
             abort_rx,
@@ -1342,7 +1452,7 @@ mod tests {
 
         runtime::supervise(
             session_id,
-            "test.abort.startup",
+            launch::LaunchPackage::unresolved("test.abort.startup"),
             grants::SessionGrants::default(),
             Arc::clone(&registry),
             abort_rx,
@@ -1392,7 +1502,7 @@ mod tests {
 
         runtime::supervise(
             session_id,
-            "test.spawn.fail",
+            launch::LaunchPackage::unresolved("test.spawn.fail"),
             grants::SessionGrants::default(),
             Arc::clone(&registry),
             abort_rx,
@@ -1551,7 +1661,7 @@ mod tests {
             std::time::Duration::from_secs(20),
             runtime::supervise(
                 session_id,
-                "test.app",
+                launch::LaunchPackage::unresolved("test.app"),
                 grants::SessionGrants::default(),
                 Arc::clone(&registry),
                 abort_rx,

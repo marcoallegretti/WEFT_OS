@@ -17,6 +17,40 @@ pub fn is_valid_app_id(id: &str) -> bool {
         })
 }
 
+/// The files of a verified package image in a package store: the EROFS
+/// image, its dm-verity hash tree and the hex root hash, named after the
+/// application ID. `weft-pack build-image` and `build-verity` produce these
+/// names and the supervisor looks for them.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ImageFiles {
+    pub image: PathBuf,
+    pub hash_tree: PathBuf,
+    pub root_hash: PathBuf,
+}
+
+impl ImageFiles {
+    pub fn in_store(store_root: &Path, app_id: &str) -> Self {
+        Self::for_image(&store_root.join(format!("{app_id}.app.img")))
+    }
+
+    /// The companions of `image`, named by replacing its extension.
+    pub fn for_image(image: &Path) -> Self {
+        Self {
+            image: image.to_path_buf(),
+            hash_tree: image.with_extension("hash"),
+            root_hash: image.with_extension("roothash"),
+        }
+    }
+
+    /// Whether any of the three files is present, whether or not it is
+    /// usable.
+    pub fn any_present(&self) -> bool {
+        [&self.image, &self.hash_tree, &self.root_hash]
+            .iter()
+            .any(|path| std::fs::symlink_metadata(path).is_ok())
+    }
+}
+
 /// The user's data home: `$XDG_DATA_HOME` when it is an absolute path,
 /// otherwise `$HOME/.local/share`.
 pub fn data_home() -> Option<PathBuf> {
@@ -180,6 +214,21 @@ pub fn make_private(dir: &Path) -> std::io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn image_companions_share_the_image_name() {
+        let files = ImageFiles::in_store(Path::new("/store"), "org.weft.demo.notes");
+        assert_eq!(files.image, Path::new("/store/org.weft.demo.notes.app.img"));
+        assert_eq!(
+            files.hash_tree,
+            Path::new("/store/org.weft.demo.notes.app.hash")
+        );
+        assert_eq!(
+            files.root_hash,
+            Path::new("/store/org.weft.demo.notes.app.roothash")
+        );
+        assert_eq!(ImageFiles::for_image(&files.image), files);
+    }
 
     #[test]
     fn app_ids() {

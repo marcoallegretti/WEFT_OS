@@ -46,7 +46,7 @@ pub(crate) struct Refusal {
 }
 
 impl Refusal {
-    fn new(code: u32, message: impl Into<String>) -> Self {
+    pub(crate) fn new(code: u32, message: impl Into<String>) -> Self {
         Self {
             code,
             message: message.into(),
@@ -85,33 +85,6 @@ impl HostDirs {
             home,
         })
     }
-}
-
-/// Reads the package manifest of `app_id` and derives its grants.
-pub(crate) fn for_app(app_id: &str) -> Result<SessionGrants, Refusal> {
-    #[derive(serde::Deserialize)]
-    struct Package {
-        capabilities: Option<Vec<String>>,
-    }
-    #[derive(serde::Deserialize)]
-    struct Manifest {
-        package: Package,
-    }
-
-    if !weft_ipc_types::package::is_valid_app_id(app_id) {
-        return Err(Refusal::new(400, "invalid app ID"));
-    }
-    let manifest = crate::app_store_roots()
-        .into_iter()
-        .map(|root| root.join(app_id).join("wapp.toml"))
-        .find(|path| path.exists())
-        .ok_or_else(|| Refusal::new(404, format!("package {app_id} is not installed")))?;
-    let text = std::fs::read_to_string(&manifest)
-        .map_err(|e| Refusal::new(500, format!("cannot read {}: {e}", manifest.display())))?;
-    let manifest: Manifest = toml::from_str(&text)
-        .map_err(|e| Refusal::new(403, format!("invalid {}: {e}", manifest.display())))?;
-    let declared = manifest.package.capabilities.unwrap_or_default();
-    derive(app_id, &declared, HostDirs::from_env)
 }
 
 /// Derives grants for the declared capabilities. Every capability is

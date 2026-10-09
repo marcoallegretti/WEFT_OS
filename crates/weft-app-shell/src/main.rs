@@ -18,19 +18,22 @@ fn main() -> anyhow::Result<()> {
         )
         .init();
 
+    const USAGE: &str = "usage: weft-app-shell <app_id> <session_id> --ui <path>";
     let mut args = std::env::args().skip(1);
-    let app_id = args
-        .next()
-        .context("usage: weft-app-shell <app_id> <session_id>")?;
+    let app_id = args.next().context(USAGE)?;
     let session_id: u64 = args
         .next()
-        .context("usage: weft-app-shell <app_id> <session_id>")?
+        .context(USAGE)?
         .parse()
         .context("session_id must be a number")?;
+    let ui = match (args.next().as_deref(), args.next(), args.next()) {
+        (Some("--ui"), Some(path), None) => std::path::PathBuf::from(path),
+        _ => anyhow::bail!(USAGE),
+    };
 
     let ws_port = appd_ws_port();
 
-    embed_app(&app_id, session_id, ws_port)
+    embed_app(&app_id, session_id, ws_port, &ui)
 }
 
 fn appd_ws_port() -> u16 {
@@ -50,13 +53,18 @@ fn appd_ws_port() -> u16 {
     7410
 }
 
-fn embed_app(app_id: &str, session_id: u64, ws_port: u16) -> anyhow::Result<()> {
+fn embed_app(
+    app_id: &str,
+    session_id: u64,
+    ws_port: u16,
+    ui: &std::path::Path,
+) -> anyhow::Result<()> {
     #[cfg(feature = "servo-embed")]
-    return embedder::run(app_id, session_id, ws_port);
+    return embedder::run(app_id, session_id, ws_port, ui);
 
     #[cfg(not(feature = "servo-embed"))]
     {
-        let _ = (app_id, session_id, ws_port);
+        let _ = (app_id, session_id, ws_port, ui);
         anyhow::bail!("weft-app-shell was built without the servo-embed feature and cannot render")
     }
 }

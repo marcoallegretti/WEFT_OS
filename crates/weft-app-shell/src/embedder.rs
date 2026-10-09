@@ -1,5 +1,4 @@
 use std::num::NonZeroU32;
-use std::path::PathBuf;
 use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -666,73 +665,17 @@ fn resolve_weft_system_url(url: &ServoUrl) -> Option<ServoUrl> {
     ServoUrl::parse(&format!("file://{}", file.display())).ok()
 }
 
-fn read_ui_entry(app_id: &str) -> Option<String> {
-    #[derive(serde::Deserialize)]
-    struct Ui {
-        entry: String,
-    }
-    #[derive(serde::Deserialize)]
-    struct Manifest {
-        ui: Ui,
-    }
-
-    let erofs_manifest = std::path::Path::new("/run/weft/apps")
-        .join(app_id)
-        .join("merged")
-        .join("wapp.toml");
-    let toml_text = std::fs::read_to_string(&erofs_manifest).ok().or_else(|| {
-        app_store_roots()
-            .into_iter()
-            .find_map(|r| std::fs::read_to_string(r.join(app_id).join("wapp.toml")).ok())
-    })?;
-    let m: Manifest = toml::from_str(&toml_text).ok()?;
-    Some(m.ui.entry)
-}
-
-fn resolve_app_file_path(app_id: &str, rel: &str) -> Option<std::path::PathBuf> {
-    let erofs_root = std::path::Path::new("/run/weft/apps")
-        .join(app_id)
-        .join("merged");
-    if erofs_root.exists() {
-        let p = erofs_root.join(rel);
-        if p.exists() {
-            return Some(p);
-        }
-    }
-    app_store_roots()
-        .into_iter()
-        .map(|r| r.join(app_id).join(rel))
-        .find(|p| p.exists())
-}
-
-fn resolve_weft_app_url(app_id: &str) -> Option<ServoUrl> {
-    let entry = read_ui_entry(app_id).unwrap_or_else(|| "ui/index.html".to_owned());
-    let file_path = resolve_app_file_path(app_id, &entry)?;
-    let s = format!("file://{}", file_path.display());
-    ServoUrl::parse(&s).ok()
-}
-
-fn app_store_roots() -> Vec<PathBuf> {
-    if let Ok(v) = std::env::var("WEFT_APP_STORE") {
-        return vec![PathBuf::from(v)];
-    }
-    let mut roots = Vec::new();
-    if let Ok(home) = std::env::var("HOME") {
-        roots.push(
-            PathBuf::from(home)
-                .join(".local")
-                .join("share")
-                .join("weft")
-                .join("apps"),
-        );
-    }
-    roots.push(PathBuf::from("/usr/share/weft/apps"));
-    roots
-}
-
-pub fn run(app_id: &str, session_id: u64, ws_port: u16) -> anyhow::Result<()> {
-    let url = resolve_weft_app_url(app_id)
-        .ok_or_else(|| anyhow::anyhow!("no ui/index.html found for app {app_id}"))?;
+/// Shows the UI document `ui` of `app_id`, the file weft-appd resolved from
+/// the package; the shell never looks for the package itself.
+pub fn run(
+    app_id: &str,
+    session_id: u64,
+    ws_port: u16,
+    ui: &std::path::Path,
+) -> anyhow::Result<()> {
+    let url = ServoUrl::from_file_path(ui)
+        .map_err(|_| anyhow::anyhow!("{} is not an absolute path", ui.display()))?;
+    tracing::info!(%app_id, %url, "showing application UI");
 
     let event_loop = EventLoop::<ServoWake>::with_user_event()
         .build()

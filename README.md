@@ -8,7 +8,7 @@ WEFT OS is a Wayland compositor and application runtime where every app is a Web
 
 **System shell** — `weft-servo-shell` embeds Servo (feature-gated, `--features servo-embed`) and renders `system-ui.html` as a Wayland panel. Without `servo-embed`, the binary exits with an error instead of rendering. Navigation gestures from the compositor are forwarded to `weft-appd` over WebSocket.
 
-**App shell** — `weft-app-shell` is a per-process Servo host for application WebViews. It resolves `weft-app://<id>/ui/index.html`, injects a `weftIpc` WebSocket bridge into the page, and registers with the compositor as an application surface. Also feature-gated behind `servo-embed`.
+**App shell** — `weft-app-shell` is a per-process Servo host for application WebViews. It shows the UI document `weft-appd` resolved from the package, injects a `weftIpc` WebSocket bridge into the page, and registers with the compositor as an application surface. Also feature-gated behind `servo-embed`.
 
 **App daemon** — `weft-appd` supervises sessions: spawns `weft-runtime`, waits for its READY, spawns `weft-app-shell` and reports the session running only after the app shell's READY, manages the per-session IPC relay between the Wasm component and the WebView, and handles session teardown. Wraps processes in systemd scopes (`CPUQuota=200%`, `MemoryMax=512M`) when available.
 

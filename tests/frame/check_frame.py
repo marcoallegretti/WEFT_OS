@@ -8,8 +8,8 @@ inside the white quadrant. It exits non-zero when the frame never appears or
 does not match.
 
 `--host system` runs weft-servo-shell with the page as its system UI.
-`--host app` installs the page as a package in a temporary app store and runs
-weft-app-shell for it. The host must print READY, and the page must be on
+`--host app` copies the page into a package's UI directory and runs
+weft-app-shell with it as the UI document, as weft-appd would. The host must print READY, and the page must be on
 screen within a short grace period after READY, because the compositor shows
 a presented frame slightly later. READY printed within that grace before the
 page is presented is therefore not detected. `--slow-style SECONDS` makes
@@ -85,23 +85,13 @@ APP_ID = "org.weft.test.frame"
 COMPOSITE_GRACE = 2.0
 
 
-def install_app(store, page):
-    """Install `page` as the UI entry of a minimal package and return the store root."""
-    package = store / APP_ID
+def app_ui(package, page):
+    """Copy `page` into the UI directory of a package and return the UI
+    document, the file weft-appd would pass to weft-app-shell."""
     (package / "ui").mkdir(parents=True)
-    shutil.copyfile(page, package / "ui" / "index.html")
-    (package / "wapp.toml").write_text(
-        "[package]\n"
-        f'id = "{APP_ID}"\n'
-        'name = "Frame reference"\n'
-        'version = "0.0.0"\n'
-        "\n[runtime]\n"
-        'module = "app.wasm"\n'
-        "\n[ui]\n"
-        'entry = "ui/index.html"\n',
-        encoding="utf-8",
-    )
-    return store
+    entry = package / "ui" / "index.html"
+    shutil.copyfile(page, entry)
+    return entry
 
 
 def slow_style(directory, delay):
@@ -188,11 +178,11 @@ def main(argv=None):
                 shell = desktop.launch_client(
                     "shell", [args.shell], {"WEFT_SYSTEM_UI_HTML": str(page.resolve())})
             else:
-                store = install_app(desktop.runtime / "store", page)
+                entry = app_ui(desktop.runtime / APP_ID, page)
                 if args.slow_style:
-                    slow_style(store / APP_ID / "ui", args.slow_style)
+                    slow_style(entry.parent, args.slow_style)
                 shell = desktop.launch_client(
-                    "shell", [args.shell, APP_ID, "1"], {"WEFT_APP_STORE": str(store)})
+                    "shell", [args.shell, APP_ID, "1", "--ui", str(entry)])
             problems, screenshot = watch(desktop, shell, args)
     except SessionError as error:
         print(error, file=sys.stderr)

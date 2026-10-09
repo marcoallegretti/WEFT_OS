@@ -10455,10 +10455,8 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "bitflags 2.11.0",
- "serde",
  "servo",
  "softbuffer",
- "toml 0.8.23",
  "tracing",
  "tracing-subscriber",
  "wayland-backend",
@@ -10524,6 +10522,7 @@ dependencies = [
  "rmp-serde",
  "rustix 1.1.4",
  "serde",
+ "toml 0.8.23",
 ]
 
 [[package]]
@@ -10541,10 +10540,8 @@ dependencies = [
  "ed25519-dalek",
  "hex",
  "rand 0.8.5",
- "serde",
  "sha2",
  "tar",
- "toml 0.8.23",
  "weft-ipc-types",
  "zstd",
 ]

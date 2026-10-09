@@ -68,13 +68,7 @@ class Runner:
     def __init__(self, runtime, work, port):
         self.runtime = runtime
         self.work = work
-        self.store = work / "store"
-        package = self.store / APP_ID
-        package.mkdir(parents=True)
-        (package / "wapp.toml").write_text(
-            f'[package]\nid = "{APP_ID}"\nname = "Grants probe"\nversion = "0.1.0"\n'
-            '[runtime]\nmodule = "app.wasm"\n[ui]\nentry = "ui/index.html"\n')
-        self.package = package
+        self.module = work / "app.wasm"
         self.targets = work / "targets"
         self.targets.mkdir()
         (self.targets / "targets.txt").write_text(
@@ -84,11 +78,10 @@ class Runner:
             f"fetch-other-host http://localhost:{port}/ok\n")
 
     def run(self, *arguments, expect_success=True):
-        command = [str(self.runtime), APP_ID, "1",
+        command = [str(self.runtime), APP_ID, "1", "--module", str(self.module),
                    "--preopen", f"{self.targets}::/probe::ro", *arguments]
         result = subprocess.run(command, capture_output=True, text=True, timeout=60,
-                                env={"WEFT_APP_STORE": str(self.store), "PATH": "/usr/bin:/bin",
-                                     "RUST_LOG": "warn"})
+                                env={"PATH": "/usr/bin:/bin", "RUST_LOG": "warn"})
         if expect_success and result.returncode != 0:
             raise AssertionError(f"runtime failed: {' '.join(arguments)}\n{result.stderr}")
         probes = {}
@@ -182,7 +175,7 @@ def main(argv=None):
     work = Path(tempfile.mkdtemp(prefix="weft-grants-"))
     try:
         runner = Runner(args.runtime, work, server.server_port)
-        shutil.copy(probe, runner.package / "app.wasm")
+        shutil.copy(probe, runner.module)
         data = work / "data"
         data.mkdir()
         check(runner, data)

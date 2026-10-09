@@ -11,8 +11,6 @@ path = "src/main.rs"
 [dependencies]
 weft-ipc-types = { path = "../weft-ipc-types" }
 anyhow = "1.0"
-serde = { version = "1", features = ["derive"] }
-toml = "0.8"
 ed25519-dalek = { version = "2", features = ["rand_core"] }
 sha2 = "0.10"
 rand = "0.8"

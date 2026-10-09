@@ -7,6 +7,8 @@ use weft_ipc_types::AppdToCompositor;
 use crate::Registry;
 use crate::compositor_client::CompositorSender;
 use crate::ipc::{AppStateKind, Response};
+use crate::launch::LaunchPackage;
+use crate::mount::Mount;
 
 /// The per-session relay between the component's IPC socket and the app
 /// bridge. It belongs to the session: closing it stops the relay task and
@@ -186,7 +188,7 @@ async fn kill_portal(portal: Option<(PathBuf, tokio::process::Child)>) {
 fn spawn_app_shell(
     bin: &str,
     session_id: u64,
-    app_id: &str,
+    package: &LaunchPackage,
     token: &str,
     bridge_token: Option<String>,
 ) -> std::io::Result<tokio::process::Child> {
@@ -197,15 +199,17 @@ fn spawn_app_shell(
         command.env(BRIDGE_TOKEN_ENV, bridge_token);
     }
     let child = command
-        .arg(app_id)
+        .arg(&package.app_id)
         .arg(session_id.to_string())
+        .arg("--ui")
+        .arg(&package.ui_entry)
         .env(READY_TOKEN_ENV, token)
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
         .kill_on_drop(true)
         .spawn()?;
-    tracing::info!(session_id, %app_id, bin, "app shell spawned");
+    tracing::info!(session_id, app_id = %package.app_id, bin, "app shell spawned");
     Ok(child)
 }
 
@@ -241,36 +245,39 @@ fn spawn_file_portal(
 
 pub(crate) async fn supervise(
     session_id: u64,
-    app_id: &str,
+    mut package: LaunchPackage,
     grants: crate::grants::SessionGrants,
     registry: Registry,
     abort_rx: tokio::sync::oneshot::Receiver<()>,
     compositor_tx: Option<CompositorSender>,
 ) -> anyhow::Result<()> {
     let mut abort_rx = abort_rx;
+    let app_id = package.app_id.clone();
+    let app_id = app_id.as_str();
+    let image = package.image.take();
     let bin = match std::env::var("WEFT_RUNTIME_BIN") {
         Ok(b) => b,
         Err(_) => {
             tracing::debug!(session_id, %app_id, "WEFT_RUNTIME_BIN not set; skipping process spawn");
-            return stop_unstarted(&registry, session_id).await;
+            return stop_unstarted(&registry, session_id, image).await;
         }
     };
 
     let Ok(shell_bin) = std::env::var("WEFT_APP_SHELL_BIN") else {
         tracing::warn!(session_id, %app_id, "WEFT_APP_SHELL_BIN not set; no UI host to start");
-        return stop_unstarted(&registry, session_id).await;
+        return stop_unstarted(&registry, session_id, image).await;
     };
     let token = match random_token() {
         Ok(token) => token,
         Err(e) => {
             tracing::error!(session_id, %app_id, error = %e, "cannot create readiness token");
-            return stop_unstarted(&registry, session_id).await;
+            return stop_unstarted(&registry, session_id, image).await;
         }
     };
 
     let Some(ipc_socket_path) = crate::session_ipc_socket_path(session_id) else {
         tracing::warn!(session_id, %app_id, "no runtime directory for the IPC socket");
-        return stop_unstarted(&registry, session_id).await;
+        return stop_unstarted(&registry, session_id, image).await;
     };
     let broadcast = registry.lock().await.broadcast().clone();
     let relay = match spawn_ipc_relay(session_id, ipc_socket_path.clone(), broadcast) {
@@ -280,12 +287,9 @@ pub(crate) async fn supervise(
         }
         Err(e) => {
             tracing::warn!(session_id, %app_id, error = %e, "cannot open the IPC socket");
-            return stop_unstarted(&registry, session_id).await;
+            return stop_unstarted(&registry, session_id, image).await;
         }
     };
-
-    let (mount_orch, store_override) =
-        crate::mount::MountOrchestrator::mount_if_needed(app_id, session_id);
 
     let portal = spawn_file_portal(session_id, &grants.dirs);
 
@@ -305,10 +309,7 @@ pub(crate) async fn supervise(
         .kill_on_drop(true);
 
     cmd.arg("--ipc-socket").arg(&ipc_socket_path);
-
-    if let Some(ref root) = store_override {
-        cmd.env("WEFT_APP_STORE", root);
-    }
+    cmd.arg("--module").arg(&package.module);
 
     if let Some((ref sock, _)) = portal {
         cmd.env("WEFT_FILE_PORTAL_SOCKET", sock);
@@ -327,7 +328,7 @@ pub(crate) async fn supervise(
         app_shell: None,
         portal,
         relay: Some(relay),
-        mount: mount_orch,
+        image,
         compositor_tx,
         surface_announced: false,
     };
@@ -377,15 +378,15 @@ pub(crate) async fn supervise(
     tokio::spawn(drain_stdout(runtime_stdout, session_id));
 
     let bridge_token = registry.lock().await.bridge_token(session_id);
-    let mut app_shell = match spawn_app_shell(&shell_bin, session_id, app_id, &token, bridge_token)
-    {
-        Ok(child) => child,
-        Err(e) => {
-            return session
-                .settle(&registry, &format!("failed to spawn app shell: {e}"))
-                .await;
-        }
-    };
+    let mut app_shell =
+        match spawn_app_shell(&shell_bin, session_id, &package, &token, bridge_token) {
+            Ok(child) => child,
+            Err(e) => {
+                return session
+                    .settle(&registry, &format!("failed to spawn app shell: {e}"))
+                    .await;
+            }
+        };
     let shell_stdout = app_shell.stdout.take().expect("stdout piped");
     tokio::spawn(drain_stderr(
         app_shell.stderr.take().expect("stderr piped"),
@@ -438,7 +439,12 @@ pub(crate) async fn supervise(
 }
 
 /// Marks a session that never started any process as stopped.
-async fn stop_unstarted(registry: &Registry, session_id: u64) -> anyhow::Result<()> {
+async fn stop_unstarted(
+    registry: &Registry,
+    session_id: u64,
+    image: Option<Mount>,
+) -> anyhow::Result<()> {
+    release_image(image).await;
     let mut reg = registry.lock().await;
     reg.set_state(session_id, AppStateKind::Stopped);
     reg.remove_abort_sender(session_id);
@@ -458,7 +464,8 @@ struct OwnedSession {
     app_shell: Option<tokio::process::Child>,
     portal: Option<(PathBuf, tokio::process::Child)>,
     relay: Option<IpcRelay>,
-    mount: crate::mount::MountOrchestrator,
+    /// The mounted package image, released after both children have exited.
+    image: Option<Mount>,
     compositor_tx: Option<CompositorSender>,
     surface_announced: bool,
 }
@@ -480,7 +487,7 @@ impl OwnedSession {
                 "compositor queue unavailable; surface not released"
             );
         }
-        self.mount.umount();
+        release_image(self.image).await;
         kill_portal(self.portal).await;
         drop(self.relay);
         let mut reg = registry.lock().await;
@@ -492,6 +499,13 @@ impl OwnedSession {
             state: AppStateKind::Stopped,
         });
         Ok(())
+    }
+}
+
+/// Unmounts a package image without blocking the async workers.
+async fn release_image(image: Option<Mount>) {
+    if let Some(image) = image {
+        let _ = tokio::task::spawn_blocking(move || drop(image)).await;
     }
 }
 
