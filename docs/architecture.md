@@ -147,5 +147,4 @@ A package directory left empty by the move is removed. Nothing is moved, and `we
 | `WEFT_APPD_WS_PORT` | `7410` | WebSocket port for weft-appd |
 | `WEFT_EGL_RENDERING` | — | Set to `1` to use EGL rendering in Servo shell |
 | `WEFT_DISABLE_CGROUP` | — | Set to disable systemd-run cgroup wrapping |
-| `WEFT_FILE_PORTAL_SOCKET` | — | Path of the session's file portal socket, set for `weft-runtime`; not passed to the component |
 | `XDG_RUNTIME_DIR` | — | Standard XDG runtime dir (sockets written here) |

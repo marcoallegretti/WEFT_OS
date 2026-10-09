@@ -26,6 +26,12 @@ const MAX_ENTRIES: usize = 10_000;
 /// The most connections served at once.
 #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 const MAX_CONNECTIONS: usize = 4;
+/// How long a connection may stay silent before it is closed.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+const IDLE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
+/// The prefix of the temporary files writes create, never listed.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+const TEMPORARY_PREFIX: &str = ".weft-portal-";
 
 #[derive(Deserialize)]
 #[serde(tag = "op", rename_all = "snake_case")]
@@ -98,12 +104,22 @@ fn main() -> anyhow::Result<()> {
             let _ = stream.write_all(b"{\"error\":\"too many connections\"}\n");
             continue;
         }
+        // The slot is released however the connection ends, a panic
+        // included.
+        struct Slot(Arc<AtomicUsize>);
+        impl Drop for Slot {
+            fn drop(&mut self) {
+                self.0.fetch_sub(1, Ordering::SeqCst);
+            }
+        }
+        let slot = Slot(Arc::clone(&active));
         let roots = Arc::clone(&roots);
-        let active = Arc::clone(&active);
-        std::thread::spawn(move || {
+        if let Err(e) = std::thread::Builder::new().spawn(move || {
+            let _slot = slot;
             handle_connection(stream, &roots);
-            active.fetch_sub(1, Ordering::SeqCst);
-        });
+        }) {
+            eprintln!("cannot serve a connection: {e}");
+        }
     }
     Ok(())
 }
@@ -145,9 +161,19 @@ fn parse_allowed(args: &[String]) -> Vec<Allowed> {
 }
 
 /// The part of `path` inside the granted directory `root`, if `path` lies
-/// in it and names its location directly: only plain components, no `.`,
-/// `..` or repeated root.
+/// in it and names its location directly: an absolute path of plain
+/// components only, without `.`, `..`, empty components or a trailing `/`.
+/// The text is checked as given, since path parsing drops `.` and repeated
+/// separators.
 fn relative_to<'a>(path: &'a Path, root: &Path) -> Option<&'a Path> {
+    let text = path.to_str()?;
+    let direct = text.starts_with('/')
+        && text[1..]
+            .split('/')
+            .all(|segment| !matches!(segment, "" | "." | ".."));
+    if !direct {
+        return None;
+    }
     let rest = path.strip_prefix(root).ok()?;
     rest.components()
         .all(|c| matches!(c, Component::Normal(_)))
@@ -240,18 +266,19 @@ fn handle_connection(stream: std::os::unix::net::UnixStream, roots: &[Root]) {
             return;
         }
     };
+    let _ = stream.set_read_timeout(Some(IDLE_TIMEOUT));
     let mut reader = BufReader::new(stream);
     let mut line = Vec::new();
     loop {
         line.clear();
         match (&mut reader)
-            .take(MAX_LINE as u64 + 1)
+            .take(MAX_LINE as u64 + 2)
             .read_until(b'\n', &mut line)
         {
             Ok(0) | Err(_) => break,
             Ok(_) => {}
         }
-        if line.len() > MAX_LINE {
+        if line.strip_suffix(b"\n").unwrap_or(&line).len() > MAX_LINE {
             let _ = writer.write_all(b"{\"error\":\"request too long\"}\n");
             break;
         }
@@ -324,7 +351,7 @@ fn list(root: &Root, rest: &Path) -> Result<Response, Response> {
         let Ok(name) = entry.file_name().to_str() else {
             continue;
         };
-        if name == "." || name == ".." {
+        if name == "." || name == ".." || name.starts_with(TEMPORARY_PREFIX) {
             continue;
         }
         if names.len() == MAX_ENTRIES {
@@ -354,13 +381,22 @@ fn write(root: &Root, rest: &Path, data: &[u8]) -> Result<Response, Response> {
         OFlags::RDONLY | OFlags::DIRECTORY,
     )
     .map_err(Response::err)?;
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let temporary = format!(
-        ".weft-portal-{}-{}",
+        "{TEMPORARY_PREFIX}{}-{}",
         std::process::id(),
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map_or(0, |d| d.as_nanos())
+        NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
     );
+    // A replaced file keeps its permission bits; a new one is private.
+    let mode = match rustix::fs::statat(&parent, name, rustix::fs::AtFlags::SYMLINK_NOFOLLOW) {
+        Ok(stat)
+            if rustix::fs::FileType::from_raw_mode(stat.st_mode)
+                == rustix::fs::FileType::RegularFile =>
+        {
+            stat.st_mode & 0o777
+        }
+        _ => 0o600,
+    };
     let file = rustix::fs::openat(
         &parent,
         temporary.as_str(),
@@ -368,6 +404,7 @@ fn write(root: &Root, rest: &Path, data: &[u8]) -> Result<Response, Response> {
         Mode::from_raw_mode(0o600),
     )
     .map_err(Response::err)?;
+    let _ = rustix::fs::fchmod(&file, Mode::from_raw_mode(mode));
     let mut file = std::fs::File::from(file);
     let written = file
         .write_all(data)
@@ -464,6 +501,11 @@ mod tests {
             "/srv/granted/../x",
             "/srv/granted/a/../../x",
             "/etc",
+            "/srv/granted/a/./b",
+            "/srv/granted/a/.",
+            "/srv/granted/a/",
+            "/srv/granted//a",
+            "srv/granted/a",
         ] {
             assert_eq!(relative_to(Path::new(outside), root), None, "{outside}");
         }
@@ -549,6 +591,73 @@ mod tests {
             Response::Ok
         ));
         assert_eq!(fs::read(granted.join("sub/f")).unwrap(), b"ok");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_directory_swapped_for_a_link_mid_operation_cannot_lead_out() {
+        let dir = temp("race");
+        let granted = dir.join("granted");
+        fs::create_dir(dir.join("outside")).unwrap();
+        fs::write(dir.join("outside/f"), b"secret").unwrap();
+        fs::create_dir(granted.join("real")).unwrap();
+        fs::write(granted.join("real/f"), b"inside").unwrap();
+        let roots = grant(&granted, true);
+        let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let swapper = {
+            let (granted, outside, stop) = (granted.clone(), dir.join("outside"), stop.clone());
+            std::thread::spawn(move || {
+                // `swap` is alternately a link to the inside directory and
+                // a link out.
+                while !stop.load(std::sync::atomic::Ordering::Relaxed) {
+                    let _ = std::os::unix::fs::symlink("real", granted.join("next"));
+                    let _ = fs::rename(granted.join("next"), granted.join("swap"));
+                    let _ = std::os::unix::fs::symlink(&outside, granted.join("next"));
+                    let _ = fs::rename(granted.join("next"), granted.join("swap"));
+                }
+            })
+        };
+        let mut inside = 0;
+        for _ in 0..2000 {
+            if let Response::OkData { data_b64 } =
+                handle_request(read_req(&granted.join("swap/f")), &roots)
+            {
+                let data =
+                    base64::Engine::decode(&base64::engine::general_purpose::STANDARD, data_b64)
+                        .unwrap();
+                assert_eq!(data, b"inside", "a read left the directory");
+                inside += 1;
+            }
+            let _ = handle_request(write_req(&granted.join("swap/f"), b"inside"), &roots);
+        }
+        stop.store(true, std::sync::atomic::Ordering::Relaxed);
+        swapper.join().unwrap();
+        assert_eq!(fs::read(dir.join("outside/f")).unwrap(), b"secret");
+        assert!(inside > 0, "the race never resolved inside");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_replaced_file_keeps_its_mode() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = temp("mode");
+        let granted = dir.join("granted");
+        fs::write(granted.join("shared.txt"), b"old").unwrap();
+        fs::set_permissions(
+            granted.join("shared.txt"),
+            fs::Permissions::from_mode(0o644),
+        )
+        .unwrap();
+        let roots = grant(&granted, true);
+        assert!(matches!(
+            handle_request(write_req(&granted.join("shared.txt"), b"new"), &roots),
+            Response::Ok
+        ));
+        let mode = fs::metadata(granted.join("shared.txt"))
+            .unwrap()
+            .permissions()
+            .mode();
+        assert_eq!(mode & 0o777, 0o644);
         let _ = fs::remove_dir_all(&dir);
     }
 
