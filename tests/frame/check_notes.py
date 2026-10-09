@@ -143,8 +143,15 @@ def run(args, desktop, home, xdotool):
     act("mousemove", "--sync", *DISCARD)
     act("click", "1")
     time.sleep(2)
+    # The editor stays read-only and nothing can be saved over the file.
+    act("mousemove", "--sync", "100", "300")
+    act("click", "1")
+    act("type", "--delay", "40", "x")
+    act("key", "ctrl+s")
+    time.sleep(2)
     if notes.read_bytes() != b"\xff not text":
         raise AssertionError("a failed load changed the stored notes")
+    act("mousemove", "--sync", *DISCARD)
     notes.write_text("repaired", encoding="utf-8")
     act("click", "1")
     time.sleep(2)

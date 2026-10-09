@@ -237,7 +237,7 @@
   function setupIpc() {
     if (!window.weftIpc) { setTimeout(setupIpc, 50); return; }
     window.weftIpc.onmessage = onMessage;
-    load('');
+    load('loading…');
   }
 
   setLoaded(false);
