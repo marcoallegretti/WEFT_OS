@@ -208,7 +208,7 @@ def check_hangup(runtime, work):
         except subprocess.TimeoutExpired:
             raise AssertionError("the runtime kept running after its IPC connection closed")
         log = process.stderr.read()
-        process.stdout.read()
+        process.stdout.read()  # drained; the log is on standard error
         if process.returncode != 0 or "IPC connection ended" not in log:
             raise AssertionError(f"the runtime did not end with the connection: "
                                  f"exit {process.returncode}")
