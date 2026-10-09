@@ -1242,6 +1242,85 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
+    async fn without_a_connected_compositor_the_app_shell_is_not_started() {
+        use std::os::unix::fs::PermissionsExt;
+        let _env = env_lock().lock().await;
+        use_test_runtime_dir();
+        let dir = std::env::temp_dir().join(format!("weft_test_nocomp_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let app = dir.join("store/org.example.nocomp");
+        write_test_package(&app, "org.example.nocomp", "");
+        // Each child records that it started.
+        let log = dir.join("started.log");
+        let child = dir.join("child.sh");
+        std::fs::write(
+            &child,
+            format!(
+                "#!/bin/sh\necho started >> '{}'\necho READY $WEFT_READY_TOKEN\nexec sleep 1\n",
+                log.display()
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&child, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let vars = [
+            ("WEFT_RUNTIME_BIN", child.clone().into_os_string()),
+            ("WEFT_APP_SHELL_BIN", child.clone().into_os_string()),
+            ("WEFT_DISABLE_CGROUP", "1".into()),
+            ("WEFT_APP_STORE", dir.join("store").into_os_string()),
+        ];
+        let prior: Vec<_> = vars
+            .iter()
+            .map(|(k, _)| (*k, std::env::var_os(k)))
+            .collect();
+        for (key, value) in &vars {
+            // SAFETY: env_lock is held on a current_thread runtime.
+            unsafe { std::env::set_var(key, value) };
+        }
+
+        let registry = make_registry();
+        let (tx, mut compositor) = tokio::sync::mpsc::channel(8);
+        registry.lock().await.compositor_tx = Some(compositor_client::CompositorSender::new(
+            tx,
+            std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        ));
+        let mut rx = registry.lock().await.subscribe();
+        let _ = dispatch(
+            Request::LaunchApp {
+                app_id: "org.example.nocomp".into(),
+                surface_id: 0,
+            },
+            &registry,
+        )
+        .await;
+        let stopped = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            while !matches!(
+                rx.recv().await,
+                Ok(Response::AppState {
+                    state: AppStateKind::Stopped,
+                    ..
+                })
+            ) {}
+        })
+        .await;
+        let started = std::fs::read_to_string(&log).unwrap_or_default();
+
+        for (key, value) in prior {
+            // SAFETY: as above.
+            unsafe {
+                match value {
+                    Some(v) => std::env::set_var(key, v),
+                    None => std::env::remove_var(key),
+                }
+            }
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(stopped.is_ok(), "session did not stop");
+        // Only the runtime started; no app shell, and nothing was queued.
+        assert_eq!(started.lines().count(), 1, "{started}");
+        assert!(compositor.try_recv().is_err());
+    }
+
+    #[tokio::test(flavor = "current_thread")]
     async fn the_app_shell_connects_only_through_its_session_connection() {
         use std::io::BufRead;
         use std::os::unix::fs::PermissionsExt;
@@ -1280,7 +1359,10 @@ mod tests {
 
         let registry = make_registry();
         let (tx, mut compositor) = tokio::sync::mpsc::channel(8);
-        registry.lock().await.compositor_tx = Some(tx);
+        registry.lock().await.compositor_tx = Some(compositor_client::CompositorSender::new(
+            tx,
+            std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true)),
+        ));
         let mut rx = registry.lock().await.subscribe();
         let ack = dispatch(
             Request::LaunchApp {

@@ -1,5 +1,7 @@
 use std::os::fd::OwnedFd;
 use std::path::PathBuf;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use tokio::io::AsyncWriteExt;
 use tokio::sync::mpsc;
@@ -19,7 +21,27 @@ impl From<AppdToCompositor> for Outbound {
     }
 }
 
-pub type CompositorSender = mpsc::Sender<Outbound>;
+/// Queues messages for the compositor and tells whether it is connected.
+#[derive(Clone)]
+pub struct CompositorSender {
+    tx: mpsc::Sender<Outbound>,
+    connected: Arc<AtomicBool>,
+}
+
+impl CompositorSender {
+    pub fn new(tx: mpsc::Sender<Outbound>, connected: Arc<AtomicBool>) -> Self {
+        Self { tx, connected }
+    }
+
+    /// Whether the compositor IPC connection is currently up.
+    pub fn is_connected(&self) -> bool {
+        self.connected.load(Ordering::Acquire)
+    }
+
+    pub fn try_send(&self, outbound: Outbound) -> Result<(), Outbound> {
+        self.tx.try_send(outbound).map_err(|e| e.into_inner())
+    }
+}
 
 /// Resolve the compositor IPC socket path.
 ///
@@ -37,16 +59,24 @@ pub fn socket_path() -> Option<PathBuf> {
 
 /// Spawn the compositor IPC client task and return a sender for outbound messages.
 ///
-/// The task connects to `socket_path`, retrying every 2 s on failure. If the
-/// connection drops while sending, it waits 500 ms then reconnects. Incoming
+/// The task connects to `socket_path`, retrying every 2 s on failure. When
+/// the connection drops, whether noticed by a failed write or by the
+/// compositor closing it, it waits 500 ms and reconnects; a message whose
+/// write failed is sent again on the new connection. Incoming
 /// `CompositorToAppd` frames are decoded and logged.
 pub fn spawn(socket_path: PathBuf) -> CompositorSender {
     let (tx, rx) = mpsc::channel::<Outbound>(32);
-    tokio::spawn(run_client(socket_path, rx));
-    tx
+    let connected = Arc::new(AtomicBool::new(false));
+    tokio::spawn(run_client(socket_path, rx, connected.clone()));
+    CompositorSender::new(tx, connected)
 }
 
-async fn run_client(socket_path: PathBuf, mut rx: mpsc::Receiver<Outbound>) {
+async fn run_client(
+    socket_path: PathBuf,
+    mut rx: mpsc::Receiver<Outbound>,
+    connected: Arc<AtomicBool>,
+) {
+    let mut unsent: Option<Outbound> = None;
     loop {
         let stream = loop {
             match tokio::net::UnixStream::connect(&socket_path).await {
@@ -61,12 +91,22 @@ async fn run_client(socket_path: PathBuf, mut rx: mpsc::Receiver<Outbound>) {
         };
 
         let (read_half, mut write_half) = stream.into_split();
-
-        tokio::spawn(read_unix_incoming(read_half));
+        let mut reader = tokio::spawn(read_unix_incoming(read_half));
+        connected.store(true, Ordering::Release);
 
         loop {
-            let Some(outbound) = rx.recv().await else {
-                return;
+            let outbound = match unsent.take() {
+                Some(outbound) => outbound,
+                None => tokio::select! {
+                    next = rx.recv() => match next {
+                        Some(outbound) => outbound,
+                        None => return,
+                    },
+                    _ = &mut reader => {
+                        tracing::warn!("compositor closed the IPC connection; reconnecting");
+                        break;
+                    }
+                },
             };
             let frame = match frame_encode(&outbound.msg) {
                 Ok(frame) => frame,
@@ -75,14 +115,17 @@ async fn run_client(socket_path: PathBuf, mut rx: mpsc::Receiver<Outbound>) {
                     continue;
                 }
             };
-            if send_frame(&mut write_half, &frame, outbound.fd)
+            if send_frame(&mut write_half, &frame, outbound.fd.as_ref())
                 .await
                 .is_err()
             {
                 tracing::warn!("compositor IPC write failed; reconnecting");
+                unsent = Some(outbound);
                 break;
             }
         }
+        connected.store(false, Ordering::Release);
+        reader.abort();
 
         tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
     }
@@ -93,7 +136,7 @@ async fn run_client(socket_path: PathBuf, mut rx: mpsc::Receiver<Outbound>) {
 async fn send_frame(
     stream: &mut tokio::net::unix::OwnedWriteHalf,
     frame: &[u8],
-    fd: Option<OwnedFd>,
+    fd: Option<&OwnedFd>,
 ) -> std::io::Result<()> {
     use rustix::net::{SendAncillaryBuffer, SendAncillaryMessage, SendFlags, sendmsg};
     use std::mem::MaybeUninit;

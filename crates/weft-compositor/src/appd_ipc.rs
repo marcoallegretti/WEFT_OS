@@ -31,6 +31,9 @@ pub struct WeftAppdIpc {
     pub socket_path: PathBuf,
     read_buf: Vec<u8>,
     write_stream: Option<UnixStream>,
+    /// Whether an appd connection's read source is registered. Only one
+    /// connection is served at a time.
+    connected: bool,
     /// Descriptors received with appd messages, in arrival order. Each
     /// `AttachClient` frame is sent with exactly one, attached to its first
     /// bytes, so it has arrived by the time the frame is decoded.
@@ -50,6 +53,7 @@ impl WeftAppdIpc {
             socket_path,
             read_buf: Vec::new(),
             write_stream: None,
+            connected: false,
             fds: VecDeque::new(),
             sessions: HashMap::new(),
             reported: HashSet::new(),
@@ -65,6 +69,10 @@ impl WeftAppdIpc {
         match frame_encode(msg) {
             Ok(frame) => {
                 if stream.write_all(&frame).is_err() {
+                    // A partly written frame breaks the stream's framing:
+                    // end the connection, whose read side then cleans up.
+                    tracing::warn!("compositor IPC write failed; closing the appd connection");
+                    let _ = stream.shutdown(std::net::Shutdown::Both);
                     self.write_stream = None;
                 }
             }
@@ -79,7 +87,10 @@ impl WeftAppdIpc {
         }
     }
 
-    fn try_decode_frames(&mut self) -> Vec<AppdToCompositor> {
+    /// Decodes the complete frames in the buffer, and reports whether the
+    /// stream can no longer be trusted: after an oversized or undecodable
+    /// frame, descriptors could be paired with the wrong messages.
+    fn try_decode_frames(&mut self) -> (Vec<AppdToCompositor>, bool) {
         let mut out = Vec::new();
         loop {
             if self.read_buf.len() < 4 {
@@ -93,9 +104,7 @@ impl WeftAppdIpc {
             ]) as usize;
             if declared_len > MAX_FRAME_LEN {
                 tracing::warn!(declared_len, "appd IPC frame too large; disconnecting");
-                self.write_stream = None;
-                self.read_buf.clear();
-                break;
+                return (out, true);
             }
             if self.read_buf.len() < 4 + declared_len {
                 break;
@@ -103,11 +112,14 @@ impl WeftAppdIpc {
             let frame_end = 4 + declared_len;
             match frame_decode::<AppdToCompositor>(&self.read_buf[..frame_end]) {
                 Ok(msg) => out.push(msg),
-                Err(e) => tracing::warn!(?e, "appd IPC frame decode error"),
+                Err(e) => {
+                    tracing::warn!(?e, "appd IPC frame decode error; disconnecting");
+                    return (out, true);
+                }
             }
             self.read_buf.drain(..frame_end);
         }
-        out
+        (out, false)
     }
 
     /// Reads what is available, keeping descriptors that arrive with the
@@ -146,17 +158,28 @@ impl WeftAppdIpc {
                 }
             }
         }
-        if self.fds.len() > MAX_PENDING_FDS {
+        let (messages, broken) = self.try_decode_frames();
+        eof |= broken;
+        let claimed = messages
+            .iter()
+            .filter(|m| matches!(m, AppdToCompositor::AttachClient { .. }))
+            .count();
+        if self.fds.len().saturating_sub(claimed) > MAX_PENDING_FDS {
             tracing::warn!("appd sent descriptors without messages; disconnecting");
             eof = true;
         }
-        let messages = self.try_decode_frames();
-        if eof {
-            self.write_stream = None;
-            self.read_buf.clear();
-            self.fds.clear();
-        }
         (messages, eof)
+    }
+
+    /// Forgets the appd connection once its read source is gone. The
+    /// sessions it started are closed: they belong to that appd.
+    fn disconnect(&mut self) -> Vec<ClientId> {
+        self.connected = false;
+        self.write_stream = None;
+        self.read_buf.clear();
+        self.fds.clear();
+        self.reported.clear();
+        self.sessions.drain().map(|(_, client)| client).collect()
     }
 }
 
@@ -299,11 +322,7 @@ pub fn setup(state: &mut WeftCompositorState) -> anyhow::Result<()> {
                         Ok((stream, _addr)) => {
                             // One appd at a time: a second connection while
                             // one is live is refused rather than replacing it.
-                            if state
-                                .appd_ipc
-                                .as_ref()
-                                .is_some_and(|ipc| ipc.write_stream.is_some())
-                            {
+                            if state.appd_ipc.as_ref().is_some_and(|ipc| ipc.connected) {
                                 tracing::warn!(
                                     "second compositor IPC connection refused; weft-appd is connected"
                                 );
@@ -319,6 +338,7 @@ pub fn setup(state: &mut WeftCompositorState) -> anyhow::Result<()> {
                             };
                             if let Some(ipc) = &mut state.appd_ipc {
                                 ipc.write_stream = Some(write_clone);
+                                ipc.connected = true;
                                 ipc.read_buf.clear();
                                 ipc.fds.clear();
                             }
@@ -338,8 +358,20 @@ pub fn setup(state: &mut WeftCompositorState) -> anyhow::Result<()> {
                                     }
                                     if eof {
                                         tracing::info!(
-                                            "weft-appd disconnected from compositor IPC"
+                                            "weft-appd disconnected from compositor IPC; \
+                                             closing its sessions' clients"
                                         );
+                                        let orphans = state
+                                            .appd_ipc
+                                            .as_mut()
+                                            .map(WeftAppdIpc::disconnect)
+                                            .unwrap_or_default();
+                                        for client in orphans {
+                                            state.display_handle.backend_handle().kill_client(
+                                                client,
+                                                DisconnectReason::ConnectionClosed,
+                                            );
+                                        }
                                         Ok(PostAction::Remove)
                                     } else {
                                         Ok(PostAction::Continue)
@@ -422,6 +454,64 @@ mod tests {
         let (messages, eof) = ipc.on_read(&compositor);
         assert!(messages.is_empty());
         assert!(eof);
+        ipc.disconnect();
         assert!(ipc.fds.is_empty());
+    }
+
+    #[test]
+    fn a_burst_of_attachments_is_not_mistaken_for_abuse() {
+        let (appd, compositor) = UnixStream::pair().unwrap();
+        compositor.set_nonblocking(true).unwrap();
+        let mut keep = Vec::new();
+        for session_id in 0..(MAX_PENDING_FDS as u64 + 4) {
+            let (shell, client) = UnixStream::pair().unwrap();
+            let frame = frame_encode(&AppdToCompositor::AttachClient {
+                session_id,
+                app_id: "org.weft.demo.counter".into(),
+            })
+            .unwrap();
+            send_with_fd(&appd, &frame, &client);
+            // A plain frame between attachments keeps its place.
+            let plain = frame_encode(&AppdToCompositor::AppFocusRequest { session_id }).unwrap();
+            use std::io::Write;
+            (&appd).write_all(&plain).unwrap();
+            keep.push(shell);
+        }
+        let mut ipc = WeftAppdIpc::new(PathBuf::from("/nonexistent"));
+        let mut messages = Vec::new();
+        let mut connections = 0;
+        loop {
+            let (batch, eof) = ipc.on_read(&compositor);
+            assert!(!eof, "a legitimate burst ended the connection");
+            if batch.is_empty() {
+                break;
+            }
+            // As the handler does, each attachment takes its connection.
+            for message in &batch {
+                if matches!(message, AppdToCompositor::AttachClient { .. }) {
+                    ipc.fds
+                        .pop_front()
+                        .expect("an attachment without its connection");
+                    connections += 1;
+                }
+            }
+            messages.extend(batch);
+        }
+        assert_eq!(connections, MAX_PENDING_FDS + 4);
+        assert_eq!(messages.len(), 2 * (MAX_PENDING_FDS + 4));
+        assert!(ipc.fds.is_empty());
+    }
+
+    #[test]
+    fn an_undecodable_frame_ends_the_connection() {
+        let (appd, compositor) = UnixStream::pair().unwrap();
+        compositor.set_nonblocking(true).unwrap();
+        use std::io::Write;
+        let mut frame = 3u32.to_le_bytes().to_vec();
+        frame.extend_from_slice(&[0xc1, 0xc1, 0xc1]);
+        (&appd).write_all(&frame).unwrap();
+        let mut ipc = WeftAppdIpc::new(PathBuf::from("/nonexistent"));
+        let (_, eof) = ipc.on_read(&compositor);
+        assert!(eof);
     }
 }

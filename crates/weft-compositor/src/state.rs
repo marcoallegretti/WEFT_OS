@@ -67,6 +67,14 @@ pub struct SessionBinding {
     pub disconnected: smithay::reexports::calloop::channel::Sender<u64>,
 }
 
+/// Whether `client` connected through the display socket rather than
+/// through a connection weft-appd created for an application session.
+pub fn outside_sessions(client: &Client) -> bool {
+    client
+        .get_data::<WeftClientState>()
+        .is_none_or(|data| data.session.is_none())
+}
+
 impl ClientData for WeftClientState {
     fn initialized(&self, _client_id: ClientId) {}
     fn disconnected(&self, _client_id: ClientId, _reason: DisconnectReason) {
@@ -140,7 +148,10 @@ impl WeftCompositorState {
     ) -> Self {
         let compositor_state = CompositorState::new::<Self>(&display_handle);
         let xdg_shell_state = XdgShellState::new::<Self>(&display_handle);
-        let layer_shell_state = WlrLayerShellState::new::<Self>(&display_handle);
+        // Layer surfaces and input methods are shell-level: an application
+        // session's client is not offered them.
+        let layer_shell_state =
+            WlrLayerShellState::new_with_filter::<Self, _>(&display_handle, outside_sessions);
         let shm_state = ShmState::new::<Self>(&display_handle, vec![]);
         let dmabuf_state = DmabufState::new();
         let output_manager_state = OutputManagerState::new_with_xdg_output::<Self>(&display_handle);
@@ -148,7 +159,7 @@ impl WeftCompositorState {
         let presentation_state = PresentationState::new::<Self>(&display_handle, 1);
         let text_input_state = TextInputManagerState::new::<Self>(&display_handle);
         let input_method_state =
-            InputMethodManagerState::new::<Self, _>(&display_handle, |_client| true);
+            InputMethodManagerState::new::<Self, _>(&display_handle, outside_sessions);
         let pointer_constraints_state = PointerConstraintsState::new::<Self>(&display_handle);
         let cursor_shape_state = CursorShapeManagerState::new::<Self>(&display_handle);
         let weft_shell_state = WeftShellState::new::<Self>(&display_handle);

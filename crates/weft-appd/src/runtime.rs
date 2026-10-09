@@ -464,6 +464,9 @@ fn attach_client(
     session_id: u64,
     app_id: &str,
 ) -> Result<std::os::unix::net::UnixStream, String> {
+    if !tx.is_connected() {
+        return Err("weft-compositor is not connected, so the app cannot show a window".to_owned());
+    }
     let (shell, compositor) = std::os::unix::net::UnixStream::pair()
         .map_err(|e| format!("cannot create the app's Wayland connection: {e}"))?;
     tx.try_send(crate::compositor_client::Outbound {
