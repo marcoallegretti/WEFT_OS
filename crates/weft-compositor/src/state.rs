@@ -657,11 +657,15 @@ impl Dispatch<ZweftShellWindowV1, WeftShellWindowData> for WeftCompositorState {
         state: &mut Self,
         _client: wayland_server::backend::ClientId,
         resource: &ZweftShellWindowV1,
-        _data: &WeftShellWindowData,
+        data: &WeftShellWindowData,
     ) {
         // A panel that goes away, by destroy or with its client, releases
-        // its reserved strip; applications take the space back.
+        // its reserved strip and its window slot; applications take the
+        // space back.
         if state.weft_shell_state.remove_panel(resource) {
+            if let Some(surface) = &data.surface {
+                state.window_closed(surface);
+            }
             state.layout_app_windows();
         }
     }

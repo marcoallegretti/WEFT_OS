@@ -6,8 +6,10 @@
 //! panel reserves. A session's first window, a clicked window (the panel
 //! included, which then shows the shell's home over the applications) and
 //! one appd asks to activate is raised to the top, marked activated and
-//! given keyboard focus. When the focused window closes, the topmost
-//! remaining application window gets focus.
+//! given keyboard focus; nothing else changes the order, and a window that
+//! maps without taking focus goes beneath the window in front. When the
+//! focused window closes, the topmost remaining application window gets
+//! focus.
 
 use smithay::desktop::Window;
 use smithay::reexports::wayland_protocols::xdg::shell::server::xdg_toplevel;
@@ -73,10 +75,19 @@ impl WeftCompositorState {
         }
     }
 
-    /// Sizes the panels to the output, places them at its origin and keeps
-    /// them beneath every application window.
+    /// Sizes the panels to the output and keeps them beneath every
+    /// application window; used when a panel registers.
     pub fn fit_panels(&mut self) {
-        let Some(geometry) = self
+        self.place_windows(true, None);
+    }
+
+    /// Places every window for the current output and reservations: panels
+    /// fill the output, application windows the work area. The stacking
+    /// order is kept, except that `lower_panels` moves the panels beneath
+    /// the applications, and `below_top` slips that window under the
+    /// window that was on top.
+    pub fn place_windows(&mut self, lower_panels: bool, below_top: Option<&Window>) {
+        let Some(output) = self
             .space
             .outputs()
             .next()
@@ -84,42 +95,36 @@ impl WeftCompositorState {
         else {
             return;
         };
-        let panels: Vec<Window> = self
-            .space
-            .elements()
-            .filter(|window| self.is_panel(window))
-            .cloned()
-            .collect();
-        if panels.is_empty() {
+        let Some(area) = self.work_area() else {
             return;
+        };
+        let mut order: Vec<Window> = self.space.elements().cloned().collect();
+        if lower_panels {
+            let (panels, apps): (Vec<Window>, Vec<Window>) =
+                order.into_iter().partition(|window| self.is_panel(window));
+            order = panels.into_iter().chain(apps).collect();
         }
-        for panel in &panels {
-            if let Some(toplevel) = panel.toplevel() {
+        if let Some(window) = below_top
+            && let Some(position) = order.iter().position(|w| w == window)
+            && position + 1 == order.len()
+            && order.len() > 1
+        {
+            order.swap(position, position - 1);
+        }
+        for window in &order {
+            let panel = self.is_panel(window);
+            let geometry = if panel { output } else { area };
+            if let Some(toplevel) = window.toplevel() {
                 toplevel.with_pending_state(|state| {
                     state.size = Some(geometry.size);
                     state.states.set(xdg_toplevel::State::Maximized);
                 });
                 toplevel.send_pending_configure();
-                tracing::debug!(
-                    width = geometry.size.w,
-                    height = geometry.size.h,
-                    "panel fitted to the output"
-                );
             }
-            self.space.map_element(panel.clone(), geometry.loc, false);
+            // Mapping puts a window on top; mapping all of them in `order`
+            // leaves exactly that order.
+            self.space.map_element(window.clone(), geometry.loc, false);
         }
-        // Raising every other window, in its current order, leaves the
-        // panels at the bottom.
-        let others: Vec<Window> = self
-            .space
-            .elements()
-            .filter(|window| !self.is_panel(window))
-            .cloned()
-            .collect();
-        for window in &others {
-            self.space.raise_element(window, false);
-        }
-        self.layout_app_windows();
     }
 
     /// Maps a new toplevel. The first window a session maps in its lifetime
@@ -144,11 +149,13 @@ impl WeftCompositorState {
         self.space.map_element(window.clone(), (0, 0), false);
         if self.is_panel(&window) {
             self.fit_panels();
-        } else {
+        } else if first {
             self.layout_app_windows();
-            if first {
-                self.activate_window(&window);
-            }
+            self.activate_window(&window);
+        } else {
+            // A window that does not take focus does not cover the window
+            // in front either, the shell's home included.
+            self.place_windows(false, Some(&window));
         }
     }
 
@@ -244,29 +251,10 @@ impl WeftCompositorState {
             .map_or((0, 0, 0, 0), |a| (a.loc.x, a.loc.y, a.size.w, a.size.h))
     }
 
-    /// Places every application window to fill the work area, so none
-    /// covers the panel's reserved strips.
+    /// Lays the windows out again after the work area changed, keeping the
+    /// stacking order.
     pub fn layout_app_windows(&mut self) {
-        let Some(area) = self.work_area() else {
-            return;
-        };
-        let apps: Vec<Window> = self
-            .space
-            .elements()
-            .filter(|window| !self.is_panel(window))
-            .cloned()
-            .collect();
-        for window in apps {
-            if let Some(toplevel) = window.toplevel() {
-                toplevel.with_pending_state(|state| {
-                    state.size = Some(area.size);
-                    state.states.set(xdg_toplevel::State::Maximized);
-                });
-                toplevel.send_pending_configure();
-            }
-            // Re-mapped in stacking order, so the order is kept.
-            self.space.map_element(window.clone(), area.loc, false);
-        }
+        self.place_windows(false, None);
     }
 
     /// Sends the configure for every toplevel whose pending state changed,

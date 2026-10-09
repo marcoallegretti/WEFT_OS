@@ -6,7 +6,7 @@ panel, and weft-appd with two test applications, one red and one blue, on a
 nested desktop (see session.py). Each application page switches between its
 colour and a lighter shade on every key press. In the presented pixels:
 
-- the panel fills the compositor output and stays beneath the applications;
+- the panel fills the compositor output and starts beneath the applications;
 - application windows fill the work area: the output less the strip the
   shell reserves for its taskbar along the bottom, which stays visible;
 - each newly launched application is shown on top and receives keys;
