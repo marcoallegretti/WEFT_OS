@@ -77,7 +77,7 @@ See `docs/building.md` for full instructions including Wasm component builds, Ni
 
 Three jobs on every push and pull request:
 
-- `cross-platform` — fmt, clippy, tests on Ubuntu and Windows
+- `portable` — fmt, clippy and tests for the crates that need no Linux system libraries
 - `linux-only` — clippy and tests for compositor and shell crates
 - `servo-embed-linux` — `cargo check --features servo-embed` for both servo crates
 

@@ -2,7 +2,7 @@
 
 ## Prerequisites
 
-Linux (x86_64 or aarch64). Building on Windows is supported for workspace validation only; runtime components require Linux kernel interfaces.
+Linux (x86_64 or aarch64). WEFT OS is built and validated on Linux only; runtime components require Linux kernel interfaces.
 
 System packages (openSUSE):
 
@@ -114,6 +114,6 @@ See `infra/nixos/weft-packages.nix` for the package derivations. Its `outputHash
 
 Three jobs run on every push to `main` and on pull requests:
 
-- `cross-platform` — fmt, clippy, tests on Ubuntu and Windows (excludes Wayland crates)
+- `portable` — fmt, clippy, tests for the crates that need no Linux system libraries (excludes Wayland crates)
 - `linux-only` — clippy and tests for `weft-compositor`, `weft-servo-shell`, `weft-app-shell`
 - `servo-embed-linux` — `cargo check --features servo-embed` for servo-shell and app-shell
