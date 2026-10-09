@@ -122,10 +122,17 @@ fn handle_pointer_button<B: InputBackend>(
     let button = event.button_code();
     let button_state = event.state();
 
-    // On press: focus the surface under the pointer.
+    // On press: activate the window under the pointer, which raises an
+    // application window and focuses it.
     if button_state == ButtonState::Pressed {
         let pointer_location = state.pointer_location;
-        if let Some((surface, _loc)) = surface_under(state, pointer_location) {
+        let window = state
+            .space
+            .element_under(pointer_location)
+            .map(|(window, _)| window.clone());
+        if let Some(window) = window {
+            state.activate_window(&window);
+        } else if let Some((surface, _loc)) = surface_under(state, pointer_location) {
             if let Some(keyboard) = state.seat.get_keyboard() {
                 keyboard.set_focus(state, Some(surface), serial);
             }

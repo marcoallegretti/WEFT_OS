@@ -550,6 +550,7 @@ fn connector_connected(
     tracing::info!(?name, "output connected");
     let (pw, ph) = (wl_mode.size.w, wl_mode.size.h);
     state.weft_shell_state.reconfigure_panels(0, 0, pw, ph);
+    state.fit_panels();
     state.weft_shell_state.retain_alive_panels();
     render_output(state, node, crtc);
 }
@@ -578,6 +579,7 @@ fn connector_disconnected(
         .map(|g| (g.size.w, g.size.h))
         .unwrap_or((0, 0));
     state.weft_shell_state.reconfigure_panels(0, 0, pw, ph);
+    state.fit_panels();
     state.weft_shell_state.retain_alive_panels();
 }
 

@@ -11,6 +11,10 @@ pub enum Request {
     TerminateApp {
         session_id: u64,
     },
+    /// Brings the session's window to the front with keyboard focus.
+    ActivateApp {
+        session_id: u64,
+    },
     QueryRunning,
     QueryAppState {
         session_id: u64,

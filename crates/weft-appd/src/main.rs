@@ -544,6 +544,30 @@ pub(crate) async fn dispatch(req: Request, registry: &Registry) -> Response {
                 }
             }
         }
+        Request::ActivateApp { session_id } => {
+            let reg = registry.lock().await;
+            let state = reg.state(session_id);
+            if !matches!(state, AppStateKind::Running) {
+                return Response::Error {
+                    code: 404,
+                    message: format!("session {session_id} is not running"),
+                };
+            }
+            // The compositor owns stacking and focus; appd asks it to act
+            // for a session it supervises.
+            let sent = reg.compositor_tx.as_ref().is_some_and(|tx| {
+                tx.try_send(weft_ipc_types::AppdToCompositor::AppFocusRequest { session_id }.into())
+                    .is_ok()
+            });
+            if sent {
+                Response::AppState { session_id, state }
+            } else {
+                Response::Error {
+                    code: 503,
+                    message: "weft-compositor is not connected".to_owned(),
+                }
+            }
+        }
         Request::QueryRunning => {
             let sessions = registry.lock().await.running_sessions();
             Response::RunningApps { sessions }
@@ -1274,6 +1298,51 @@ mod tests {
         assert!(stopped.is_ok(), "session did not stop");
         assert!(registry.lock().await.ipc_sender_for(session_id).is_none());
         assert!(!session_ipc_socket_path(session_id).unwrap().exists());
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn activation_reaches_the_compositor_only_for_running_sessions() {
+        let registry = make_registry();
+        let (tx, mut compositor) = tokio::sync::mpsc::channel(8);
+        let connected = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true));
+        registry.lock().await.compositor_tx = Some(compositor_client::CompositorSender::new(
+            tx,
+            connected.clone(),
+        ));
+        let session_id = registry.lock().await.launch("org.example.active");
+
+        // Starting, then not found: refused, nothing sent.
+        let starting = dispatch(Request::ActivateApp { session_id }, &registry).await;
+        let absent = dispatch(Request::ActivateApp { session_id: 999 }, &registry).await;
+        for refused in [&starting, &absent] {
+            assert!(
+                matches!(refused, Response::Error { code: 404, .. }),
+                "{refused:?}"
+            );
+        }
+        assert!(compositor.try_recv().is_err());
+
+        registry
+            .lock()
+            .await
+            .set_state(session_id, AppStateKind::Running);
+        let activated = dispatch(Request::ActivateApp { session_id }, &registry).await;
+        assert!(
+            matches!(activated, Response::AppState { session_id: s, state: AppStateKind::Running } if s == session_id),
+            "{activated:?}"
+        );
+        assert!(matches!(
+            compositor.try_recv().map(|out| out.msg),
+            Ok(weft_ipc_types::AppdToCompositor::AppFocusRequest { session_id: s }) if s == session_id
+        ));
+
+        // Without the compositor connection the request is refused.
+        drop(compositor);
+        let unsent = dispatch(Request::ActivateApp { session_id }, &registry).await;
+        assert!(
+            matches!(unsent, Response::Error { code: 503, .. }),
+            "{unsent:?}"
+        );
     }
 
     #[tokio::test(flavor = "current_thread")]

@@ -274,7 +274,14 @@ fn handle_message(state: &mut WeftCompositorState, msg: AppdToCompositor) {
             }
         }
         AppdToCompositor::AppFocusRequest { session_id } => {
-            tracing::debug!(session_id, "AppFocusRequest");
+            if state.activate_session(session_id) {
+                tracing::info!(session_id, "session activated");
+            } else {
+                tracing::info!(
+                    session_id,
+                    "activation requested for a session with no window"
+                );
+            }
         }
     }
 }
