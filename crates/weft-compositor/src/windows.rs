@@ -6,8 +6,9 @@
 //! panel reserves. A session's first window, a clicked window (the panel
 //! included, which then shows the shell's home over the applications) and
 //! one appd asks to activate is raised to the top, marked activated and
-//! given keyboard focus; nothing else changes the order, and a window that
-//! maps without taking focus goes beneath the window in front. When the
+//! given keyboard focus; apart from a panel being lowered when it
+//! registers, nothing else changes the order, and a window that maps
+//! without taking focus goes beneath the window in front. When the
 //! focused window closes, the topmost remaining application window gets
 //! focus.
 
@@ -79,6 +80,21 @@ impl WeftCompositorState {
     /// application window; used when a panel registers.
     pub fn fit_panels(&mut self) {
         self.place_windows(true, None);
+        // A shell that took focus before registering as the panel, such as
+        // one restarted while applications run, hands it to the window that
+        // is now in front.
+        let focus_on_panel = self
+            .seat
+            .get_keyboard()
+            .and_then(|keyboard| keyboard.current_focus())
+            .is_some_and(|focus| self.is_panel_surface(&focus));
+        let front = self.space.elements().last().cloned();
+        if focus_on_panel
+            && let Some(front) = front
+            && !self.is_panel(&front)
+        {
+            self.activate_window(&front);
+        }
     }
 
     /// Places every window for the current output and reservations: panels
@@ -87,17 +103,14 @@ impl WeftCompositorState {
     /// the applications, and `below_top` slips that window under the
     /// window that was on top.
     pub fn place_windows(&mut self, lower_panels: bool, below_top: Option<&Window>) {
-        let Some(output) = self
+        // Without an output the order still changes; windows keep their
+        // size and place until one is mapped.
+        let output = self
             .space
             .outputs()
             .next()
-            .and_then(|output| self.space.output_geometry(output))
-        else {
-            return;
-        };
-        let Some(area) = self.work_area() else {
-            return;
-        };
+            .and_then(|output| self.space.output_geometry(output));
+        let area = self.work_area();
         let mut order: Vec<Window> = self.space.elements().cloned().collect();
         if lower_panels {
             let (panels, apps): (Vec<Window>, Vec<Window>) =
@@ -113,7 +126,11 @@ impl WeftCompositorState {
         }
         for window in &order {
             let panel = self.is_panel(window);
-            let geometry = if panel { output } else { area };
+            let Some(geometry) = (if panel { output } else { area }) else {
+                let location = self.space.element_location(window).unwrap_or_default();
+                self.space.map_element(window.clone(), location, false);
+                continue;
+            };
             if let Some(toplevel) = window.toplevel() {
                 toplevel.with_pending_state(|state| {
                     state.size = Some(geometry.size);

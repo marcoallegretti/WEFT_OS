@@ -661,7 +661,8 @@ impl Dispatch<ZweftShellWindowV1, WeftShellWindowData> for WeftCompositorState {
     ) {
         // A panel that goes away, by destroy or with its client, releases
         // its reserved strip and its window slot; applications take the
-        // space back.
+        // space back. The surface's window is not mapped again if it
+        // registers once more.
         if state.weft_shell_state.remove_panel(resource) {
             if let Some(surface) = &data.surface {
                 state.window_closed(surface);
