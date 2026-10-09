@@ -88,6 +88,7 @@ python3 tests/frame/check_counter.py   # Counter round trip through the session 
 python3 tests/frame/check_notes.py     # Notes stores exactly what is typed, refuses stale saves
 python3 tests/frame/check_app_data.py  # Notes data from the earlier layout is moved and kept
 python3 tests/frame/check_confinement.py  # an app page reaches only its UI files and its session bridge
+python3 tests/frame/check_update.py    # updates leave running sessions on their revision; failed updates, rollback and uninstall
 ```
 
 ## Demo apps (wasm32-wasip2)
