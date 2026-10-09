@@ -16,9 +16,12 @@ scenario passes a different set of `--grant` and `--preopen` arguments:
   denied;
 - a host-specific fetch grant: requests to that host return their real
   status (200, 404, and 302 without following the redirect to another
-  host); requests to another host, a forged `Host` header, a method that
-  injects a request line and a `file:` URL are refused;
-- a wildcard fetch grant: the other host is reachable.
+  host); requests to another host, credentials in the URL, a forged
+  `Host` header, a method that injects a request line and a `file:` URL
+  are refused;
+- a wildcard fetch grant, and a grant for the name `localhost`: the local
+  server is refused, since only an address named in a grant reaches this
+  machine or a local network; the connection is never made.
 
 It also checks that the runtime refuses, with a specific error, filesystem
 capabilities passed as `--grant`, unknown capabilities and preopens
@@ -42,8 +45,13 @@ APP_ID = "org.weft.test.grants"
 NOT_GRANTED = "is not granted"
 
 
+# Paths the test server was asked for.
+REQUESTS = []
+
+
 class Handler(http.server.BaseHTTPRequestHandler):
     def do_GET(self):
+        REQUESTS.append(self.path)
         if self.path == "/ok":
             self.send_response(200)
         elif self.path == "/redirect":
@@ -75,7 +83,8 @@ class Runner:
             f"fetch-ok http://127.0.0.1:{port}/ok\n"
             f"fetch-missing http://127.0.0.1:{port}/missing\n"
             f"fetch-redirect http://127.0.0.1:{port}/redirect\n"
-            f"fetch-other-host http://localhost:{port}/ok\n")
+            f"fetch-other-host http://localhost:{port}/ok\n"
+            f"fetch-credentials http://user:secret@127.0.0.1:{port}/ok\n")
 
     def run(self, *arguments, expect_success=True):
         command = [str(self.runtime), APP_ID, "1", "--module", str(self.module),
@@ -140,12 +149,20 @@ def check(runner, data):
     expect(probes, "fetch-missing", True, contains="404")
     expect(probes, "fetch-redirect", True, contains="302")
     expect(probes, "fetch-other-host", False, contains=NOT_GRANTED)
+    expect(probes, "fetch-credentials", False, contains="credentials")
     expect(probes, "fetch-host-header", False, contains="set by the runtime")
     expect(probes, "fetch-bad-method", False, contains="unsupported HTTP method")
     expect(probes, "fetch-file-scheme", False, contains="unsupported URL scheme")
 
+    local = "local network"
+    REQUESTS.clear()
     _, probes = runner.run("--grant", "net:fetch:*")
-    expect(probes, "fetch-other-host", True, contains="200")
+    expect(probes, "fetch-other-host", False, contains=local)
+    expect(probes, "fetch-ok", False, contains=local)
+    _, probes = runner.run("--grant", "net:fetch:localhost")
+    expect(probes, "fetch-other-host", False, contains=local)
+    if REQUESTS:
+        raise AssertionError(f"refused fetches reached the server: {REQUESTS}")
 
     for arguments, message in (
             (["--grant", "fs:rw:app-data"], "is not granted through --grant"),
