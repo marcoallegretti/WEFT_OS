@@ -295,9 +295,12 @@ fn run_module(
     if let Some(socket_path) = ipc_socket {
         ctx_builder.env("WEFT_IPC_SOCKET", socket_path);
         if let Some(ipc) = ipc::IpcState::connect(socket_path) {
+            ipc.exit_on_hangup().context("watch the IPC connection")?;
             *ipc_state.lock().unwrap_or_else(|p| p.into_inner()) = Some(ipc);
         } else {
-            tracing::warn!("weft:app/ipc: could not connect to IPC socket {socket_path}");
+            // Without its connection the session cannot be reached or
+            // ended; the runtime would only be left behind.
+            anyhow::bail!("cannot connect to the IPC socket {socket_path}");
         }
     }
 

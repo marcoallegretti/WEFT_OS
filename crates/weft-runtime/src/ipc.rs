@@ -5,8 +5,14 @@
 //! which would split it into several messages. Received data is buffered
 //! up to one message; a peer that sends a longer line, or closes the
 //! connection, ends it for good.
+//!
+//! The connection is the session: once it has ended, by weft-appd closing
+//! it or stopping, the runtime exits, whatever the component is doing, and
+//! a runtime that cannot connect does not start, so no runtime outlives the
+//! weft-appd that started it.
 
 use std::io::{Read, Write};
+use std::os::fd::AsRawFd;
 use std::os::unix::net::UnixStream;
 
 /// The longest message in either direction, in bytes.
@@ -37,6 +43,19 @@ impl IpcState {
     pub fn connect(path: &str) -> Option<Self> {
         let socket = UnixStream::connect(path).ok()?;
         Self::new(socket)
+    }
+
+    /// Exits the process once the connection has ended.
+    pub fn exit_on_hangup(&self) -> std::io::Result<()> {
+        let socket = self.socket.try_clone()?;
+        std::thread::Builder::new()
+            .name("ipc-hangup".into())
+            .spawn(move || {
+                wait_for_hangup(&socket);
+                tracing::info!("the session's IPC connection ended; exiting");
+                std::process::exit(0);
+            })?;
+        Ok(())
     }
 
     fn new(socket: UnixStream) -> Option<Self> {
@@ -141,9 +160,61 @@ impl IpcState {
     }
 }
 
+/// The peer shutting down its side; elsewhere only a full hangup is seen.
+#[cfg(any(target_os = "linux", target_os = "android"))]
+const PEER_SHUTDOWN: libc::c_short = libc::POLLRDHUP;
+#[cfg(not(any(target_os = "linux", target_os = "android")))]
+const PEER_SHUTDOWN: libc::c_short = 0;
+
+/// Blocks until the peer has closed `socket` or it was shut down. Data
+/// waiting to be read neither wakes it nor is consumed.
+fn wait_for_hangup(socket: &UnixStream) {
+    let mut pfd = libc::pollfd {
+        fd: socket.as_raw_fd(),
+        events: PEER_SHUTDOWN,
+        revents: 0,
+    };
+    loop {
+        let ready = unsafe { libc::poll(&mut pfd, 1, -1) };
+        if ready < 0 {
+            if std::io::Error::last_os_error().kind() == std::io::ErrorKind::Interrupted {
+                continue;
+            }
+            return;
+        }
+        if pfd.revents & (PEER_SHUTDOWN | libc::POLLHUP | libc::POLLERR | libc::POLLNVAL) != 0 {
+            return;
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_hangup_is_seen_and_pending_data_is_not() {
+        let (ours, mut theirs) = UnixStream::pair().unwrap();
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
+        let watched = ours.try_clone().unwrap();
+        std::thread::spawn(move || {
+            wait_for_hangup(&watched);
+            let _ = done_tx.send(());
+        });
+        theirs.write_all(b"message\n").unwrap();
+        assert!(
+            done_rx
+                .recv_timeout(std::time::Duration::from_millis(300))
+                .is_err()
+        );
+        drop(theirs);
+        done_rx
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .expect("the hangup was not seen");
+        // The message is still there to read.
+        let mut ipc = IpcState::new(ours).unwrap();
+        assert_eq!(ipc.recv().as_deref(), Some("message"));
+    }
 
     fn pair() -> (IpcState, UnixStream) {
         let (ours, theirs) = UnixStream::pair().unwrap();
