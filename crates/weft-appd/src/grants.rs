@@ -35,6 +35,25 @@ pub(crate) struct SessionGrants {
     pub imports: Vec<Capability>,
 }
 
+/// Why a launch is refused, with the error code reported to the client:
+/// 400 for a malformed app ID, 404 for a package that is not installed, 403
+/// for a package this host will not run as declared and 500 for a host
+/// fault.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) struct Refusal {
+    pub code: u32,
+    pub message: String,
+}
+
+impl Refusal {
+    fn new(code: u32, message: impl Into<String>) -> Self {
+        Self {
+            code,
+            message: message.into(),
+        }
+    }
+}
+
 /// Where the host resources behind filesystem capabilities live.
 pub(crate) struct HostDirs {
     /// Root under which each app's private data directory is created.
@@ -44,12 +63,15 @@ pub(crate) struct HostDirs {
 }
 
 impl HostDirs {
-    pub fn from_env() -> Result<Self, String> {
+    pub fn from_env() -> Result<Self, Refusal> {
         let home = std::env::var_os("HOME")
             .map(PathBuf::from)
-            .ok_or("HOME is not set")?;
+            .filter(|home| home.is_absolute())
+            .ok_or_else(|| Refusal::new(500, "HOME is not set to an absolute path"))?;
+        // The XDG base directory specification ignores relative values.
         let config = std::env::var_os("XDG_CONFIG_HOME")
             .map(PathBuf::from)
+            .filter(|dir| dir.is_absolute())
             .unwrap_or_else(|| home.join(".config"));
         Ok(Self {
             app_data_root: home.join(".local/share/weft/apps"),
@@ -59,7 +81,7 @@ impl HostDirs {
 }
 
 /// Reads the package manifest of `app_id` and derives its grants.
-pub(crate) fn for_app(app_id: &str) -> Result<SessionGrants, String> {
+pub(crate) fn for_app(app_id: &str) -> Result<SessionGrants, Refusal> {
     #[derive(serde::Deserialize)]
     struct Package {
         capabilities: Option<Vec<String>>,
@@ -69,61 +91,98 @@ pub(crate) fn for_app(app_id: &str) -> Result<SessionGrants, String> {
         package: Package,
     }
 
+    if !weft_ipc_types::package::is_valid_app_id(app_id) {
+        return Err(Refusal::new(400, "invalid app ID"));
+    }
     let manifest = crate::app_store_roots()
         .into_iter()
         .map(|root| root.join(app_id).join("wapp.toml"))
         .find(|path| path.exists())
-        .ok_or_else(|| format!("package {app_id} is not installed"))?;
+        .ok_or_else(|| Refusal::new(404, format!("package {app_id} is not installed")))?;
     let text = std::fs::read_to_string(&manifest)
-        .map_err(|e| format!("cannot read {}: {e}", manifest.display()))?;
-    let manifest: Manifest =
-        toml::from_str(&text).map_err(|e| format!("invalid {}: {e}", manifest.display()))?;
+        .map_err(|e| Refusal::new(500, format!("cannot read {}: {e}", manifest.display())))?;
+    let manifest: Manifest = toml::from_str(&text)
+        .map_err(|e| Refusal::new(403, format!("invalid {}: {e}", manifest.display())))?;
     let declared = manifest.package.capabilities.unwrap_or_default();
-    derive(app_id, &declared, &HostDirs::from_env()?)
+    derive(app_id, &declared, HostDirs::from_env)
 }
 
-/// Derives grants for the declared capabilities. Creates the app's private
-/// data directory when a data capability is declared.
+/// Derives grants for the declared capabilities. Every capability is
+/// checked before host directories are resolved or the app's data
+/// directory is created, so a refused launch leaves nothing behind.
 pub(crate) fn derive(
     app_id: &str,
     declared: &[String],
-    host: &HostDirs,
-) -> Result<SessionGrants, String> {
-    let mut grants = SessionGrants::default();
+    host_dirs: impl FnOnce() -> Result<HostDirs, Refusal>,
+) -> Result<SessionGrants, Refusal> {
+    let mut capabilities = Vec::new();
     for text in declared {
-        let capability: Capability = text.parse().map_err(|e| format!("{e}"))?;
-        match capability {
-            Capability::AppData(access) => {
-                let dir = host.app_data_root.join(app_id).join("data");
-                std::fs::create_dir_all(&dir)
-                    .map_err(|e| format!("cannot create {}: {e}", dir.display()))?;
-                grant_dir(&mut grants, dir, "/data", access);
-            }
-            Capability::Documents(access) => {
-                let dir = host.documents.clone().ok_or_else(|| {
-                    format!("{capability} requested, but no documents directory is configured")
+        let capability: Capability =
+            text.parse()
+                .map_err(|e: weft_ipc_types::capability::UnknownCapability| {
+                    Refusal::new(403, e.to_string())
                 })?;
-                grant_dir(&mut grants, dir, "/xdg/documents", access);
+        if matches!(capability, Capability::GpuCompute | Capability::GpuRender) {
+            return Err(Refusal::new(
+                403,
+                format!("{capability} is not supported by this host"),
+            ));
+        }
+        capabilities.push(capability);
+    }
+
+    let mut grants = SessionGrants::default();
+    let needs_dirs = capabilities
+        .iter()
+        .any(|c| matches!(c, Capability::AppData(_) | Capability::Documents(_)));
+    let host = if needs_dirs { Some(host_dirs()?) } else { None };
+    for capability in capabilities {
+        match (&capability, &host) {
+            (Capability::AppData(access), Some(host)) => {
+                let dir = host.app_data_root.join(app_id).join("data");
+                grant_dir(&mut grants, dir, "/data", *access)?;
             }
-            Capability::Fetch(_)
-            | Capability::Notifications
-            | Capability::ClipboardRead
-            | Capability::ClipboardWrite => {
+            (Capability::Documents(access), Some(host)) => {
+                let dir = host.documents.clone().ok_or_else(|| {
+                    Refusal::new(
+                        403,
+                        format!("{capability} requested, but no documents directory is configured"),
+                    )
+                })?;
+                grant_dir(&mut grants, dir, "/xdg/documents", *access)?;
+            }
+            _ => {
                 if !grants.imports.contains(&capability) {
                     grants.imports.push(capability);
                 }
             }
-            Capability::GpuCompute | Capability::GpuRender => {
-                return Err(format!("{capability} is not supported by this host"));
-            }
+        }
+    }
+    for dir in &grants.dirs {
+        if dir.guest == "/data" {
+            std::fs::create_dir_all(&dir.host).map_err(|e| {
+                Refusal::new(500, format!("cannot create {}: {e}", dir.host.display()))
+            })?;
         }
     }
     Ok(grants)
 }
 
 /// Adds a directory grant; declaring both modes for one directory grants the
-/// wider one.
-fn grant_dir(grants: &mut SessionGrants, host: PathBuf, guest: &'static str, access: Access) {
+/// wider one. The host path must survive the `--preopen HOST::GUEST::MODE`
+/// encoding unchanged: it must be UTF-8 and must not contain `::`.
+fn grant_dir(
+    grants: &mut SessionGrants,
+    host: PathBuf,
+    guest: &'static str,
+    access: Access,
+) -> Result<(), Refusal> {
+    if host.to_str().is_none_or(|path| path.contains("::")) {
+        return Err(Refusal::new(
+            403,
+            format!("{} cannot be granted to a session", host.display()),
+        ));
+    }
     match grants.dirs.iter_mut().find(|dir| dir.guest == guest) {
         Some(existing) => {
             if access == Access::ReadWrite {
@@ -136,21 +195,29 @@ fn grant_dir(grants: &mut SessionGrants, host: PathBuf, guest: &'static str, acc
             access,
         }),
     }
+    Ok(())
 }
 
 /// The documents directory from the XDG user directories configuration
 /// (`user-dirs.dirs`), or None when it is not configured, is disabled (set
-/// to the home directory) or does not exist.
+/// to the home directory) or does not exist. Values are `"$HOME/path"` or
+/// `"/absolute/path"`; the last assignment wins, as when the file is sourced
+/// by a shell. Values with escapes are not interpreted and are ignored.
 fn documents_dir(home: &Path, config: &Path) -> Option<PathBuf> {
     let text = std::fs::read_to_string(config.join("user-dirs.dirs")).ok()?;
-    let value = text.lines().find_map(|line| {
-        line.trim()
-            .strip_prefix("XDG_DOCUMENTS_DIR=")
-            .map(|v| v.trim().trim_matches('"').to_owned())
-    })?;
+    let value = text
+        .lines()
+        .filter_map(|line| line.trim().strip_prefix("XDG_DOCUMENTS_DIR="))
+        .next_back()?
+        .trim();
+    let value = value.strip_prefix('"')?.strip_suffix('"')?;
+    if value.contains('\\') || value.contains('"') {
+        return None;
+    }
     let dir = match value.strip_prefix("$HOME") {
-        Some(rest) => home.join(rest.trim_start_matches('/')),
-        None => PathBuf::from(&value),
+        Some("") => home.to_path_buf(),
+        Some(rest) => home.join(rest.strip_prefix('/')?),
+        None => PathBuf::from(value),
     };
     (dir.is_absolute() && dir != home && dir.is_dir()).then_some(dir)
 }
@@ -166,11 +233,18 @@ mod tests {
         dir
     }
 
-    fn host(root: &Path, documents: Option<PathBuf>) -> HostDirs {
-        HostDirs {
-            app_data_root: root.join("apps"),
-            documents,
+    fn host(root: &Path, documents: Option<PathBuf>) -> impl FnOnce() -> Result<HostDirs, Refusal> {
+        let root = root.to_path_buf();
+        move || {
+            Ok(HostDirs {
+                app_data_root: root.join("apps"),
+                documents,
+            })
         }
+    }
+
+    fn no_host() -> Result<HostDirs, Refusal> {
+        Err(Refusal::new(500, "HOME is not set to an absolute path"))
     }
 
     fn caps(list: &[&str]) -> Vec<String> {
@@ -178,10 +252,17 @@ mod tests {
     }
 
     #[test]
-    fn no_capabilities_grant_nothing() {
-        let root = temp("none");
-        let grants = derive("org.example.app", &[], &host(&root, None)).unwrap();
+    fn no_capabilities_grant_nothing_and_need_no_home() {
+        let grants = derive("org.example.app", &[], no_host).unwrap();
         assert_eq!(grants, SessionGrants::default());
+        let grants = derive("org.example.app", &caps(&["sys:notifications"]), no_host).unwrap();
+        assert_eq!(grants.imports, [Capability::Notifications]);
+        assert_eq!(
+            derive("org.example.app", &caps(&["fs:rw:app-data"]), no_host)
+                .unwrap_err()
+                .code,
+            500
+        );
     }
 
     #[test]
@@ -190,7 +271,7 @@ mod tests {
         let read = derive(
             "org.example.app",
             &caps(&["fs:read:app-data"]),
-            &host(&root, None),
+            host(&root, None),
         )
         .unwrap();
         assert_eq!(read.dirs[0].access, Access::Read);
@@ -200,7 +281,7 @@ mod tests {
         let both = derive(
             "org.example.app",
             &caps(&["fs:read:app-data", "fs:rw:app-data"]),
-            &host(&root, None),
+            host(&root, None),
         )
         .unwrap();
         assert_eq!(both.dirs.len(), 1);
@@ -217,7 +298,7 @@ mod tests {
                 "net:fetch:api.example.org",
                 "sys:notifications",
             ]),
-            &host(&root, None),
+            host(&root, None),
         )
         .unwrap();
         let listed: Vec<String> = grants.imports.iter().map(|c| c.to_string()).collect();
@@ -226,14 +307,34 @@ mod tests {
     }
 
     #[test]
-    fn unknown_unsupported_and_unsatisfiable_capabilities_fail() {
+    fn refused_launches_create_nothing() {
         let root = temp("fail");
-        for declared in ["sys:everything", "hw:gpu:compute", "fs:read:xdg-documents"] {
-            assert!(
-                derive("org.example.app", &caps(&[declared]), &host(&root, None)).is_err(),
-                "{declared} accepted"
-            );
+        for declared in [
+            &["sys:everything"][..],
+            &["hw:gpu:compute"],
+            &["fs:read:xdg-documents"],
+            &["fs:rw:app-data", "hw:gpu:render"],
+            &["fs:rw:app-data", "fs:read:xdg-documents"],
+        ] {
+            let refusal =
+                derive("org.example.app", &caps(declared), host(&root, None)).unwrap_err();
+            assert_eq!(refusal.code, 403, "{declared:?}");
         }
+        assert!(!root.join("apps").exists());
+    }
+
+    #[test]
+    fn paths_that_cannot_be_encoded_are_refused() {
+        let root = temp("encode");
+        let odd = root.join("a::b");
+        std::fs::create_dir_all(&odd).unwrap();
+        let refusal = derive(
+            "org.example.app",
+            &caps(&["fs:read:xdg-documents"]),
+            host(&root, Some(odd)),
+        )
+        .unwrap_err();
+        assert_eq!(refusal.code, 403);
     }
 
     #[test]
@@ -241,34 +342,37 @@ mod tests {
         let home = temp("home");
         let config = home.join(".config");
         std::fs::create_dir_all(home.join("Docs")).unwrap();
+        std::fs::create_dir_all(home.join("Later")).unwrap();
         std::fs::create_dir_all(&config).unwrap();
         assert_eq!(documents_dir(&home, &config), None);
 
-        std::fs::write(
-            config.join("user-dirs.dirs"),
-            "# comment\nXDG_DOCUMENTS_DIR=\"$HOME/Docs\"\n",
-        )
-        .unwrap();
+        let write = |text: &str| std::fs::write(config.join("user-dirs.dirs"), text).unwrap();
+        write("# comment\nXDG_DOCUMENTS_DIR=\"$HOME/Docs\"\n");
+        assert_eq!(documents_dir(&home, &config), Some(home.join("Docs")));
+        write("XDG_DOCUMENTS_DIR=\"$HOME/Docs\"\nXDG_DOCUMENTS_DIR=\"$HOME/Later\"\n");
+        assert_eq!(documents_dir(&home, &config), Some(home.join("Later")));
+        let absolute = format!("XDG_DOCUMENTS_DIR=\"{}\"\n", home.join("Docs").display());
+        write(&absolute);
         assert_eq!(documents_dir(&home, &config), Some(home.join("Docs")));
 
-        // Disabled (the home directory itself) and missing directories.
-        std::fs::write(
-            config.join("user-dirs.dirs"),
+        // Disabled, missing, relative, escaped and malformed values.
+        for text in [
             "XDG_DOCUMENTS_DIR=\"$HOME/\"\n",
-        )
-        .unwrap();
-        assert_eq!(documents_dir(&home, &config), None);
-        std::fs::write(
-            config.join("user-dirs.dirs"),
+            "XDG_DOCUMENTS_DIR=\"$HOME\"\n",
             "XDG_DOCUMENTS_DIR=\"$HOME/Missing\"\n",
-        )
-        .unwrap();
-        assert_eq!(documents_dir(&home, &config), None);
+            "XDG_DOCUMENTS_DIR=\"$HOMEDocs\"\n",
+            "XDG_DOCUMENTS_DIR=\"Docs\"\n",
+            "XDG_DOCUMENTS_DIR=\"$HOME/Do\\\"cs\"\n",
+            "XDG_DOCUMENTS_DIR=$HOME/Docs\n",
+        ] {
+            write(text);
+            assert_eq!(documents_dir(&home, &config), None, "{text:?}");
+        }
 
         let grants = derive(
             "org.example.app",
             &caps(&["fs:rw:xdg-documents"]),
-            &host(&home, Some(home.join("Docs"))),
+            host(&home, Some(home.join("Docs"))),
         )
         .unwrap();
         assert_eq!(grants.dirs[0].guest, "/xdg/documents");

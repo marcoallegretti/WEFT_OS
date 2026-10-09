@@ -155,7 +155,7 @@ fn check_package(dir: &Path) -> anyhow::Result<String> {
     };
 
     if let Some(ref m) = manifest {
-        if !is_valid_app_id(&m.package.id) {
+        if !weft_ipc_types::package::is_valid_app_id(&m.package.id) {
             errors.push(format!(
                 "package.id '{}' does not match required pattern",
                 m.package.id
@@ -227,22 +227,6 @@ fn print_info(m: &Manifest) {
             println!("cap:     {cap}");
         }
     }
-}
-
-fn is_valid_app_id(id: &str) -> bool {
-    let parts: Vec<&str> = id.split('.').collect();
-    if parts.len() < 3 {
-        return false;
-    }
-    parts.iter().all(|p| {
-        !p.is_empty()
-            && p.chars()
-                .next()
-                .map(|c| c.is_ascii_lowercase())
-                .unwrap_or(false)
-            && p.chars()
-                .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit())
-    })
 }
 
 fn is_wasm_module(path: &Path) -> bool {
@@ -327,7 +311,7 @@ fn uninstall_package(app_id: &str) -> anyhow::Result<()> {
 }
 
 fn uninstall_package_from(app_id: &str, store_root: &Path) -> anyhow::Result<()> {
-    if !is_valid_app_id(app_id) {
+    if !weft_ipc_types::package::is_valid_app_id(app_id) {
         anyhow::bail!("'{}' is not a valid app ID", app_id);
     }
     let target = store_root.join(app_id);
@@ -611,19 +595,33 @@ mod tests {
 
     #[test]
     fn app_id_valid() {
-        assert!(is_valid_app_id("com.example.notes"));
-        assert!(is_valid_app_id("org.weft.calculator"));
-        assert!(is_valid_app_id("io.github.username.app"));
+        assert!(weft_ipc_types::package::is_valid_app_id(
+            "com.example.notes"
+        ));
+        assert!(weft_ipc_types::package::is_valid_app_id(
+            "org.weft.calculator"
+        ));
+        assert!(weft_ipc_types::package::is_valid_app_id(
+            "io.github.username.app"
+        ));
     }
 
     #[test]
     fn app_id_invalid() {
-        assert!(!is_valid_app_id("com.example"));
-        assert!(!is_valid_app_id("Com.example.notes"));
-        assert!(!is_valid_app_id("com.example.notes-app"));
-        assert!(!is_valid_app_id("com..example.notes"));
-        assert!(!is_valid_app_id(""));
-        assert!(!is_valid_app_id("com.Example.notes"));
+        assert!(!weft_ipc_types::package::is_valid_app_id("com.example"));
+        assert!(!weft_ipc_types::package::is_valid_app_id(
+            "Com.example.notes"
+        ));
+        assert!(!weft_ipc_types::package::is_valid_app_id(
+            "com.example.notes-app"
+        ));
+        assert!(!weft_ipc_types::package::is_valid_app_id(
+            "com..example.notes"
+        ));
+        assert!(!weft_ipc_types::package::is_valid_app_id(""));
+        assert!(!weft_ipc_types::package::is_valid_app_id(
+            "com.Example.notes"
+        ));
     }
 
     #[test]

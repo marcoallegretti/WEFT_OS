@@ -1,4 +1,5 @@
 pub mod capability;
+pub mod package;
 
 use serde::{Deserialize, Serialize};
 

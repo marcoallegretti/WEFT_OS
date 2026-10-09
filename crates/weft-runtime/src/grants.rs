@@ -93,8 +93,10 @@ impl Preopen {
         let (rest, mode) = spec
             .rsplit_once("::")
             .context("--preopen expects HOST::GUEST::ro|rw")?;
+        // Guest paths are fixed names without `::`; splitting from the right
+        // keeps a host path containing `::` whole.
         let (host, guest) = rest
-            .split_once("::")
+            .rsplit_once("::")
             .context("--preopen expects HOST::GUEST::ro|rw")?;
         let access = match mode {
             "ro" => Access::Read,
@@ -166,6 +168,7 @@ mod tests {
             Preopen::parse("/a::/b::rw").unwrap().access,
             Access::ReadWrite
         );
+        assert_eq!(Preopen::parse("/a::/b::/data::ro").unwrap().host, "/a::/b");
         for bad in ["/a::/b", "/a", "/a::/b::wx", "::/b::ro", "/a::b::ro"] {
             assert!(Preopen::parse(bad).is_err(), "{bad} accepted");
         }

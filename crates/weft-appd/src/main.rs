@@ -427,19 +427,25 @@ pub(crate) async fn dispatch(req: Request, registry: &Registry) -> Response {
         } => {
             // The package's capabilities are granted before a session exists;
             // a package this host cannot satisfy is refused, not started.
-            let grants = if std::env::var("WEFT_RUNTIME_BIN").is_ok() {
-                match grants::for_app(&app_id) {
-                    Ok(grants) => grants,
-                    Err(message) => {
-                        tracing::warn!(%app_id, error = %message, "launch refused");
-                        return Response::Error {
-                            code: 403,
-                            message: format!("{app_id}: {message}"),
-                        };
-                    }
-                }
+            let grants = if !weft_ipc_types::package::is_valid_app_id(&app_id) {
+                Err(grants::Refusal {
+                    code: 400,
+                    message: "invalid app ID".to_owned(),
+                })
+            } else if std::env::var("WEFT_RUNTIME_BIN").is_ok() {
+                grants::for_app(&app_id)
             } else {
-                grants::SessionGrants::default()
+                Ok(grants::SessionGrants::default())
+            };
+            let grants = match grants {
+                Ok(grants) => grants,
+                Err(refusal) => {
+                    tracing::warn!(%app_id, error = %refusal.message, "launch refused");
+                    return Response::Error {
+                        code: refusal.code,
+                        message: format!("{app_id}: {}", refusal.message),
+                    };
+                }
             };
             let session_id = registry.lock().await.launch(&app_id);
             tracing::info!(session_id, %app_id, "launched");
@@ -628,7 +634,7 @@ mod tests {
 
     static ENV_LOCK: std::sync::OnceLock<tokio::sync::Mutex<()>> = std::sync::OnceLock::new();
 
-    fn env_lock() -> &'static tokio::sync::Mutex<()> {
+    pub(crate) fn env_lock() -> &'static tokio::sync::Mutex<()> {
         ENV_LOCK.get_or_init(|| tokio::sync::Mutex::new(()))
     }
 
@@ -789,7 +795,7 @@ mod tests {
         let reg = make_registry();
         let ack = dispatch(
             Request::LaunchApp {
-                app_id: "app".into(),
+                app_id: "com.test.app".into(),
                 surface_id: 0,
             },
             &reg,

@@ -385,6 +385,21 @@ struct FetchResponse {
 #[cfg(feature = "wasmtime-runtime")]
 type FetchResult = Result<FetchResponse, String>;
 
+/// Request headers a component may not set.
+#[cfg(all(feature = "wasmtime-runtime", feature = "net-fetch"))]
+const FORBIDDEN_FETCH_HEADERS: &[&str] = &[
+    "host",
+    "content-length",
+    "transfer-encoding",
+    "connection",
+    "keep-alive",
+    "proxy-authorization",
+    "proxy-connection",
+    "te",
+    "trailer",
+    "upgrade",
+];
+
 /// Longest response body returned to a component.
 #[cfg(all(feature = "wasmtime-runtime", feature = "net-fetch"))]
 const MAX_FETCH_RESPONSE: u64 = 16 * 1024 * 1024;
@@ -410,6 +425,25 @@ fn host_fetch(
     }
     let host = parsed.host_str().ok_or("URL has no host")?;
     grants.fetch_host(host)?;
+    // The method is written into the request line as given, so only known
+    // methods are accepted.
+    if !matches!(
+        method,
+        "GET" | "HEAD" | "POST" | "PUT" | "PATCH" | "DELETE" | "OPTIONS"
+    ) {
+        return Err(format!("unsupported HTTP method '{method}'"));
+    }
+    // The destination and message framing belong to the runtime: a component
+    // must not redirect a granted request to another host through `Host` or
+    // change how the body is delimited.
+    for (name, _) in headers {
+        if FORBIDDEN_FETCH_HEADERS
+            .iter()
+            .any(|forbidden| name.eq_ignore_ascii_case(forbidden))
+        {
+            return Err(format!("header '{name}' is set by the runtime"));
+        }
+    }
     let agent = ureq::AgentBuilder::new()
         .redirects(0)
         .timeout_connect(Duration::from_secs(10))

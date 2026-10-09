@@ -101,11 +101,22 @@ impl fmt::Display for Capability {
     }
 }
 
-/// A DNS host name in canonical lowercase form: dot-separated labels of
-/// 1–63 letters, digits and inner hyphens, at most 253 characters.
+/// A host in the canonical form URL parsing produces, so that a grant can
+/// be compared with a request's host as a string: a lowercase DNS name of
+/// 1–63 character labels of letters, digits and inner hyphens (at most 253
+/// characters) whose last label is not numeric, or an IPv4 address in
+/// dotted-decimal form without leading zeros. IPv6 literals are not
+/// supported.
 fn is_host_name(host: &str) -> bool {
+    let labels: Vec<&str> = host.split('.').collect();
+    if labels
+        .last()
+        .is_some_and(|last| !last.is_empty() && last.bytes().all(|b| b.is_ascii_digit()))
+    {
+        return is_ipv4(&labels);
+    }
     host.len() <= 253
-        && host.split('.').all(|label| {
+        && labels.iter().all(|label| {
             !label.is_empty()
                 && label.len() <= 63
                 && !label.starts_with('-')
@@ -113,6 +124,17 @@ fn is_host_name(host: &str) -> bool {
                 && label
                     .bytes()
                     .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
+        })
+}
+
+fn is_ipv4(labels: &[&str]) -> bool {
+    labels.len() == 4
+        && labels.iter().all(|octet| {
+            !octet.is_empty()
+                && octet.len() <= 3
+                && (octet.len() == 1 || !octet.starts_with('0'))
+                && octet.bytes().all(|b| b.is_ascii_digit())
+                && octet.parse::<u16>().is_ok_and(|n| n <= 255)
         })
 }
 
@@ -129,6 +151,8 @@ mod tests {
             "fs:rw:xdg-documents",
             "net:fetch:*",
             "net:fetch:api.example.org",
+            "net:fetch:127.0.0.1",
+            "net:fetch:a1.example",
             "sys:notifications",
             "sys:clipboard:read",
             "sys:clipboard:write",
@@ -153,6 +177,11 @@ mod tests {
             "net:fetch:*.example.org",
             "net:fetch:-bad.example",
             "net:fetch:a..b",
+            "net:fetch:0177.0.0.1",
+            "net:fetch:999.1.1.1",
+            "net:fetch:1.2.3",
+            "net:fetch:example.123",
+            "net:fetch:[::1]",
             "sys:clipboard",
         ] {
             assert!(text.parse::<Capability>().is_err(), "{text:?} accepted");

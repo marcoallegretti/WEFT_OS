@@ -75,10 +75,11 @@ See `docs/building.md` for full instructions including Wasm component builds, Ni
 
 ## CI
 
-Three jobs on every push and pull request:
+Jobs on every push and pull request:
 
 - `cross-platform` — fmt, clippy, tests on Ubuntu and Windows
 - `linux-only` — clippy and tests for compositor and shell crates
+- `runtime-grants` — clippy for `weft-runtime` with its Wasm engine and fetch, and `tests/runtime/check_grants.py`
 - `servo-embed-linux` — `cargo check --features servo-embed` for both servo crates
 
 ## Security

@@ -7,19 +7,22 @@ scenario passes a different set of `--grant` and `--preopen` arguments:
 
 - no grants: no /data, and every host import reports that its capability
   is not granted;
-- read-only data: /data can be read but not written, and nothing appears
-  on the host;
+- read-only data: /data can be read, but creating, overwriting, renaming
+  and removing files and creating directories all fail and the host
+  directory is unchanged;
 - read-write data: the write reaches the host directory;
 - notifications and clipboard read: those imports are attempted (they may
   still fail for lack of a desktop service) while clipboard write stays
   denied;
 - a host-specific fetch grant: requests to that host return their real
   status (200, 404, and 302 without following the redirect to another
-  host), and requests to another host are denied;
+  host); requests to another host, a forged `Host` header, a method that
+  injects a request line and a `file:` URL are refused;
 - a wildcard fetch grant: the other host is reachable.
 
-It also checks that the runtime refuses filesystem capabilities passed as
-`--grant` and preopens without an access mode.
+It also checks that the runtime refuses, with a specific error, filesystem
+capabilities passed as `--grant`, unknown capabilities and preopens
+without an access mode.
 
 Requires cargo with the wasm32-wasip2 target.
 """
@@ -119,14 +122,18 @@ def check(runner, data):
     (data / "seed.txt").write_text("seed")
     _, probes = runner.run("--preopen", f"{data}::/data::ro")
     expect(probes, "data-read", True, contains="seed")
-    expect(probes, "data-write", False)
-    if (data / "written.txt").exists():
-        raise AssertionError("read-only grant allowed a write on the host")
+    for name in ("data-write", "data-overwrite", "data-mkdir", "data-rename", "data-remove"):
+        expect(probes, name, False)
+    if sorted(p.name for p in data.iterdir()) != ["seed.txt"] or \
+            (data / "seed.txt").read_text() != "seed":
+        raise AssertionError("read-only grant allowed the host directory to change")
 
     _, probes = runner.run("--preopen", f"{data}::/data::rw")
-    expect(probes, "data-write", True)
-    if (data / "written.txt").read_text() != "probe":
-        raise AssertionError("read-write grant did not write to the host directory")
+    for name in ("data-write", "data-overwrite", "data-mkdir", "data-rename"):
+        expect(probes, name, True)
+    if (data / "written.txt").read_text() != "probe" or \
+            (data / "moved.txt").read_text() != "changed" or not (data / "made").is_dir():
+        raise AssertionError("read-write grant did not change the host directory")
 
     _, probes = runner.run("--grant", "sys:notifications", "--grant", "sys:clipboard:read")
     expect(probes, "notifications", probes.get("notifications", "").startswith("ok"),
@@ -140,15 +147,22 @@ def check(runner, data):
     expect(probes, "fetch-missing", True, contains="404")
     expect(probes, "fetch-redirect", True, contains="302")
     expect(probes, "fetch-other-host", False, contains=NOT_GRANTED)
+    expect(probes, "fetch-host-header", False, contains="set by the runtime")
+    expect(probes, "fetch-bad-method", False, contains="unsupported HTTP method")
+    expect(probes, "fetch-file-scheme", False, contains="unsupported URL scheme")
 
     _, probes = runner.run("--grant", "net:fetch:*")
     expect(probes, "fetch-other-host", True, contains="200")
 
-    for arguments in (["--grant", "fs:rw:app-data"], ["--preopen", f"{data}::/data"],
-                      ["--grant", "sys:everything"]):
+    for arguments, message in (
+            (["--grant", "fs:rw:app-data"], "is not granted through --grant"),
+            (["--preopen", f"{data}::/data"], "--preopen expects HOST::GUEST::ro|rw"),
+            (["--preopen", f"{data}::/data::wx"], "--preopen mode must be ro or rw"),
+            (["--grant", "sys:everything"], "unknown capability 'sys:everything'")):
         result, _ = runner.run(*arguments, expect_success=False)
-        if result.returncode == 0:
-            raise AssertionError(f"runtime accepted {' '.join(arguments)}")
+        if result.returncode == 0 or message not in result.stderr:
+            raise AssertionError(f"runtime did not refuse {' '.join(arguments)} with "
+                                 f"{message!r}:\n{result.stderr}")
 
 
 def main(argv=None):

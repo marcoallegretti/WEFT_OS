@@ -122,8 +122,9 @@ See `infra/nixos/weft-packages.nix` for the package derivations. Its `outputHash
 
 ## CI
 
-Three jobs run on every push to `main` and on pull requests:
+Jobs run on every push to `main` and on pull requests:
 
 - `cross-platform` — fmt, clippy, tests on Ubuntu and Windows (excludes Wayland crates)
 - `linux-only` — clippy and tests for `weft-compositor`, `weft-servo-shell`, `weft-app-shell`
+- `runtime-grants` — clippy and a build of `weft-runtime` with `wasmtime-runtime,net-fetch`, then `tests/runtime/check_grants.py`, which runs a probe component under each kind of capability grant
 - `servo-embed-linux` — `cargo check --features servo-embed` for servo-shell and app-shell

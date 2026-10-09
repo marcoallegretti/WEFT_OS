@@ -78,6 +78,28 @@ jobs:
           -p weft-servo-shell
           -p weft-app-shell
 
+  # weft-runtime with its Wasm engine and fetch support, exercised on a real
+  # component under each kind of capability grant.
+  runtime-grants:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.93.0
+          components: clippy
+          targets: wasm32-wasip2
+      - name: cargo clippy (weft-runtime with wasmtime-runtime and net-fetch)
+        run: >
+          cargo clippy
+          -p weft-runtime
+          --features wasmtime-runtime,net-fetch
+          --all-targets -- -D warnings
+      - name: cargo build (weft-runtime with wasmtime-runtime and net-fetch)
+        run: cargo build -p weft-runtime --features wasmtime-runtime,net-fetch
+      - name: grants check
+        run: python3 -B tests/runtime/check_grants.py
+
   # Type-check the servo-embed feature gate.
   # Full Servo compilation (30-60 min) is not run in CI; this job checks
   # that the feature-gated code at least type-checks against the declared deps.
