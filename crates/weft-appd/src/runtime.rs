@@ -8,21 +8,40 @@ use crate::Registry;
 use crate::compositor_client::CompositorSender;
 use crate::ipc::{AppStateKind, Response};
 
+/// The per-session relay between the component's IPC socket and the app
+/// bridge. It belongs to the session: closing it stops the relay task and
+/// removes the socket, whether or not the component ever connected.
+pub(crate) struct IpcRelay {
+    task: tokio::task::JoinHandle<()>,
+    socket_path: PathBuf,
+}
+
+impl IpcRelay {
+    fn close(self) {
+        self.task.abort();
+        let _ = std::fs::remove_file(&self.socket_path);
+    }
+}
+
+/// Listens on `socket_path` for the session's component and relays
+/// newline-delimited messages between it and the returned sender (towards
+/// the component) and the broadcast channel (from the component).
 #[cfg(unix)]
-pub(crate) async fn spawn_ipc_relay(
+pub(crate) fn spawn_ipc_relay(
     session_id: u64,
     socket_path: PathBuf,
     broadcast: tokio::sync::broadcast::Sender<Response>,
-) -> Option<tokio::sync::mpsc::Sender<String>> {
+) -> std::io::Result<(tokio::sync::mpsc::Sender<String>, IpcRelay)> {
     let _ = std::fs::remove_file(&socket_path);
-    let listener = tokio::net::UnixListener::bind(&socket_path).ok()?;
+    let listener = tokio::net::UnixListener::bind(&socket_path)?;
     let (html_to_wasm_tx, mut html_to_wasm_rx) = tokio::sync::mpsc::channel::<String>(64);
-    tokio::spawn(async move {
+    let task = tokio::spawn(async move {
         let Ok((stream, _)) = listener.accept().await else {
             tracing::warn!(session_id, "IPC relay: failed to accept connection");
-            let _ = std::fs::remove_file(&socket_path);
             return;
         };
+        // One component per session: no further connections are accepted.
+        drop(listener);
         tracing::debug!(session_id, "IPC relay: component connected");
         let (reader, writer) = tokio::io::split(stream);
         let mut reader = BufReader::new(reader);
@@ -55,18 +74,17 @@ pub(crate) async fn spawn_ipc_relay(
                 }
             }
         }
-        let _ = std::fs::remove_file(&socket_path);
     });
-    Some(html_to_wasm_tx)
+    Ok((html_to_wasm_tx, IpcRelay { task, socket_path }))
 }
 
 #[cfg(not(unix))]
-pub(crate) async fn spawn_ipc_relay(
+pub(crate) fn spawn_ipc_relay(
     _session_id: u64,
     _socket_path: PathBuf,
     _broadcast: tokio::sync::broadcast::Sender<Response>,
-) -> Option<tokio::sync::mpsc::Sender<String>> {
-    None
+) -> std::io::Result<(tokio::sync::mpsc::Sender<String>, IpcRelay)> {
+    Err(std::io::ErrorKind::Unsupported.into())
 }
 
 const READY_TIMEOUT: Duration = Duration::from_secs(30);
@@ -211,7 +229,6 @@ pub(crate) async fn supervise(
     registry: Registry,
     abort_rx: tokio::sync::oneshot::Receiver<()>,
     compositor_tx: Option<CompositorSender>,
-    ipc_socket_path: Option<std::path::PathBuf>,
 ) -> anyhow::Result<()> {
     let mut abort_rx = abort_rx;
     let bin = match std::env::var("WEFT_RUNTIME_BIN") {
@@ -230,6 +247,22 @@ pub(crate) async fn supervise(
         Ok(token) => token,
         Err(e) => {
             tracing::error!(session_id, %app_id, error = %e, "cannot create readiness token");
+            return stop_unstarted(&registry, session_id).await;
+        }
+    };
+
+    let Some(ipc_socket_path) = crate::session_ipc_socket_path(session_id) else {
+        tracing::warn!(session_id, %app_id, "no runtime directory for the IPC socket");
+        return stop_unstarted(&registry, session_id).await;
+    };
+    let broadcast = registry.lock().await.broadcast().clone();
+    let relay = match spawn_ipc_relay(session_id, ipc_socket_path.clone(), broadcast) {
+        Ok((tx, relay)) => {
+            registry.lock().await.register_ipc_sender(session_id, tx);
+            relay
+        }
+        Err(e) => {
+            tracing::warn!(session_id, %app_id, error = %e, "cannot open the IPC socket");
             return stop_unstarted(&registry, session_id).await;
         }
     };
@@ -254,9 +287,7 @@ pub(crate) async fn supervise(
         .env(READY_TOKEN_ENV, &token)
         .kill_on_drop(true);
 
-    if let Some(ref sock) = ipc_socket_path {
-        cmd.arg("--ipc-socket").arg(sock);
-    }
+    cmd.arg("--ipc-socket").arg(&ipc_socket_path);
 
     if let Some(ref root) = store_override {
         cmd.env("WEFT_APP_STORE", root);
@@ -278,6 +309,7 @@ pub(crate) async fn supervise(
         runtime: None,
         app_shell: None,
         portal,
+        relay: Some(relay),
         mount: mount_orch,
         compositor_tx,
         surface_announced: false,
@@ -394,15 +426,15 @@ async fn stop_unstarted(registry: &Registry, session_id: u64) -> anyhow::Result<
     Ok(())
 }
 
-/// The processes, portal, compositor association and image mount a session
-/// owns. `settle` releases all of them on every exit path: spawn failure,
-/// readiness failure, timeout, abort and child exit. The IPC relay is not yet
-/// owned here.
+/// The processes, IPC relay, portal, compositor association and image mount
+/// a session owns. `settle` releases all of them on every exit path: spawn
+/// failure, readiness failure, timeout, abort and child exit.
 struct OwnedSession {
     session_id: u64,
     runtime: Option<tokio::process::Child>,
     app_shell: Option<tokio::process::Child>,
     portal: Option<(PathBuf, tokio::process::Child)>,
+    relay: Option<IpcRelay>,
     mount: crate::mount::MountOrchestrator,
     compositor_tx: Option<CompositorSender>,
     surface_announced: bool,
@@ -427,7 +459,11 @@ impl OwnedSession {
         }
         self.mount.umount();
         kill_portal(self.portal).await;
+        if let Some(relay) = self.relay {
+            relay.close();
+        }
         let mut reg = registry.lock().await;
+        reg.remove_ipc_sender(session_id);
         reg.set_state(session_id, AppStateKind::Stopped);
         reg.remove_abort_sender(session_id);
         let _ = reg.broadcast().send(Response::AppState {
