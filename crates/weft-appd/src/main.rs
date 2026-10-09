@@ -567,7 +567,18 @@ pub(crate) async fn dispatch(req: Request, registry: &Registry) -> Response {
             Response::LaunchAck { session_id, app_id }
         }
         Request::TerminateApp { session_id } => {
-            let found = registry.lock().await.terminate(session_id);
+            let found = {
+                let mut reg = registry.lock().await;
+                let found = reg.terminate(session_id);
+                if found && matches!(reg.state(session_id), AppStateKind::Stopping) {
+                    // Every client, not only the requester, shows the close.
+                    let _ = reg.broadcast().send(Response::AppState {
+                        session_id,
+                        state: AppStateKind::Stopping,
+                    });
+                }
+                found
+            };
             if found {
                 tracing::info!(session_id, "stop requested");
                 Response::AppState {

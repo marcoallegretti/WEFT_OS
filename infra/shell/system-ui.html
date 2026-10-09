@@ -404,6 +404,7 @@
         el.appendChild(close);
         // Choosing the entry brings the app's window to the front.
         el.addEventListener('click', function () {
+          if (el.dataset.closing) { return; }
           if (ws && ws.readyState === WebSocket.OPEN) {
             ws.send(JSON.stringify({ type: 'ACTIVATE_APP', session_id: sessionId }));
           }
@@ -417,7 +418,8 @@
       // example to save; the entry stays until the session has stopped.
       function markTaskbarEntryClosing(sessionId) {
         var el = document.getElementById('task-' + sessionId);
-        if (!el) { return; }
+        if (!el || el.dataset.closing) { return; }
+        el.dataset.closing = '1';
         el.style.opacity = '0.5';
         el.title += ' (closing)';
         var close = el.querySelector('.task-close');
