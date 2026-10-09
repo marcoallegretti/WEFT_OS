@@ -56,14 +56,22 @@ fn handle_keyboard<B: InputBackend>(state: &mut WeftCompositorState, event: B::K
             key_state,
             serial,
             time,
-            |_state, mods, keysym| {
-                if mods.alt
-                    && keysym.modified_sym() == smithay::input::keyboard::keysyms::KEY_F4.into()
-                {
-                    FilterResult::Intercept(key_state == smithay::backend::input::KeyState::Pressed)
-                } else {
-                    FilterResult::Forward
+            |state, mods, keysym| {
+                // A release is taken only when its press was, so no client
+                // sees half of a key.
+                let code = keysym.raw_code().raw();
+                if key_state == smithay::backend::input::KeyState::Pressed {
+                    if mods.alt
+                        && keysym.modified_sym() == smithay::input::keyboard::keysyms::KEY_F4.into()
+                    {
+                        state.suppressed_keys.push(code);
+                        return FilterResult::Intercept(true);
+                    }
+                } else if let Some(i) = state.suppressed_keys.iter().position(|&k| k == code) {
+                    state.suppressed_keys.remove(i);
+                    return FilterResult::Intercept(false);
                 }
+                FilterResult::Forward
             },
         );
         if close == Some(true) {

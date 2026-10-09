@@ -230,9 +230,11 @@ def run(args, desktop, store, home):
             raise AssertionError("the closed application is still shown")
         time.sleep(0.3)
     key("alt+F4")
-    time.sleep(2)
-    if area(desktop.capture(), GREEN)[0] != panel:
-        raise AssertionError("Alt+F4 closed or moved the shell's panel")
+    deadline = time.monotonic() + 6
+    while time.monotonic() < deadline:
+        if area(desktop.capture(), GREEN)[0] != panel:
+            raise AssertionError("Alt+F4 closed or moved the shell's panel")
+        time.sleep(0.5)
 
     appd.send({"type": "ACTIVATE_APP", "session_id": 999})
     reply = appd.wait_for(lambda m: m.get("type") == "ERROR", 10)

@@ -431,12 +431,17 @@ impl App {
 }
 
 impl ApplicationHandler<ServoWake> for App {
-    /// Releases Servo and the shell protocol objects while winit's Wayland
-    /// display is still connected; dropped later, the shell client's
-    /// proxies would be destroyed on a display that is gone.
+    /// Releases everything that holds Wayland objects of winit's display
+    /// (Servo, the rendering context, whose software and EGL paths keep
+    /// their own proxies on it, the shell protocol client and the window)
+    /// while that display is still connected; dropped after the event loop,
+    /// they would be destroyed on a display that is gone. A panic unwinding
+    /// out of a handler skips this.
     fn exiting(&mut self, _event_loop: &ActiveEventLoop) {
         self.shut_down();
+        self.rendering_context = None;
         self.shell_client = None;
+        self.window = None;
     }
 
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
