@@ -4,6 +4,7 @@ mod appd_ipc;
 mod backend;
 mod input;
 mod protocols;
+mod session_env;
 mod state;
 
 fn main() -> anyhow::Result<()> {

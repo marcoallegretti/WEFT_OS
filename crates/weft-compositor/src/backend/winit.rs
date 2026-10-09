@@ -60,6 +60,7 @@ pub fn run() -> anyhow::Result<()> {
     let socket_name = listening_socket.socket_name().to_os_string();
     unsafe { std::env::set_var("WAYLAND_DISPLAY", &socket_name) };
     tracing::info!(?socket_name, "Wayland compositor socket open");
+    crate::session_env::publish_wayland_display(&socket_name);
 
     loop_handle
         .insert_source(listening_socket, |client_stream, _, state| {
@@ -184,6 +185,10 @@ pub fn run() -> anyhow::Result<()> {
             _ => (),
         })
         .map_err(|e| anyhow::anyhow!("winit source insertion failed: {e}"))?;
+
+    // A Type=notify unit waits for this, as with the DRM backend.
+    #[cfg(target_os = "linux")]
+    let _ = sd_notify::notify(false, &[sd_notify::NotifyState::Ready]);
 
     event_loop.run(None, &mut state, |_| {})?;
 
