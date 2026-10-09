@@ -25,7 +25,7 @@ bitflags = "2"
 
 [dependencies.servo]
 git = "https://github.com/marcoallegretti/servo"
-rev = "f0bb1aaf981b65c8dddc848bb647045d4c777d11"
+rev = "5d90f51cf8156cd7f244a42e15f199c531116c21"
 optional = true
 default-features = false
 

@@ -96,23 +96,33 @@ def app_ui(package, page):
 
 def slow_style(directory, delay):
     """Create `directory/reveal.css`, a stylesheet revealing the page, that
-    cannot be opened until `delay` seconds have passed. A write lease makes
-    any other process's open() wait until the lease is released. The
-    stylesheet is a local file next to the page, so an application host
-    confined to its UI directory may load it."""
+    cannot be opened until `delay` seconds after the host first tries to. A
+    write lease makes another process's open() wait until the lease is
+    released, and the kernel signals the holder when an open() starts
+    waiting. The stylesheet is a local file next to the page, so an
+    application host confined to its UI directory may load it."""
     sheet = directory / "reveal.css"
     sheet.write_text("body { visibility: visible; }", encoding="utf-8")
-    # The kernel signals the lease holder when another open() waits on it.
-    signal.signal(signal.SIGIO, signal.SIG_IGN)
     lease = os.open(sheet, os.O_WRONLY)
-    fcntl.fcntl(lease, fcntl.F_SETLEASE, fcntl.F_WRLCK)
+    held = threading.Event()
 
     def release():
-        time.sleep(delay)
         fcntl.fcntl(lease, fcntl.F_SETLEASE, fcntl.F_UNLCK)
         os.close(lease)
 
-    threading.Thread(target=release, daemon=True).start()
+    def opening(_signal, _frame):
+        if not held.is_set():
+            held.set()
+            timer = threading.Timer(delay, release)
+            timer.daemon = True
+            timer.start()
+
+    signal.signal(signal.SIGIO, opening)
+    try:
+        fcntl.fcntl(lease, fcntl.F_SETLEASE, fcntl.F_WRLCK)
+    except OSError as error:
+        os.close(lease)
+        raise SessionError(f"cannot hold back {sheet} with a file lease: {error}") from error
 
 
 def hidden_until_styled(page, destination):

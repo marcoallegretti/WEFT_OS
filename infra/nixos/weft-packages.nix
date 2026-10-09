@@ -13,7 +13,7 @@ let
     # One hash per git source in Cargo.lock: the Servo fork and the Stylo fork
     # (keyed by its `selectors` crate). Every package vendors both, so both must
     # match the pinned revisions. Recompute them whenever a revision changes.
-    # The Servo hash is not yet known for f0bb1aa; a Nix build reports it.
+    # The Servo hash is not yet known for 5d90f51; a Nix build reports it.
     outputHashes = {
       "servo-0.0.1" = pkgs.lib.fakeHash;
       "selectors-0.36.0" = "13y6pa19j4w2zsxfhv6mrl03wsa0frazlsssbqkzpwci8k9gzl4i";

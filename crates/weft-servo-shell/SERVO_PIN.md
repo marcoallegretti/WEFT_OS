@@ -6,13 +6,17 @@ The selected revisions are the ones recorded in the workspace `Cargo.lock`.
 
 | Dependency | Source | Revision | Selected by |
 |------------|--------|----------|-------------|
-| Servo (`servo` crate) | <https://github.com/marcoallegretti/servo> | `f0bb1aaf981b65c8dddc848bb647045d4c777d11` | `rev` in both shell crates' `Cargo.toml` |
+| Servo (`servo` crate) | <https://github.com/marcoallegretti/servo> | `5d90f51cf8156cd7f244a42e15f199c531116c21` | `rev` in both shell crates' `Cargo.toml` |
 | Stylo (`stylo`, `selectors`, `servo_arc`, ...) | <https://github.com/marcoallegretti/stylo> | `f1ba4969536d63f2e319a561e466c03e78b4a076` | `[patch."https://github.com/servo/stylo"]` in the root `Cargo.toml` |
 
-The Servo revision is `servo-weft` commit `8e7dc40` (backdrop-filter rendering)
-plus `f0bb1aa`, which fixes that commit's `servo-layout` build errors. It lives
-on the fork branch `fix/backdrop-filter-build-errors` until it is merged into
-`servo-weft`; keep that branch until then so the revision stays fetchable.
+The Servo revision is `servo-weft` commit `8e7dc40` (backdrop-filter rendering),
+plus `f0bb1aa`, which fixes that commit's `servo-layout` build errors, plus
+`b87e5a6`, which keeps compiled classic scripts rooted until they run, and
+`5d90f51`, which withholds `navigator.servo` from `about:blank` and
+`about:srcdoc` documents. It lives
+on the fork branch `fix/root-pending-classic-scripts`, which is based on
+`fix/backdrop-filter-build-errors`, until both are merged into `servo-weft`;
+keep those branches until then so the revisions stay fetchable.
 
 Servo's own `[patch]` table for Stylo does not apply to WEFT, because Cargo
 only honours patches in the root workspace. Without the root override, WEFT
@@ -37,7 +41,7 @@ servo-embed = ["dep:servo", "dep:winit", "dep:softbuffer"]
 
 [dependencies.servo]
 git = "https://github.com/marcoallegretti/servo"
-rev = "f0bb1aaf981b65c8dddc848bb647045d4c777d11"
+rev = "5d90f51cf8156cd7f244a42e15f199c531116c21"
 optional = true
 default-features = false
 
@@ -155,7 +159,7 @@ exercised is listed as unverified.
 rather than tracking a branch, so a rebuild selects the same code. A pinned
 revision must stay reachable from a published branch: never force-push,
 rebase or delete a branch that contains a revision a WEFT lockfile selects.
-Today Servo `f0bb1aa` is reachable only from `fix/backdrop-filter-build-errors`
+Today Servo `5d90f51` is reachable only from `fix/root-pending-classic-scripts`
 and Stylo `f1ba496` only from Stylo's `servo-weft`.
 
 To move to new revisions:
@@ -182,3 +186,5 @@ Each fork patch keeps its purpose, upstream status and removal condition here.
 | Stylo: parse `backdrop-filter` for Servo | stylo `f1ba496` | Remove the `layout.unimplemented` gate | Not submitted | Upstream Stylo parses it for Servo |
 | Servo: render `backdrop-filter` | servo `8e7dc40` | Stacking context and display list support | servo/servo issue [#41567](https://github.com/servo/servo/issues/41567) | Equivalent upstream support |
 | Servo: fix `build_backdrop_filter` types | servo `f0bb1aa` | Make `servo-layout` compile | Part of the patch above | Same as above |
+| Servo: root compiled classic scripts | servo `b87e5a6` | A parser-blocking script waiting for a stylesheet was freed by a garbage collection and crashed the content process when it ran | Not submitted | Upstream roots or traces `ClassicScript::record` |
+| Servo: no `navigator.servo` for blank and srcdoc documents | servo `5d90f51` | An application's `about:srcdoc` frame could change engine preferences | Not submitted | Upstream limits `ServoInternals` exposure the same way |
