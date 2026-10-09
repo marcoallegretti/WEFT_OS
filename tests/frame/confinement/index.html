@@ -1,0 +1,65 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>confinement</title>
+<style>
+  html, body { margin: 0; height: 100%; }
+  body { display: flex; flex-direction: column; }
+  div { flex: 1; background: #808080; }
+</style>
+</head>
+<body>
+<div id="own-image"></div>
+<div id="bridge"></div>
+<div id="outside-image"></div>
+<div id="other-image"></div>
+<div id="http-image"></div>
+<div id="http-fetch"></div>
+<div id="websocket"></div>
+<script>
+// One band per probe: green when the outcome matches the policy, red when it
+// does not. Every refused probe would succeed without the policy: the images
+// are valid PNG files, the fetch uses no-cors, so an opaque response would
+// resolve it, and the WebSocket listener accepts connections. The harness
+// substitutes the ports and the path of a file outside the package.
+var HTTP = 'http://127.0.0.1:@HTTP_PORT@/';
+var TCP = 'ws://127.0.0.1:@TCP_PORT@/';
+var OTHER = '@OTHER_URL@';
+
+function mark(id, ok) {
+  document.getElementById(id).style.background = ok ? '#00c000' : '#e00000';
+}
+function image(id, src, shouldLoad) {
+  var img = new Image();
+  img.onload = function () { mark(id, shouldLoad); };
+  img.onerror = function () { mark(id, !shouldLoad); };
+  img.src = src;
+}
+
+image('own-image', 'own.png', true);
+image('outside-image', '../outside.png', false);
+image('other-image', OTHER, false);
+image('http-image', HTTP + 'image.png', false);
+fetch(HTTP + 'probe', { mode: 'no-cors' }).then(
+  function () { mark('http-fetch', false); },
+  function () { mark('http-fetch', true); });
+
+try {
+  var ws = new WebSocket(TCP);
+  ws.onopen = function () { mark('websocket', false); };
+  ws.onerror = function () { mark('websocket', true); };
+} catch (e) {
+  mark('websocket', true);
+}
+
+(function bridge() {
+  if (!window.weftIpc) { setTimeout(bridge, 50); return; }
+  window.weftIpc.onmessage = function (raw) {
+    try { mark('bridge', typeof JSON.parse(raw).count === 'number'); } catch (_) {}
+  };
+  window.weftIpc.send('get');
+})();
+</script>
+</body>
+</html>
