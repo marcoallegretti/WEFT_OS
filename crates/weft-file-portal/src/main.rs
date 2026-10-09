@@ -217,7 +217,18 @@ fn open_beneath(
         Mode::empty(),
         ResolveFlags::BENEATH | ResolveFlags::NO_MAGICLINKS,
     )
-    .map_err(std::io::Error::from)
+    .map_err(|e| {
+        // The kernel reports a resolution that would leave the directory as
+        // EXDEV.
+        if e == rustix::io::Errno::XDEV {
+            std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                "access denied: the path leads out of the granted directory",
+            )
+        } else {
+            e.into()
+        }
+    })
 }
 
 #[cfg(target_os = "linux")]
@@ -521,6 +532,10 @@ mod tests {
         }
         // A write to a name that is a link replaces the link, inside the
         // directory, rather than writing where it points.
+        match handle_request(read_req(&granted.join("root/etc/passwd")), &roots) {
+            Response::Err { error } => assert!(error.contains("leads out"), "{error}"),
+            _ => panic!("read through a link out of the directory"),
+        }
         assert!(matches!(
             handle_request(write_req(&granted.join("up"), b"x"), &roots),
             Response::Ok
