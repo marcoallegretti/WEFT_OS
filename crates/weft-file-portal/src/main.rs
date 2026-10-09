@@ -385,7 +385,8 @@ fn write(root: &Root, rest: &Path, data: &[u8]) -> Result<Response, Response> {
     .map_err(Response::err)?;
     static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     // Unique within this portal by the counter, and across restarts by the
-    // start time, so a file left by an earlier instance does not collide.
+    // time of its first write, so a file left by an earlier instance does
+    // not collide.
     static STARTED: std::sync::OnceLock<u128> = std::sync::OnceLock::new();
     let started = STARTED.get_or_init(|| {
         std::time::SystemTime::now()
@@ -620,11 +621,7 @@ mod tests {
         let swapper = {
             let (granted, outside, stop) = (granted.clone(), dir.join("outside"), stop.clone());
             std::thread::spawn(move || {
-                let targets = [
-                    PathBuf::from("real"),
-                    outside,
-                    PathBuf::from("../../outside"),
-                ];
+                let targets = [PathBuf::from("real"), outside, PathBuf::from("../outside")];
                 for target in targets.iter().cycle() {
                     if stop.load(std::sync::atomic::Ordering::Relaxed) {
                         break;
