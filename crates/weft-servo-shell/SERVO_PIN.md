@@ -116,9 +116,16 @@ exercised is listed as unverified.
   the software path (Ubuntu 24.04, x86_64; `check_frame.py --host system`,
   `--host app` and `--host app --slow-style 3`, five runs each). The EGL path,
   DRM sessions, resize, output scale and idle wakeup are unverified.
-- **Input:** keyboard and pointer events are forwarded through
-  `WebView::notify_input_event`; delivery through the compositor is
-  unverified.
+- **Input:** `tests/frame/check_input.py` verifies, on the same nested
+  setup, that left clicks 6 px either side of a boundary reach the element
+  under the pointer, and that `a` and `Shift+a` key presses reach the page with
+  the right key value and modifier, using real X input that `weft-compositor`
+  routes to `weft-servo-shell` (three runs). The harness gives the compositor's
+  X window input focus, as a window manager would; the client's keyboard focus
+  comes from the compositor's click-to-focus. Unverified: key release and
+  repeat, pointer motion, enter/leave and button release events, other buttons,
+  wheel, focus loss, non-US layouts, non-ASCII text, scale changes and
+  `weft-app-shell` input.
 - **`backdrop-filter`**: the parsing (Stylo `f1ba496`) and rendering (Servo
   `8e7dc40`, `f0bb1aa`) patches are selected by the lockfile; rendering is
   unverified.
