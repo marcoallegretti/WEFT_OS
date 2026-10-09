@@ -29,6 +29,8 @@ pub(crate) type Registry = Arc<Mutex<SessionRegistry>>;
 struct SessionEntry {
     app_id: String,
     state: AppStateKind,
+    /// Credential binding one application bridge connection to this session.
+    bridge_token: Option<String>,
 }
 
 struct SessionRegistry {
@@ -63,9 +65,31 @@ impl SessionRegistry {
             SessionEntry {
                 app_id: app_id.to_owned(),
                 state: AppStateKind::Starting,
+                bridge_token: match runtime::random_token() {
+                    Ok(token) => Some(token),
+                    Err(e) => {
+                        tracing::error!(session_id = id, error = %e, "no bridge token; app messages disabled");
+                        None
+                    }
+                },
             },
         );
         id
+    }
+
+    pub(crate) fn bridge_token(&self, session_id: u64) -> Option<String> {
+        self.sessions.get(&session_id)?.bridge_token.clone()
+    }
+
+    /// Whether `token` authorizes an application bridge for a live session.
+    pub(crate) fn authorize_bridge(&self, session_id: u64, token: &str) -> bool {
+        self.sessions.get(&session_id).is_some_and(|entry| {
+            !matches!(entry.state, AppStateKind::Stopped)
+                && entry
+                    .bridge_token
+                    .as_deref()
+                    .is_some_and(|expected| ws::tokens_match(expected, token))
+        })
     }
 
     fn terminate(&mut self, session_id: u64) -> bool {
@@ -189,6 +213,10 @@ async fn run() -> anyhow::Result<()> {
     if let Err(e) = write_ws_port(ws_bound_port) {
         tracing::warn!(error = %e, "could not write appd.wsport; servo-shell port discovery will fall back to default");
     }
+    let ws_auth = Arc::new(ws::WsAuth {
+        system_token: runtime::random_token().context("create system token")?,
+    });
+    write_system_token(&ws_auth.system_token).context("write appd.systoken")?;
 
     #[cfg(unix)]
     {
@@ -235,8 +263,9 @@ async fn run() -> anyhow::Result<()> {
                 let (stream, _) = result.context("ws accept")?;
                 let reg = Arc::clone(&registry);
                 let rx = registry.lock().await.subscribe();
+                let auth = Arc::clone(&ws_auth);
                 tokio::spawn(async move {
-                    if let Err(e) = ws::handle_ws_connection(stream, reg, rx).await {
+                    if let Err(e) = ws::handle_ws_connection(stream, reg, rx, auth).await {
                         tracing::warn!(error = %e, "ws connection error");
                     }
                 });
@@ -256,6 +285,9 @@ async fn run() -> anyhow::Result<()> {
     registry.lock().await.shutdown_all();
     tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;
     let _ = std::fs::remove_file(&socket_path);
+    if let Ok(path) = system_token_path() {
+        let _ = std::fs::remove_file(path);
+    }
     Ok(())
 }
 
@@ -295,6 +327,42 @@ fn ws_port() -> u16 {
         .ok()
         .and_then(|s| s.parse().ok())
         .unwrap_or(7410)
+}
+
+/// Writes the system-role WebSocket credential to a file only the user can read.
+#[cfg_attr(not(unix), allow(dead_code))]
+fn write_system_token(token: &str) -> std::io::Result<()> {
+    use std::io::Write;
+    #[cfg(unix)]
+    use std::os::unix::fs::OpenOptionsExt;
+    let path = system_token_path()?;
+    let staging = path.with_extension(format!("systoken.{}", std::process::id()));
+    // A leftover staging file could carry other permissions; the file is
+    // always created afresh so the mode below applies.
+    let _ = std::fs::remove_file(&staging);
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    options.mode(0o600);
+    let written = options.open(&staging).and_then(|mut file| {
+        file.write_all(token.as_bytes())?;
+        file.sync_all()
+    });
+    let result = written.and_then(|()| std::fs::rename(&staging, &path));
+    if result.is_err() {
+        let _ = std::fs::remove_file(&staging);
+    }
+    result
+}
+
+fn system_token_path() -> std::io::Result<PathBuf> {
+    let dir = PathBuf::from(
+        std::env::var("XDG_RUNTIME_DIR")
+            .map_err(|_| std::io::Error::other("XDG_RUNTIME_DIR not set"))?,
+    )
+    .join("weft");
+    std::fs::create_dir_all(&dir)?;
+    Ok(dir.join("appd.systoken"))
 }
 
 #[cfg_attr(not(any(unix, test)), allow(dead_code))]

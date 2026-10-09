@@ -7,8 +7,8 @@ use std::sync::{Arc, Mutex};
 use servo::{
     DeviceIntRect, DeviceIntSize, DevicePoint, EventLoopWaker, InputEvent, LoadStatus,
     MouseButton as ServoMouseButton, MouseButtonAction, MouseButtonEvent, MouseMoveEvent,
-    RenderingContext, RgbaImage, ServoBuilder, ServoDelegate, ServoUrl, UserContentManager,
-    UserScript, WebViewBuilder, WebViewDelegate,
+    NavigationRequest, RenderingContext, RgbaImage, ServoBuilder, ServoDelegate, ServoUrl,
+    UserContentManager, UserScript, WebViewBuilder, WebViewDelegate,
 };
 use winit::{
     application::ApplicationHandler,
@@ -63,12 +63,25 @@ struct FrameSignals {
 
 struct WeftWebViewDelegate {
     signals: Arc<FrameSignals>,
+    /// URL prefix of the application's UI directory; see `ui_scope`.
+    scope: String,
 }
 
 impl WebViewDelegate for WeftWebViewDelegate {
     fn notify_new_frame_ready(&self, _webview: servo::WebView) {
         self.signals.content.store(true, Ordering::Relaxed);
         self.signals.redraw.store(true, Ordering::Relaxed);
+    }
+
+    /// The webview carries the session's bridge, so it stays within the
+    /// application's own UI files.
+    fn request_navigation(&self, _webview: servo::WebView, request: NavigationRequest) {
+        if request.url.as_str().starts_with(&self.scope) {
+            request.allow();
+        } else {
+            tracing::warn!(url = %request.url, "navigation outside the application UI denied");
+            request.deny();
+        }
     }
 
     fn notify_load_status_changed(&self, webview: servo::WebView, status: LoadStatus) {
@@ -96,6 +109,80 @@ fn ready_line() -> String {
         Ok(token) => format!("READY {token}"),
         Err(_) => "READY".to_owned(),
     }
+}
+
+/// The session's application bridge credential from weft-appd.
+///
+/// Only 32 lowercase hex characters are accepted, so the value can be placed
+/// in the injected script without escaping.
+fn bridge_token() -> Option<String> {
+    let token = std::env::var("WEFT_BRIDGE_TOKEN").ok()?;
+    (token.len() == 32
+        && token
+            .bytes()
+            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)))
+    .then_some(token)
+}
+
+/// The URL prefix covering the application's UI: the directory holding its
+/// entry document.
+fn ui_scope(entry: &ServoUrl) -> String {
+    let url = entry.as_str();
+    let end = url.rfind('/').map_or(url.len(), |slash| slash + 1);
+    url[..end].to_owned()
+}
+
+/// `value` as a single-quoted JavaScript string literal.
+fn js_string(value: &str) -> String {
+    let mut literal = String::with_capacity(value.len() + 2);
+    literal.push('\'');
+    for c in value.chars() {
+        match c {
+            ' '..='~' if c != '\'' && c != '\\' => literal.push(c),
+            _ => literal.push_str(&format!("\\u{{{:x}}}", u32::from(c))),
+        }
+    }
+    literal.push('\'');
+    literal
+}
+
+/// The `window.weftIpc` bridge injected into the application document.
+///
+/// Servo runs user scripts in every document, frames included, so the bridge
+/// installs itself only in a top-level document within the application's UI
+/// directory `scope`. It authenticates as this session's application bridge and exchanges
+/// `APP_MESSAGE` envelopes with weft-appd. `send` accepts a string or a
+/// JSON-serialisable value; `onmessage` receives each payload string. The
+/// credential stays inside the closure.
+fn bridge_script(port: u16, session_id: u64, token: &str, scope: &str) -> String {
+    let scope = js_string(scope);
+    format!(
+        r#"(function () {{
+  if (window !== window.top || location.href.indexOf({scope}) !== 0) return;
+  var ws = new WebSocket('ws://127.0.0.1:{port}/app');
+  var queue = [];
+  var open = false;
+  function envelope(m) {{
+    return JSON.stringify({{ type: 'APP_MESSAGE', payload: typeof m === 'string' ? m : JSON.stringify(m) }});
+  }}
+  ws.onopen = function () {{
+    ws.send(JSON.stringify({{ type: 'HELLO', role: 'app', session_id: {session_id}, token: '{token}' }}));
+    open = true;
+    queue.forEach(function (m) {{ ws.send(envelope(m)); }});
+    queue.length = 0;
+  }};
+  ws.onmessage = function (e) {{
+    var msg;
+    try {{ msg = JSON.parse(e.data); }} catch (_) {{ return; }}
+    if (msg.type === 'APP_MESSAGE' && window.weftIpc.onmessage) window.weftIpc.onmessage(msg.payload);
+  }};
+  window.weftSessionId = {session_id};
+  window.weftIpc = {{
+    send: function (m) {{ if (open) ws.send(envelope(m)); else queue.push(m); }},
+    onmessage: null
+  }};
+}})();"#
+    )
 }
 
 /// Servo preferences shared by the WEFT hosts.
@@ -316,16 +403,20 @@ impl ApplicationHandler<ServoWake> for App {
         if let Some(kit_js) = load_ui_kit_script() {
             ucm.add_script(Rc::new(UserScript::new(kit_js, None)));
         }
-        let bridge_js = format!(
-            r#"(function(){{var ws=new WebSocket('ws://127.0.0.1:{p}');var sid={sid};var q=[];var r=false;ws.onopen=function(){{r=true;q.forEach(function(m){{ws.send(JSON.stringify(m))}});q.length=0}};window.weftSessionId=sid;window.weftIpc={{send:function(m){{if(r)ws.send(JSON.stringify(m));else q.push(m)}},onmessage:null}};ws.onmessage=function(e){{if(window.weftIpc.onmessage)window.weftIpc.onmessage(JSON.parse(e.data))}}}})()"#,
-            p = self.ws_port,
-            sid = self.session_id,
-        );
-        ucm.add_script(Rc::new(UserScript::new(bridge_js, None)));
+        match bridge_token() {
+            Some(token) => ucm.add_script(Rc::new(UserScript::new(
+                bridge_script(self.ws_port, self.session_id, &token, &ui_scope(&self.url)),
+                None,
+            ))),
+            None => {
+                tracing::warn!("WEFT_BRIDGE_TOKEN missing or malformed; app messaging disabled")
+            }
+        }
 
         let webview = WebViewBuilder::new(&servo, rendering_context.as_dyn())
             .delegate(Rc::new(WeftWebViewDelegate {
                 signals: Arc::clone(&self.signals),
+                scope: ui_scope(&self.url),
             }))
             .user_content_manager(ucm)
             .url(self.url.clone().into_url())

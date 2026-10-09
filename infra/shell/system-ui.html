@@ -245,43 +245,68 @@
         }
       });
 
-      var APPD_WS_PORT = window.WEFT_APPD_WS_PORT || 7410;
+      // weft-servo-shell supplies weft-appd's port and system token through
+      // window.weftAppdEndpoint once weft-appd is running, and again after it
+      // restarts. Nothing connects before then.
+      var appd = null;
       var ws = null;
       var wsReconnectDelay = 1000;
+      var wsReconnectTimer = null;
+
+      window.weftAppdEndpoint = function (port, token) {
+        if (appd && appd.port === port && appd.token === token) return;
+        appd = { port: port, token: token };
+        wsReconnectDelay = 1000;
+        if (ws) {
+          // The close handler reconnects with the new endpoint.
+          ws.close();
+        } else {
+          clearTimeout(wsReconnectTimer);
+          wsReconnectTimer = null;
+          appdConnect();
+        }
+      };
 
       function appdConnect() {
+        wsReconnectTimer = null;
+        if (!appd || ws) return;
+        var endpoint = appd;
+        var socket;
         try {
-          ws = new WebSocket('ws://127.0.0.1:' + APPD_WS_PORT + '/appd');
+          socket = new WebSocket('ws://127.0.0.1:' + endpoint.port + '/appd');
         } catch (e) {
           scheduleReconnect();
           return;
         }
+        ws = socket;
 
-        ws.addEventListener('open', function () {
+        socket.addEventListener('open', function () {
+          if (ws !== socket) return;
           wsReconnectDelay = 1000;
+          socket.send(JSON.stringify({ type: 'HELLO', role: 'system', token: endpoint.token }));
           document.querySelectorAll('weft-taskbar-app').forEach(function (el) { el.remove(); });
-          ws.send(JSON.stringify({ type: 'QUERY_RUNNING' }));
-          ws.send(JSON.stringify({ type: 'QUERY_INSTALLED_APPS' }));
+          socket.send(JSON.stringify({ type: 'QUERY_RUNNING' }));
+          socket.send(JSON.stringify({ type: 'QUERY_INSTALLED_APPS' }));
         });
 
-        ws.addEventListener('message', function (ev) {
+        socket.addEventListener('message', function (ev) {
+          if (ws !== socket) return;
           var msg;
           try { msg = JSON.parse(ev.data); } catch (e) { return; }
           handleAppdMessage(msg);
         });
 
-        ws.addEventListener('close', function () {
+        // A failed socket also fires close, so reconnection is handled there.
+        socket.addEventListener('close', function () {
+          if (ws !== socket) return;
           ws = null;
           scheduleReconnect();
-        });
-
-        ws.addEventListener('error', function () {
-          ws = null;
         });
       }
 
       function scheduleReconnect() {
-        setTimeout(appdConnect, wsReconnectDelay);
+        if (wsReconnectTimer !== null) return;
+        wsReconnectTimer = setTimeout(appdConnect, wsReconnectDelay);
         wsReconnectDelay = Math.min(wsReconnectDelay * 2, 16000);
       }
 
@@ -329,14 +354,15 @@
           var icon = document.createElement('weft-app-icon');
           icon.dataset.appId = app.app_id;
           icon.title = app.app_id + (app.version ? ' v' + app.version : '');
+          // Names come from package manifests; they are set as text, never markup.
           icon.innerHTML =
             '<svg width="40" height="40" viewBox="0 0 40 40" fill="none"' +
             ' xmlns="http://www.w3.org/2000/svg" aria-hidden="true">' +
             '<rect width="40" height="40" rx="10" fill="rgba(91,138,245,0.25)"/>' +
             '<text x="20" y="27" text-anchor="middle" font-size="18" fill="rgba(255,255,255,0.8)">' +
-            (app.name ? app.name.charAt(0).toUpperCase() : '?') +
-            '</text></svg>' +
-            '<span>' + (app.name || app.app_id) + '</span>';
+            '</text></svg><span></span>';
+          icon.querySelector('text').textContent = app.name ? app.name.charAt(0).toUpperCase() : '?';
+          icon.querySelector('span').textContent = app.name || app.app_id;
           icon.addEventListener('click', function () {
             if (ws && ws.readyState === WebSocket.OPEN) {
               ws.send(JSON.stringify({ type: 'LAUNCH_APP', app_id: app.app_id, surface_id: 0 }));
@@ -398,7 +424,6 @@
         setTimeout(function () { note.remove(); }, 4000);
       }
 
-      appdConnect();
     }());
   </script>
 </body>

@@ -7,8 +7,8 @@ use std::sync::{Arc, Mutex};
 use servo::{
     DeviceIntRect, DeviceIntSize, DevicePoint, EventLoopWaker, InputEvent,
     MouseButton as ServoMouseButton, MouseButtonAction, MouseButtonEvent, MouseMoveEvent,
-    RenderingContext, RgbaImage, ServoBuilder, ServoDelegate, ServoUrl, UserContentManager,
-    UserScript, WebViewBuilder, WebViewDelegate,
+    NavigationRequest, RenderingContext, RgbaImage, ServoBuilder, ServoDelegate, ServoUrl,
+    UserContentManager, UserScript, WebViewBuilder, WebViewDelegate,
 };
 use winit::{
     application::ApplicationHandler,
@@ -67,6 +67,8 @@ struct FrameSignals {
 
 struct WeftWebViewDelegate {
     signals: Arc<FrameSignals>,
+    /// The system UI document; the only one the webview may show.
+    document: String,
 }
 
 impl WebViewDelegate for WeftWebViewDelegate {
@@ -74,6 +76,39 @@ impl WebViewDelegate for WeftWebViewDelegate {
         self.signals.content.store(true, Ordering::Relaxed);
         self.signals.redraw.store(true, Ordering::Relaxed);
     }
+
+    /// The system UI holds appd's system credential, so its webview never
+    /// leaves the system UI document.
+    fn request_navigation(&self, _webview: servo::WebView, request: NavigationRequest) {
+        if same_document(request.url.as_str(), &self.document) {
+            request.allow();
+        } else {
+            tracing::warn!(url = %request.url, "navigation away from the system UI denied");
+            request.deny();
+        }
+    }
+}
+
+/// Whether two URLs name the same document, ignoring any fragment.
+fn same_document(a: &str, b: &str) -> bool {
+    fn document(url: &str) -> &str {
+        url.split_once('#').map_or(url, |(document, _)| document)
+    }
+    document(a) == document(b)
+}
+
+/// `value` as a single-quoted JavaScript string literal.
+fn js_string(value: &str) -> String {
+    let mut literal = String::with_capacity(value.len() + 2);
+    literal.push('\'');
+    for c in value.chars() {
+        match c {
+            ' '..='~' if c != '\'' && c != '\\' => literal.push(c),
+            _ => literal.push_str(&format!("\\u{{{:x}}}", u32::from(c))),
+        }
+    }
+    literal.push('\'');
+    literal
 }
 
 /// Servo preferences shared by the WEFT hosts.
@@ -182,6 +217,49 @@ struct App {
     cursor_pos: DevicePoint,
     shell_client: Option<crate::shell_client::ShellClient>,
     gesture_thread: Option<std::thread::JoinHandle<()>>,
+    /// weft-appd's WebSocket port and system token, once both are available.
+    endpoint: Option<AppdEndpoint>,
+    next_endpoint_check: std::time::Instant,
+}
+
+/// How the system UI reaches weft-appd.
+#[derive(Clone, PartialEq)]
+struct AppdEndpoint {
+    port: u16,
+    token: String,
+}
+
+/// How often the shell rereads weft-appd's port and token files, which change
+/// when weft-appd restarts.
+const ENDPOINT_CHECK_INTERVAL: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// Reads weft-appd's port (`WEFT_APPD_WS_PORT`, then `appd.wsport`, then
+/// `default_port`) and its system token from `appd.systoken`. Only a token of
+/// 32 lowercase hex characters is accepted, so it can be placed in a script.
+fn appd_endpoint(default_port: u16) -> Option<AppdEndpoint> {
+    let dir = PathBuf::from(std::env::var("XDG_RUNTIME_DIR").ok()?).join("weft");
+    let token = std::fs::read_to_string(dir.join("appd.systoken")).ok()?;
+    let token = token.trim();
+    if token.len() != 32
+        || !token
+            .bytes()
+            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+    {
+        return None;
+    }
+    let port = std::env::var("WEFT_APPD_WS_PORT")
+        .ok()
+        .and_then(|p| p.trim().parse().ok())
+        .or_else(|| {
+            std::fs::read_to_string(dir.join("appd.wsport"))
+                .ok()
+                .and_then(|p| p.trim().parse().ok())
+        })
+        .unwrap_or(default_port);
+    Some(AppdEndpoint {
+        port,
+        token: token.to_owned(),
+    })
 }
 
 impl App {
@@ -200,7 +278,47 @@ impl App {
             cursor_pos: DevicePoint::origin(),
             shell_client: None,
             gesture_thread: None,
+            endpoint: None,
+            next_endpoint_check: std::time::Instant::now(),
         }
+    }
+
+    /// Rereads the appd endpoint and hands it to the system UI. The page's
+    /// `weftAppdEndpoint` reconnects only when the endpoint changed, so
+    /// repeating the call also covers page reloads.
+    fn deliver_endpoint(&mut self, event_loop: &ActiveEventLoop) {
+        let now = std::time::Instant::now();
+        if now < self.next_endpoint_check {
+            return;
+        }
+        self.next_endpoint_check = now + ENDPOINT_CHECK_INTERVAL;
+        event_loop.set_control_flow(winit::event_loop::ControlFlow::WaitUntil(
+            self.next_endpoint_check,
+        ));
+        self.endpoint = appd_endpoint(self.ws_port);
+        let (Some(endpoint), Some(webview)) = (&self.endpoint, &self.webview) else {
+            return;
+        };
+        // The credential goes only to the system UI document. Navigation away
+        // from it is denied; the script checks the document again because a
+        // load can still be under way when it runs.
+        if !webview
+            .url()
+            .is_some_and(|url| same_document(url.as_str(), self.url.as_str()))
+        {
+            return;
+        }
+        let document = js_string(self.url.as_str().split('#').next().unwrap_or_default());
+        webview.evaluate_javascript(
+            format!(
+                "window === window.top && \
+                 location.href.split('#')[0] === {document} && \
+                 typeof window.weftAppdEndpoint === 'function' && \
+                 window.weftAppdEndpoint({}, '{}')",
+                endpoint.port, endpoint.token
+            ),
+            |_| {},
+        );
     }
 
     /// Paints and presents once Servo has requested its first repaint.
@@ -271,15 +389,11 @@ impl ApplicationHandler<ServoWake> for App {
         if let Some(kit_js) = load_ui_kit_script() {
             user_content_manager.add_script(Rc::new(UserScript::new(kit_js, None)));
         }
-        let bridge_js = format!(
-            r#"(function(){{var ws=new WebSocket('ws://127.0.0.1:{p}');var q=[];var r=false;ws.onopen=function(){{r=true;q.forEach(function(m){{ws.send(JSON.stringify(m))}});q.length=0}};window.weftIpc={{send:function(m){{if(r)ws.send(JSON.stringify(m));else q.push(m)}},onmessage:null}};ws.onmessage=function(e){{if(window.weftIpc.onmessage)window.weftIpc.onmessage(JSON.parse(e.data))}}}})()"#,
-            p = self.ws_port
-        );
-        user_content_manager.add_script(Rc::new(UserScript::new(bridge_js, None)));
 
         let webview = WebViewBuilder::new(&servo, rendering_context.as_dyn())
             .delegate(Rc::new(WeftWebViewDelegate {
                 signals: Arc::clone(&self.signals),
+                document: self.url.as_str().to_owned(),
             }))
             .user_content_manager(Rc::clone(&user_content_manager))
             .url(self.url.clone().into_url())
@@ -315,15 +429,19 @@ impl ApplicationHandler<ServoWake> for App {
                     .as_ref()
                     .map(|h| h.is_finished())
                     .unwrap_or(true);
-                if prev_done {
-                    let ws_port = self.ws_port;
+                if let (true, Some(endpoint)) = (prev_done, self.endpoint.clone()) {
                     self.gesture_thread = Some(std::thread::spawn(move || {
-                        forward_gestures_to_appd(ws_port, &gestures);
+                        forward_gestures_to_appd(&endpoint, &gestures);
                     }));
-                } else {
+                } else if !prev_done {
                     tracing::debug!(
                         count = gestures.len(),
                         "gesture forwarding in progress; dropping batch"
+                    );
+                } else {
+                    tracing::debug!(
+                        count = gestures.len(),
+                        "weft-appd endpoint unknown; dropping gestures"
                     );
                 }
             }
@@ -333,6 +451,7 @@ impl ApplicationHandler<ServoWake> for App {
             event_loop.exit();
             return;
         }
+        self.deliver_endpoint(event_loop);
         if let Some(servo) = &self.servo {
             servo.spin_event_loop();
         }
@@ -507,9 +626,12 @@ pub fn run(html_path: &Path, ws_port: u16) -> anyhow::Result<()> {
         .map_err(|e| anyhow::anyhow!("event loop run: {e}"))
 }
 
-fn forward_gestures_to_appd(ws_port: u16, gestures: &[crate::shell_client::PendingGesture]) {
+fn forward_gestures_to_appd(
+    endpoint: &AppdEndpoint,
+    gestures: &[crate::shell_client::PendingGesture],
+) {
     use std::net::TcpStream;
-    let addr = format!("127.0.0.1:{ws_port}");
+    let addr = format!("127.0.0.1:{}", endpoint.port);
     let stream = match TcpStream::connect(&addr) {
         Ok(s) => s,
         Err(e) => {
@@ -525,6 +647,11 @@ fn forward_gestures_to_appd(ws_port: u16, gestures: &[crate::shell_client::Pendi
             return;
         }
     };
+    let hello = serde_json::json!({ "type": "HELLO", "role": "system", "token": endpoint.token });
+    if let Err(e) = ws.send(tungstenite::Message::Text(hello.to_string())) {
+        tracing::warn!("gesture forward: authentication failed: {e}");
+        return;
+    }
     for g in gestures {
         let json = format!(
             r#"{{"type":"PANEL_GESTURE","gesture_type":{},"fingers":{},"dx":{},"dy":{}}}"#,
