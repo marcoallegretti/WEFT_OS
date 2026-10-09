@@ -48,14 +48,27 @@ fn handle_keyboard<B: InputBackend>(state: &mut WeftCompositorState, event: B::K
     let key_state = event.state();
 
     if let Some(keyboard) = state.seat.get_keyboard() {
-        keyboard.input::<(), _>(
+        // Alt+F4 belongs to the compositor: it asks the focused application
+        // window to close, and the key never reaches a client.
+        let close = keyboard.input::<bool, _>(
             state,
             event.key_code(),
             key_state,
             serial,
             time,
-            |_state, _mods, _keysym| FilterResult::Forward,
+            |_state, mods, keysym| {
+                if mods.alt
+                    && keysym.modified_sym() == smithay::input::keyboard::keysyms::KEY_F4.into()
+                {
+                    FilterResult::Intercept(key_state == smithay::backend::input::KeyState::Pressed)
+                } else {
+                    FilterResult::Forward
+                }
+            },
         );
+        if close == Some(true) {
+            state.close_focused_window();
+        }
     }
 }
 

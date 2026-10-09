@@ -58,6 +58,31 @@ impl WeftCompositorState {
         }
     }
 
+    /// Asks the focused application window to close. Its client decides
+    /// how to end; for an app shell that ends the session. The panel is not
+    /// closed this way.
+    pub fn close_focused_window(&mut self) {
+        let Some(focus) = self
+            .seat
+            .get_keyboard()
+            .and_then(|keyboard| keyboard.current_focus())
+        else {
+            return;
+        };
+        if self.is_panel_surface(&focus) {
+            return;
+        }
+        let window = self
+            .space
+            .elements()
+            .find(|window| window.wl_surface().is_some_and(|s| *s == focus))
+            .cloned();
+        if let Some(toplevel) = window.as_ref().and_then(|w| w.toplevel()) {
+            tracing::info!(session = ?window.as_ref().and_then(window_session), "closing the focused window");
+            toplevel.send_close();
+        }
+    }
+
     /// Activates the topmost window of `session_id`; returns whether the
     /// session has one.
     pub fn activate_session(&mut self, session_id: u64) -> bool {

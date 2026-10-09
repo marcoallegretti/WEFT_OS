@@ -346,6 +346,14 @@ impl App {
 }
 
 impl ApplicationHandler<ServoWake> for App {
+    /// Releases Servo and the shell protocol objects while winit's Wayland
+    /// display is still connected; dropped later, the shell client's
+    /// proxies would be destroyed on a display that is gone.
+    fn exiting(&mut self, _event_loop: &ActiveEventLoop) {
+        self.shut_down();
+        self.shell_client = None;
+    }
+
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
         if self.window.is_some() {
             return;
