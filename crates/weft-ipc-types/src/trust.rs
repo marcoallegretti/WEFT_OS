@@ -4,8 +4,9 @@
 //! A package is signed over its content digest: the SHA-256 of a canonical
 //! inventory listing every file except the root `signature.sig`, one
 //! `<relative path>\t<hex sha-256>\n` line per file, sorted by path. Paths use
-//! `/` and must be UTF-8. Symbolic links and special files are refused, so the
-//! signed bytes are exactly the files a package holds.
+//! `/` and must be UTF-8 without control characters, so no name can imitate
+//! the separators of other lines. Symbolic links and special files are
+//! refused, so the signed bytes are exactly the files a package holds.
 
 use std::fmt;
 use std::path::{Path, PathBuf};
@@ -25,6 +26,8 @@ pub enum TrustError {
     NotAFile(PathBuf),
     /// A path in the package is not UTF-8.
     NonUtf8(PathBuf),
+    /// A name in the package holds a control character.
+    ControlCharacter(PathBuf),
     /// A key, signature or owner record is malformed.
     Malformed(PathBuf, String),
     Io(PathBuf, std::io::Error),
@@ -36,6 +39,9 @@ impl fmt::Display for TrustError {
             Self::Link(p) => write!(f, "{} is a symbolic link", p.display()),
             Self::NotAFile(p) => write!(f, "{} is not a regular file or directory", p.display()),
             Self::NonUtf8(p) => write!(f, "{} is not a UTF-8 path", p.display()),
+            Self::ControlCharacter(p) => {
+                write!(f, "{:?} has a control character in its name", p.display())
+            }
             Self::Malformed(p, why) => write!(f, "{}: {why}", p.display()),
             Self::Io(p, e) => write!(f, "{}: {e}", p.display()),
         }
@@ -76,6 +82,9 @@ fn collect(
             .to_str()
             .ok_or_else(|| TrustError::NonUtf8(path.clone()))?
             .to_owned();
+        if relative.chars().any(char::is_control) {
+            return Err(TrustError::ControlCharacter(path));
+        }
         let kind = std::fs::symlink_metadata(&path)
             .map_err(io(&path))?
             .file_type();
@@ -295,6 +304,22 @@ pub fn write_owner(record: &Path, owner: Owner) -> Result<(), TrustError> {
         .map_err(io(parent))
 }
 
+/// Takes the lock that serialises every change to the installation and
+/// owner record of `app_id`, held until the returned file is dropped.
+pub fn lock_owner(data_home: &Path, app_id: &str) -> Result<std::fs::File, TrustError> {
+    let dir = data_home.join("weft/owners");
+    std::fs::create_dir_all(&dir).map_err(io(&dir))?;
+    let path = dir.join(format!(".{app_id}.lock"));
+    let file = std::fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(&path)
+        .map_err(io(&path))?;
+    file.lock().map_err(io(&path))?;
+    Ok(file)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -354,6 +379,39 @@ mod tests {
         assert_eq!(store(&[other]).signer(&dir).unwrap(), None);
         assert_eq!(store(&[other, key]).signer(&dir).unwrap(), Some(key));
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn names_cannot_imitate_other_inventory_lines() {
+        // With files ui/policy.txt and ui/z.css signed, a directory named
+        // "ui/policy.txt\t<hash>\nui" holding z.css would reproduce the
+        // inventory without policy.txt. Such names have no digest.
+        let dir = dir("forged");
+        std::fs::write(dir.join("ui/policy.txt"), b"default-src 'self'").unwrap();
+        std::fs::write(dir.join("ui/z.css"), b"p{}").unwrap();
+        let signed = content_digest(&dir).unwrap();
+        let policy_hash = hex::encode(Sha256::digest(b"default-src 'self'"));
+        std::fs::remove_file(dir.join("ui/policy.txt")).unwrap();
+        let forged = dir.join(format!("ui/policy.txt\t{policy_hash}\nui"));
+        std::fs::create_dir_all(&forged).unwrap();
+        std::fs::rename(dir.join("ui/z.css"), forged.join("z.css")).unwrap();
+        let refused = content_digest(&dir);
+        assert!(matches!(refused, Err(TrustError::ControlCharacter(_))));
+        assert_ne!(refused.ok(), Some(signed));
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn owner_locks_exclude_each_other() {
+        let home = std::env::temp_dir().join(format!("weft_trust_lock_{}", std::process::id()));
+        let held = lock_owner(&home, "org.weft.test.lock").unwrap();
+        let path = home.join("weft/owners/.org.weft.test.lock.lock");
+        let other = std::fs::OpenOptions::new().write(true).open(&path).unwrap();
+        assert!(other.try_lock().is_err());
+        drop(held);
+        assert!(other.try_lock().is_ok());
+        std::fs::remove_dir_all(&home).unwrap();
     }
 
     #[cfg(target_os = "linux")]
