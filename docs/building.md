@@ -139,7 +139,13 @@ Run with QEMU:
 bash infra/vm/run.sh
 ```
 
-See `infra/nixos/weft-packages.nix` for the package derivations. Its `outputHashes` hold one hash per git source in `Cargo.lock` (the Servo and Stylo forks); every package vendors them, so they must match the pinned revisions for any Nix package to build. The Nix shell packages do not yet enable `servo-embed`.
+See `infra/nixos/weft-packages.nix` for the package derivations. Its `outputHashes` hold one hash per git source in `Cargo.lock` (the Servo and Stylo forks); every package vendors them, so they must match the pinned revisions for any Nix package to build.
+
+The VM's user session starts `weft-compositor`, `weft-servo-shell` with the system UI page its package installs, and `weft-appd` with the runtime, app shell, file portal and mount helper packages. The image is not yet bootable to a working desktop:
+
+- the Servo source hash in `outputHashes` is still a placeholder, so no package builds until a Nix build reports it;
+- the shell packages do not enable `servo-embed`, so `weft-servo-shell` and `weft-app-shell` exit at startup;
+- the shell's service names the compositor's socket `wayland-1`, the first name the compositor tries, rather than learning it.
 
 ## CI
 

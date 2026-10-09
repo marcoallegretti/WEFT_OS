@@ -26,8 +26,8 @@ let
     nativeBuildInputs = with pkgs; [ pkg-config ];
   };
 
-  mkWeftPkg = { pname, extraBuildInputs ? [], extraNativeBuildInputs ? [], cargoFlags ? [], extraEnv ? {}, preBuild ? "" }: rustPlatform.buildRustPackage (commonArgs // {
-    inherit pname preBuild;
+  mkWeftPkg = { pname, extraBuildInputs ? [], extraNativeBuildInputs ? [], cargoFlags ? [], extraEnv ? {}, preBuild ? "", postInstall ? "" }: rustPlatform.buildRustPackage (commonArgs // {
+    inherit pname preBuild postInstall;
     cargoBuildFlags = [ "--package" pname ] ++ cargoFlags;
     cargoTestFlags = [ "--package" pname ];
     buildInputs = extraBuildInputs;
@@ -50,6 +50,10 @@ in {
 
   weft-servo-shell = mkWeftPkg {
     pname = "weft-servo-shell";
+    # The system UI page, at the path the shell's units name.
+    postInstall = ''
+      install -Dm644 infra/shell/system-ui.html $out/share/weft/shell/system-ui.html
+    '';
   };
 
   weft-app-shell = mkWeftPkg {

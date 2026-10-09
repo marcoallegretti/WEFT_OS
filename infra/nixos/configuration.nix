@@ -96,6 +96,7 @@
       wantedBy = [ "graphical-session.target" ];
       environment = {
         WAYLAND_DISPLAY = "wayland-1";
+        WEFT_SYSTEM_UI_HTML = "${pkgs.weft.weft-servo-shell}/share/weft/shell/system-ui.html";
       };
       serviceConfig = {
         Type = "simple";
@@ -109,6 +110,7 @@
       description = "WEFT Application Daemon";
       requires = [ "weft-compositor.service" ];
       after = [ "weft-compositor.service" "weft-servo-shell.service" ];
+      wantedBy = [ "graphical-session.target" ];
       serviceConfig = {
         Type = "notify";
         ExecStart = "${pkgs.weft.weft-appd}/bin/weft-appd";
@@ -116,6 +118,7 @@
         RestartSec = "1s";
         Environment = [
           "WEFT_RUNTIME_BIN=${pkgs.weft.weft-runtime}/bin/weft-runtime"
+          "WEFT_APP_SHELL_BIN=${pkgs.weft.weft-app-shell}/bin/weft-app-shell"
           "WEFT_FILE_PORTAL_BIN=${pkgs.weft.weft-file-portal}/bin/weft-file-portal"
           "WEFT_MOUNT_HELPER=${pkgs.weft.weft-mount-helper}/bin/weft-mount-helper"
         ];

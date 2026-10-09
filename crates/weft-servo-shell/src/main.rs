@@ -37,12 +37,17 @@ fn run() -> anyhow::Result<()> {
     embed_servo(&wayland_display, &html_path, ws_port)
 }
 
+/// Where the weft-servo-shell package installs the system UI page;
+/// `infra/systemd/servo-shell.service` relies on it.
+const PACKAGED_SYSTEM_UI: &str =
+    "/packages/system/weft-servo-shell/active/share/weft/shell/system-ui.html";
+
 fn system_ui_html_path() -> anyhow::Result<PathBuf> {
     if let Ok(p) = std::env::var("WEFT_SYSTEM_UI_HTML") {
         return Ok(PathBuf::from(p));
     }
 
-    let packaged = PathBuf::from("/packages/system/servo-shell/active/share/weft/system-ui.html");
+    let packaged = PathBuf::from(PACKAGED_SYSTEM_UI);
     if packaged.exists() {
         return Ok(packaged);
     }
