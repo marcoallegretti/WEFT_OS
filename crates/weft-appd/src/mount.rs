@@ -49,33 +49,48 @@ impl Drop for Mount {
     }
 }
 
+/// Why an image was not mounted.
+pub(crate) enum MountError {
+    /// The image files are incomplete or malformed.
+    Invalid(String),
+    /// The host could not mount a well-formed image.
+    Host(String),
+}
+
 /// Mounts the verified image `files` of `app_id`. Every failure is returned:
 /// the caller must not fall back to another copy of the package.
-pub(crate) fn mount(app_id: &str, files: &ImageFiles) -> Result<Mount, String> {
-    let helper = mount_helper_bin().ok_or("weft-mount-helper is not installed")?;
+pub(crate) fn mount(app_id: &str, files: &ImageFiles) -> Result<Mount, MountError> {
+    use MountError::{Host, Invalid};
     for path in [&files.image, &files.hash_tree, &files.root_hash] {
         let is_file = std::fs::symlink_metadata(path).is_ok_and(|m| m.file_type().is_file());
         if !is_file {
-            return Err(format!(
+            return Err(Invalid(format!(
                 "{} is missing or not a regular file",
                 path.display()
-            ));
+            )));
         }
     }
     let root_hash = std::fs::read_to_string(&files.root_hash)
-        .map_err(|e| format!("cannot read {}: {e}", files.root_hash.display()))?;
+        .map_err(|e| Host(format!("cannot read {}: {e}", files.root_hash.display())))?;
     let root_hash = root_hash.trim();
     if !is_root_hash(root_hash) {
-        return Err(format!("{} holds no root hash", files.root_hash.display()));
+        return Err(Invalid(format!(
+            "{} holds no root hash",
+            files.root_hash.display()
+        )));
     }
+    let helper = mount_helper_bin().ok_or(Host("weft-mount-helper is not installed".into()))?;
 
-    let runtime_dir = std::env::var_os("XDG_RUNTIME_DIR").ok_or("XDG_RUNTIME_DIR is not set")?;
+    let runtime_dir =
+        std::env::var_os("XDG_RUNTIME_DIR").ok_or(Host("XDG_RUNTIME_DIR is not set".into()))?;
     let base = PathBuf::from(runtime_dir).join("weft/mnt");
-    crate::private_dir(&base).map_err(|e| format!("cannot create {}: {e}", base.display()))?;
-    let name = crate::runtime::random_token().map_err(|e| format!("no mountpoint name: {e}"))?;
+    crate::private_dir(&base)
+        .map_err(|e| Host(format!("cannot create {}: {e}", base.display())))?;
+    let name =
+        crate::runtime::random_token().map_err(|e| Host(format!("no mountpoint name: {e}")))?;
     let mountpoint = base.join(name);
     std::fs::create_dir(&mountpoint)
-        .map_err(|e| format!("cannot create {}: {e}", mountpoint.display()))?;
+        .map_err(|e| Host(format!("cannot create {}: {e}", mountpoint.display())))?;
 
     let status = std::process::Command::new(&helper)
         .arg("mount")
@@ -91,10 +106,10 @@ pub(crate) fn mount(app_id: &str, files: &ImageFiles) -> Result<Mount, String> {
         }
         outcome => {
             let _ = std::fs::remove_dir(&mountpoint);
-            Err(match outcome {
+            Err(Host(match outcome {
                 Ok(status) => format!("weft-mount-helper failed: {status}"),
                 Err(e) => format!("cannot run {}: {e}", helper.display()),
-            })
+            }))
         }
     }
 }

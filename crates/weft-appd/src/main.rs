@@ -1250,6 +1250,93 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
+    async fn children_receive_the_resolved_package_files() {
+        use std::os::unix::fs::PermissionsExt;
+        let _env = env_lock().lock().await;
+        use_test_runtime_dir();
+        let dir = std::env::temp_dir().join(format!("weft_test_args_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let app = dir.join("store/org.example.args");
+        write_test_package(&app, "org.example.args", "");
+        // Each child records its arguments, one per line, then reports ready.
+        let log = dir.join("args.log");
+        let child = dir.join("child.sh");
+        std::fs::write(
+            &child,
+            format!(
+                "#!/bin/sh\nprintf '%s\\n' \"$@\" -- >> '{}'\necho READY $WEFT_READY_TOKEN\nexec sleep 1\n",
+                log.display()
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&child, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let vars = [
+            ("WEFT_RUNTIME_BIN", child.clone().into_os_string()),
+            ("WEFT_APP_SHELL_BIN", child.clone().into_os_string()),
+            ("WEFT_DISABLE_CGROUP", "1".into()),
+            ("WEFT_APP_STORE", dir.join("store").into_os_string()),
+        ];
+        let prior: Vec<_> = vars
+            .iter()
+            .map(|(k, _)| (*k, std::env::var_os(k)))
+            .collect();
+        for (key, value) in &vars {
+            // SAFETY: env_lock is held on a current_thread runtime.
+            unsafe { std::env::set_var(key, value) };
+        }
+
+        let registry = make_registry();
+        let mut rx = registry.lock().await.subscribe();
+        let ack = dispatch(
+            Request::LaunchApp {
+                app_id: "org.example.args".into(),
+                surface_id: 0,
+            },
+            &registry,
+        )
+        .await;
+        let stopped = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            while !matches!(
+                rx.recv().await,
+                Ok(Response::AppState {
+                    state: AppStateKind::Stopped,
+                    ..
+                })
+            ) {}
+        })
+        .await;
+        let recorded = std::fs::read_to_string(&log).unwrap_or_default();
+
+        for (key, value) in prior {
+            // SAFETY: as above.
+            unsafe {
+                match value {
+                    Some(v) => std::env::set_var(key, v),
+                    None => std::env::remove_var(key),
+                }
+            }
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(matches!(ack, Response::LaunchAck { .. }), "{ack:?}");
+        assert!(stopped.is_ok(), "session did not stop");
+        let runs: Vec<Vec<&str>> = recorded
+            .split("--\n")
+            .filter(|run| !run.is_empty())
+            .map(|run| run.lines().collect())
+            .collect();
+        let after = |run: &[&str], flag: &str| {
+            run.iter()
+                .position(|arg| *arg == flag)
+                .and_then(|i| run.get(i + 1).map(|value| value.to_string()))
+        };
+        let module = app.join("app.wasm").display().to_string();
+        let ui = app.join("ui/index.html").display().to_string();
+        assert_eq!(runs.len(), 2, "{recorded}");
+        assert_eq!(after(&runs[0], "--module"), Some(module), "{recorded}");
+        assert_eq!(after(&runs[1], "--ui"), Some(ui), "{recorded}");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
     async fn supervisor_transitions_through_ready_to_stopped() {
         use std::os::unix::fs::PermissionsExt;
 

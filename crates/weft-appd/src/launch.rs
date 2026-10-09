@@ -6,7 +6,7 @@
 
 use std::path::{Path, PathBuf};
 
-use weft_ipc_types::manifest::{MANIFEST_FILE, Manifest, entry_path};
+use weft_ipc_types::manifest::{MANIFEST_FILE, Manifest, ManifestError, entry_path};
 use weft_ipc_types::package::{ImageFiles, is_valid_app_id};
 
 use crate::grants::Refusal;
@@ -26,23 +26,38 @@ pub(crate) struct LaunchPackage {
     pub(crate) image: Option<Mount>,
 }
 
-/// Resolves `app_id` in the package stores, in order. In each store a
-/// verified image takes precedence over a directory install. When any image
-/// file is present for the ID, the image must mount: a missing or damaged
-/// image never falls back to a directory, which nothing verifies.
+/// Resolves `app_id` in the package stores.
 pub(crate) fn resolve(app_id: &str) -> Result<LaunchPackage, Refusal> {
+    resolve_in(app_id, &crate::app_store_roots())
+}
+
+/// Resolves `app_id` in `stores`. A verified image in any store takes
+/// precedence over a directory install in any store, so a writable user
+/// directory cannot shadow a system image. When any image file is present
+/// for the ID, the image must mount: a missing or damaged image never falls
+/// back to a directory, which nothing verifies.
+fn resolve_in(app_id: &str, stores: &[PathBuf]) -> Result<LaunchPackage, Refusal> {
+    use crate::mount::MountError;
     if !is_valid_app_id(app_id) {
         return Err(Refusal::new(400, "invalid app ID"));
     }
-    for store in crate::app_store_roots() {
-        let files = ImageFiles::in_store(&store, app_id);
-        if files.any_present() {
-            let image = crate::mount::mount(app_id, &files).map_err(|e| {
+    if let Some(files) = stores
+        .iter()
+        .map(|store| ImageFiles::in_store(store, app_id))
+        .find(ImageFiles::any_present)
+    {
+        let image = crate::mount::mount(app_id, &files).map_err(|e| match e {
+            MountError::Invalid(e) => {
+                Refusal::new(403, format!("the verified image is invalid: {e}"))
+            }
+            MountError::Host(e) => {
                 Refusal::new(500, format!("the verified image cannot be mounted: {e}"))
-            })?;
-            let root = image.root().to_path_buf();
-            return from_root(app_id, root, Some(image));
-        }
+            }
+        })?;
+        let root = image.root().to_path_buf();
+        return from_root(app_id, root, Some(image));
+    }
+    for store in stores {
         let dir = store.join(app_id);
         if std::fs::symlink_metadata(dir.join(MANIFEST_FILE)).is_ok() {
             return from_root(app_id, dir, None);
@@ -55,7 +70,25 @@ pub(crate) fn resolve(app_id: &str) -> Result<LaunchPackage, Refusal> {
 }
 
 fn from_root(app_id: &str, root: PathBuf, image: Option<Mount>) -> Result<LaunchPackage, Refusal> {
-    let manifest = Manifest::read(&root).map_err(|e| Refusal::new(403, e.to_string()))?;
+    // The entries are checked inside `root`, so the root and its manifest
+    // must be the directory and file they appear to be, not links to
+    // something else.
+    let is_dir = std::fs::symlink_metadata(&root).is_ok_and(|m| m.file_type().is_dir());
+    let manifest_is_file =
+        std::fs::symlink_metadata(root.join(MANIFEST_FILE)).is_ok_and(|m| m.file_type().is_file());
+    if !is_dir || !manifest_is_file {
+        return Err(Refusal::new(
+            403,
+            format!(
+                "{} must be a directory holding a regular {MANIFEST_FILE}, not a link",
+                root.display()
+            ),
+        ));
+    }
+    let manifest = Manifest::read(&root).map_err(|e| match e {
+        ManifestError::Io(..) => Refusal::new(500, e.to_string()),
+        ManifestError::Parse(..) => Refusal::new(403, e.to_string()),
+    })?;
     if manifest.package.id != app_id {
         return Err(Refusal::new(
             403,
@@ -163,6 +196,60 @@ mod tests {
     }
 
     #[test]
+    fn an_image_in_a_later_store_is_not_shadowed_by_a_directory() {
+        let _env = crate::tests::env_lock().blocking_lock();
+        crate::tests::use_test_runtime_dir();
+        // A directory install in the user store, an incomplete image in the
+        // system store: the image is chosen, and refused.
+        let user = store("shadow_user", ID, "app.wasm");
+        let system = std::env::temp_dir().join(format!(
+            "weft_appd_launch_shadow_system_{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&system);
+        std::fs::create_dir_all(&system).unwrap();
+        std::fs::write(ImageFiles::in_store(&system, ID).image, b"image").unwrap();
+        let refused = refusal(resolve_in(ID, &[user.clone(), system.clone()]));
+        finish(&user);
+        let _ = std::fs::remove_dir_all(&system);
+        assert_eq!(refused.code, 403, "{}", refused.message);
+        assert!(
+            refused.message.contains("verified image"),
+            "{}",
+            refused.message
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_linked_package_root_or_manifest_is_refused() {
+        let _env = crate::tests::env_lock().blocking_lock();
+        let store = store("linked", ID, "app.wasm");
+        let elsewhere =
+            std::env::temp_dir().join(format!("weft_appd_launch_elsewhere_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&elsewhere);
+        std::fs::rename(store.join(ID), &elsewhere).unwrap();
+        std::os::unix::fs::symlink(&elsewhere, store.join(ID)).unwrap();
+        let root_link = refusal(resolve(ID));
+
+        std::fs::remove_file(store.join(ID)).unwrap();
+        std::fs::rename(&elsewhere, store.join(ID)).unwrap();
+        let manifest = store.join(ID).join(MANIFEST_FILE);
+        std::fs::rename(&manifest, store.join("manifest.toml")).unwrap();
+        std::os::unix::fs::symlink(store.join("manifest.toml"), &manifest).unwrap();
+        let manifest_link = refusal(resolve(ID));
+        finish(&store);
+        for refused in [root_link, manifest_link] {
+            assert_eq!(refused.code, 403, "{}", refused.message);
+            assert!(
+                refused.message.contains("not a link"),
+                "{}",
+                refused.message
+            );
+        }
+    }
+
+    #[test]
     fn a_package_declaring_another_id_is_refused() {
         let _env = crate::tests::env_lock().blocking_lock();
         let store = store("id", "org.weft.test.other", "app.wasm");
@@ -236,8 +323,13 @@ mod tests {
             .map_or(0, Iterator::count);
         finish(&store);
 
-        for refused in [&partial, &failed, &absent, &malformed] {
+        for refused in [&partial, &malformed] {
+            assert_eq!(refused.code, 403, "{}", refused.message);
+        }
+        for refused in [&failed, &absent] {
             assert_eq!(refused.code, 500, "{}", refused.message);
+        }
+        for refused in [&partial, &failed, &absent, &malformed] {
             assert!(
                 refused.message.contains("verified image"),
                 "{}",

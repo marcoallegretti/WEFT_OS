@@ -112,12 +112,12 @@ Package store roots (in priority order):
 
 ### Package resolution
 
-`weft-appd` resolves a launch once, in the first store root that holds the app:
+`weft-appd` resolves a launch once. A verified image in any store root takes precedence over a directory install in any root, so a user's directory cannot shadow a system image; otherwise the first root with a directory install is used:
 
-- **Verified image:** `<root>/<id>.app.img` with its dm-verity hash tree `<id>.app.hash` and root hash `<id>.app.roothash`, the names `weft-pack build-image` and `build-verity` produce. When any of the three exists, the image must mount through `weft-mount-helper`; a missing companion, a malformed root hash, a missing helper or a failed mount refuses the launch, and appd never falls back to a directory install. The mount belongs to the session and is released when the session stops.
+- **Verified image:** `<root>/<id>.app.img` with its dm-verity hash tree `<id>.app.hash` and root hash `<id>.app.roothash`, the names `weft-pack build-image` and `build-verity` produce. When any of the three exists, the image must mount through `weft-mount-helper`; a missing companion, a malformed root hash, a missing helper or a failed mount refuses the launch, and appd never falls back to a directory install. The root hash is read from the store next to the image and is not yet authenticated, so dm-verity detects corruption but not a store whose image, hash tree and root hash were replaced together. The mount belongs to the session and is released when the session stops.
 - **Directory install:** `<root>/<id>/wapp.toml`.
 
-The manifest in the selected package root must declare the requested ID. `[runtime].module` and `[ui].entry` must be relative paths of plain components, without symbolic links, naming regular files inside that root. The component, the UI document and the capabilities all come from that one manifest. A refused launch reports 400 (invalid ID), 404 (not installed), 403 (invalid package) or 500 (the image cannot be used).
+The package root must be a directory and its manifest a regular file, neither a symbolic link, and the manifest must declare the requested ID. `[runtime].module` and `[ui].entry` must be relative paths of plain components, without symbolic links, naming regular files inside that root. The component, the UI document and the capabilities all come from that one manifest. A refused launch reports 400 (invalid ID), 404 (not installed), 403 (invalid package, image or image metadata) or 500 (the host cannot read the package or mount the image).
 
 A directory install can still be changed by its owner while a session runs, and nothing verifies its content at launch.
 
