@@ -6,7 +6,7 @@ WEFT OS is a Wayland compositor and application runtime where every app is a Web
 
 **Compositor** — `weft-compositor` is a Smithay-based Wayland compositor with DRM/KMS and winit backends. It implements the `zweft-shell-unstable-v1` protocol extension, which typed shell slots (panel, application) register against.
 
-**System shell** — `weft-servo-shell` embeds Servo (feature-gated, `--features servo-embed`) and renders `system-ui.html` as a Wayland panel. Without `servo-embed`, the binary builds as a no-op stub. Navigation gestures from the compositor are forwarded to `weft-appd` over WebSocket.
+**System shell** — `weft-servo-shell` embeds Servo (feature-gated, `--features servo-embed`) and renders `system-ui.html` as a Wayland panel. Without `servo-embed`, the binary exits with an error instead of rendering. Navigation gestures from the compositor are forwarded to `weft-appd` over WebSocket.
 
 **App shell** — `weft-app-shell` is a per-process Servo host for application WebViews. It resolves `weft-app://<id>/ui/index.html`, injects a `weftIpc` WebSocket bridge into the page, and registers with the compositor as an application surface. Also feature-gated behind `servo-embed`.
 

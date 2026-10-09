@@ -75,32 +75,64 @@ Install with: `sudo zypper install -y libglvnd-devel libopenssl-devel dbus-1-dev
 
 ## Rendering approach
 
-Default: `SoftwareRenderingContext` (CPU rasterisation) blitted to a
-`softbuffer`-backed winit window.
+Each frame is painted with `WebView::paint` and then presented:
 
-EGL path: set `WEFT_EGL_RENDERING=1` at runtime. The embedder attempts
-`WindowRenderingContext::new` using the winit display and window handles.
-If construction fails it falls back to software automatically.
-When the EGL path is active Servo presents directly to the EGL surface via
-surfman's `eglSwapBuffers`; the softbuffer blit is skipped. Mesa handles
-DMA-BUF buffer sharing with the compositor transparently.
+- **Software (default):** Servo renders into a `SoftwareRenderingContext`.
+  The host reads the painted frame back with `read_to_image`, presents the
+  context and copies the pixels into a persistent `softbuffer` surface on the
+  winit window.
+- **EGL:** with `WEFT_EGL_RENDERING=1` the host creates a
+  `WindowRenderingContext` from winit's display and window handles and
+  presents it directly. If that fails it falls back to software.
+
+Neither host presents anything before Servo's first repaint request; the
+first frames can still be blank or unstyled while the document loads. Both
+enable Servo's `layout_grid_enabled` preference, because the system UI and
+application pages use CSS Grid, which Servo disables by default.
+
+`weft-app-shell` prints `READY` after it presents a frame once the document
+has loaded and Servo reports its rendering settled: on load completion it
+requests `WebView::take_screenshot`, whose callback runs only after `load` has
+fired in every frame, render-blocking resources, images and web fonts are done
+and the rendering is up to date. `weft-appd` does not read this signal yet; it
+treats the runtime's `READY` as session readiness. Neither host prints `READY`
+when built without `servo-embed`; both exit with an error instead.
+
+`tests/frame/check_frame.py` checks this on a real display path: it runs
+`weft-compositor` nested on Xvfb and checks the pixels each host presents for
+`tests/frame/reference.html`. For the app host it requires the page on screen
+within two seconds of `READY`; `--slow-style` delays a render-blocking
+stylesheet that reveals the page, which makes premature readiness visible. A
+build that printed `READY` on its first presented frame failed every
+`--slow-style 4` run; that build was a local experiment, not part of history.
 
 ## Known limitations at this pin
 
 Status is stated against executed evidence; code that exists but has not been
 exercised is listed as unverified.
 
-- **Embedder API**: both `weft-servo-shell` and `weft-app-shell` fail to compile
-  with `servo-embed` against this revision (keyboard events, mouse actions,
-  rendering readback, shutdown and window-handle APIs changed). Until they
-  build and present a frame, input forwarding, surface sharing and rendering
-  in the shells are unverified.
+- **Verified rendering path:** both hosts present the reference page through
+  `weft-compositor`'s winit backend on Xvfb with Mesa 25.2.8 llvmpipe, using
+  the software path (Ubuntu 24.04, x86_64; `check_frame.py --host system`,
+  `--host app` and `--host app --slow-style 3`, five runs each). The EGL path,
+  DRM sessions, resize, output scale and idle wakeup are unverified.
+- **Input:** keyboard and pointer events are forwarded through
+  `WebView::notify_input_event`; delivery through the compositor is
+  unverified.
 - **`backdrop-filter`**: the parsing (Stylo `f1ba496`) and rendering (Servo
-  `8e7dc40`, `f0bb1aa`) patches are selected by the lockfile. Rendering is
-  unverified until a pixel check passes on the shells.
+  `8e7dc40`, `f0bb1aa`) patches are selected by the lockfile; rendering is
+  unverified.
+- **Resources:** the hosts install no Servo resource reader, so Servo logs
+  `Resource reader not set` and uses empty resources: the public suffix list,
+  HSTS preload list, Bluetooth blocklist, certificate and network error pages,
+  crash and directory-listing pages and media controls. Servo falls back to its
+  built-in placeholder image.
+- **Window decorations:** `weft-compositor` offers no server-side decorations,
+  so winit draws a client-side title bar on both hosts' windows, including the
+  system panel.
 - **Shell surface association**: the shells pass winit's `wl_display` and
   `wl_surface` to `zweft_shell_manager_v1.create_window` through a shared
-  connection; unverified at this revision.
+  connection; unverified.
 - **WebGPU on Mesa**: not evaluated.
 - **Process separation**: each app runs as separate `weft-app-shell` and
   `weft-runtime` processes supervised by `weft-appd`. Separate processes alone
