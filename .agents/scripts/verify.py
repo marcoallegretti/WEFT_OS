@@ -36,7 +36,7 @@ PROFILES = {
         ],
     ),
     "portable": (
-        "Formatting, Clippy and tests for crates built on every host (CI cross-platform)",
+        "Formatting, Clippy and tests for crates that need no Linux system libraries (CI portable)",
         [
             ["cargo", "fmt", "--all", "--check"],
             ["cargo", "clippy", "--workspace", *_packages("--exclude", LINUX_CRATES),
