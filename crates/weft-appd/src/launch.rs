@@ -98,7 +98,9 @@ fn resolve_in(app_id: &str, stores: &[PathBuf]) -> Result<LaunchPackage, Refusal
         }
         // The session runs from the revision itself, not the link, so an
         // update or rollback that switches the link while it runs leaves it
-        // on the bytes it started with.
+        // on the bytes it started with. From here on a refusal is final: a
+        // package that is being changed, or that fails its checks, is not
+        // silently replaced by another store's copy.
         let pin = weft_ipc_types::store::pin(&dir).map_err(|e| {
             Refusal::new(
                 500,
@@ -431,6 +433,29 @@ mod tests {
             "{}",
             manifest_link.message
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn an_unusable_store_entry_does_not_hide_a_later_store() {
+        let _env = crate::tests::env_lock().blocking_lock();
+        let user = store("unusable_user", ID, "app.wasm");
+        let system = std::env::temp_dir().join(format!(
+            "weft_appd_launch_unusable_system_{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&system);
+        std::fs::create_dir_all(&system).unwrap();
+        std::fs::rename(user.join(ID), system.join(ID)).unwrap();
+        // A link to something other than one of the app's revisions.
+        std::os::unix::fs::symlink("/tmp", user.join(ID)).unwrap();
+        let found = resolve_in(ID, &[user.clone(), system.clone()]).map(|p| p.root);
+        let alone = refusal(resolve_in(ID, std::slice::from_ref(&user)));
+        finish(&user);
+        let _ = std::fs::remove_dir_all(&system);
+        assert_eq!(found.ok(), Some(system.join(ID)));
+        // With no other store, its problem is reported, not "not installed".
+        assert_eq!(alone.code, 403, "{}", alone.message);
     }
 
     #[cfg(unix)]
