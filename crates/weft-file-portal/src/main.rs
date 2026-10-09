@@ -42,7 +42,9 @@ impl Response {
 fn main() -> anyhow::Result<()> {
     let args: Vec<String> = std::env::args().collect();
     if args.len() < 2 {
-        eprintln!("usage: weft-file-portal <socket_path> [--allow <path>]...");
+        eprintln!(
+            "usage: weft-file-portal <socket_path> [--allow <path>]... [--allow-read <path>]..."
+        );
         std::process::exit(1);
     }
 
@@ -75,19 +77,34 @@ fn main() -> anyhow::Result<()> {
     anyhow::bail!("weft-file-portal requires a Unix platform")
 }
 
+/// A directory the session may use: `--allow` grants reading and writing,
+/// `--allow-read` reading only.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Allowed {
+    root: PathBuf,
+    writable: bool,
+}
+
 #[cfg_attr(not(any(unix, test)), allow(dead_code))]
-fn parse_allowed(args: &[String]) -> Vec<PathBuf> {
+fn parse_allowed(args: &[String]) -> Vec<Allowed> {
     let mut allowed = Vec::new();
     let mut i = 0;
     while i < args.len() {
-        if args[i] == "--allow"
-            && let Some(p) = args.get(i + 1)
-        {
-            allowed.push(PathBuf::from(p));
-            i += 2;
-            continue;
+        let writable = match args[i].as_str() {
+            "--allow" => true,
+            "--allow-read" => false,
+            _ => {
+                i += 1;
+                continue;
+            }
+        };
+        if let Some(p) = args.get(i + 1) {
+            allowed.push(Allowed {
+                root: PathBuf::from(p),
+                writable,
+            });
         }
-        i += 1;
+        i += 2;
     }
     allowed
 }
@@ -108,16 +125,17 @@ fn normalize_path(path: &Path) -> PathBuf {
     out
 }
 
-fn is_allowed(path: &Path, allowed: &[PathBuf]) -> bool {
-    if allowed.is_empty() {
-        return false;
-    }
+/// Whether `path` lies in an allowed directory, and for a write, in one
+/// granted read-write.
+fn is_allowed(path: &Path, allowed: &[Allowed], write: bool) -> bool {
     let norm = normalize_path(path);
-    allowed.iter().any(|a| norm.starts_with(a))
+    allowed
+        .iter()
+        .any(|a| norm.starts_with(&a.root) && (a.writable || !write))
 }
 
 #[cfg(unix)]
-fn handle_connection(stream: UnixStream, allowed: &[PathBuf]) {
+fn handle_connection(stream: UnixStream, allowed: &[Allowed]) {
     let mut writer = match stream.try_clone() {
         Ok(s) => s,
         Err(e) => {
@@ -151,11 +169,11 @@ fn handle_connection(stream: UnixStream, allowed: &[PathBuf]) {
 }
 
 #[cfg_attr(not(any(unix, test)), allow(dead_code))]
-fn handle_request(req: Request, allowed: &[PathBuf]) -> Response {
+fn handle_request(req: Request, allowed: &[Allowed]) -> Response {
     match req {
         Request::Read { path } => {
             let p = PathBuf::from(&path);
-            if !is_allowed(&p, allowed) {
+            if !is_allowed(&p, allowed, false) {
                 return Response::err(format!("access denied: {path}"));
             }
             match std::fs::read(&p) {
@@ -170,7 +188,7 @@ fn handle_request(req: Request, allowed: &[PathBuf]) -> Response {
         }
         Request::Write { path, data_b64 } => {
             let p = PathBuf::from(&path);
-            if !is_allowed(&p, allowed) {
+            if !is_allowed(&p, allowed, true) {
                 return Response::err(format!("access denied: {path}"));
             }
             let data =
@@ -189,7 +207,7 @@ fn handle_request(req: Request, allowed: &[PathBuf]) -> Response {
         }
         Request::List { path } => {
             let p = PathBuf::from(&path);
-            if !is_allowed(&p, allowed) {
+            if !is_allowed(&p, allowed, false) {
                 return Response::err(format!("access denied: {path}"));
             }
             match std::fs::read_dir(&p) {
@@ -213,33 +231,49 @@ fn handle_request(req: Request, allowed: &[PathBuf]) -> Response {
 mod tests {
     use super::*;
 
+    fn rw(root: impl Into<PathBuf>) -> Allowed {
+        Allowed {
+            root: root.into(),
+            writable: true,
+        }
+    }
+
+    fn ro(root: impl Into<PathBuf>) -> Allowed {
+        Allowed {
+            root: root.into(),
+            writable: false,
+        }
+    }
+
     #[test]
     fn allowed_path_accepted() {
-        let allowed = vec![PathBuf::from("/tmp/weft-test-allowed")];
+        let allowed = vec![rw("/tmp/weft-test-allowed")];
         assert!(is_allowed(
             Path::new("/tmp/weft-test-allowed/file.txt"),
-            &allowed
+            &allowed,
+            false
         ));
     }
 
     #[test]
     fn disallowed_path_rejected() {
-        let allowed = vec![PathBuf::from("/tmp/weft-test-allowed")];
-        assert!(!is_allowed(Path::new("/etc/passwd"), &allowed));
+        let allowed = vec![rw("/tmp/weft-test-allowed")];
+        assert!(!is_allowed(Path::new("/etc/passwd"), &allowed, false));
     }
 
     #[test]
     fn dotdot_traversal_blocked() {
-        let allowed = vec![PathBuf::from("/tmp/weft-test-allowed")];
+        let allowed = vec![rw("/tmp/weft-test-allowed")];
         assert!(!is_allowed(
             Path::new("/tmp/weft-test-allowed/../etc/passwd"),
-            &allowed
+            &allowed,
+            false
         ));
     }
 
     #[test]
     fn empty_allowlist_rejects_all() {
-        assert!(!is_allowed(Path::new("/tmp/anything"), &[]));
+        assert!(!is_allowed(Path::new("/tmp/anything"), &[], false));
     }
 
     #[test]
@@ -251,10 +285,9 @@ mod tests {
             "/tmp/b".into(),
         ];
         let result = parse_allowed(&args);
-        assert_eq!(
-            result,
-            vec![PathBuf::from("/tmp/a"), PathBuf::from("/tmp/b")]
-        );
+        assert_eq!(result, vec![rw("/tmp/a"), rw("/tmp/b")]);
+        let args: Vec<String> = vec!["--allow-read".into(), "/tmp/c".into()];
+        assert_eq!(parse_allowed(&args), vec![ro("/tmp/c")]);
     }
 
     #[test]
@@ -263,7 +296,7 @@ mod tests {
             Request::Read {
                 path: "/etc/shadow".into(),
             },
-            &[PathBuf::from("/tmp/safe")],
+            &[rw("/tmp/safe")],
         );
         let json = serde_json::to_string(&resp).unwrap();
         assert!(json.contains("access denied"));
@@ -277,7 +310,7 @@ mod tests {
         let file = dir.join("hello.txt");
         fs::write(&file, b"hello world").unwrap();
 
-        let allowed = vec![dir.clone()];
+        let allowed = vec![rw(dir.clone())];
         let resp = handle_request(
             Request::Read {
                 path: file.to_string_lossy().into(),
@@ -307,7 +340,7 @@ mod tests {
         fs::write(dir.join("b.txt"), b"").unwrap();
         fs::write(dir.join("a.txt"), b"").unwrap();
 
-        let allowed = vec![dir.clone()];
+        let allowed = vec![rw(dir.clone())];
         let resp = handle_request(
             Request::List {
                 path: dir.to_string_lossy().into(),
@@ -333,7 +366,7 @@ mod tests {
             &base64::engine::general_purpose::STANDARD,
             b"nested content",
         );
-        let allowed = vec![dir.clone()];
+        let allowed = vec![rw(dir.clone())];
         let resp = handle_request(
             Request::Write {
                 path: nested.to_string_lossy().into(),
@@ -343,6 +376,38 @@ mod tests {
         );
         assert!(matches!(resp, Response::Ok), "expected Ok response");
         assert_eq!(fs::read(&nested).unwrap(), b"nested content");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn read_only_directories_refuse_writes() {
+        use std::fs;
+        let dir = std::env::temp_dir().join(format!("wfp_ro_{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join("kept.txt"), b"original").unwrap();
+        let allowed = vec![ro(dir.clone())];
+        let data = base64::Engine::encode(&base64::engine::general_purpose::STANDARD, b"x");
+        let resp = handle_request(
+            Request::Write {
+                path: dir.join("kept.txt").to_string_lossy().into(),
+                data_b64: data,
+            },
+            &allowed,
+        );
+        assert!(
+            serde_json::to_string(&resp)
+                .unwrap()
+                .contains("access denied")
+        );
+        assert_eq!(fs::read(dir.join("kept.txt")).unwrap(), b"original");
+        let resp = handle_request(
+            Request::Read {
+                path: dir.join("kept.txt").to_string_lossy().into(),
+            },
+            &allowed,
+        );
+        assert!(matches!(resp, Response::OkData { .. }));
         let _ = fs::remove_dir_all(&dir);
     }
 }

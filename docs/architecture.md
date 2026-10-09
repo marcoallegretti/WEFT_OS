@@ -32,7 +32,7 @@ Package management CLI. Subcommands: `check` (validate wapp.toml + wasm module),
 
 ### weft-file-portal
 
-Per-session file proxy. Runs as a separate process with a path allowlist derived from preopened directories. Accepts JSON-lines requests over a Unix socket. Blocks path traversal. Used by apps that require file access without direct WASI preopens.
+Per-session file proxy. Runs as a separate process with a path allowlist derived from the session's directory grants; read-only grants (`--allow-read`) refuse writes. Paths are checked lexically, so `..` is blocked but symbolic links are followed. Accepts JSON-lines requests over a Unix socket. Components cannot currently reach that socket, because the runtime grants them no socket access.
 
 ### weft-mount-helper
 
@@ -46,9 +46,9 @@ systemd
 ├── weft-servo-shell (user, after compositor)
 └── weft-appd (user, after compositor + servo-shell)
     └── per-session:
-        ├── weft-runtime <app_id> <session_id> [--preopen ...] [--ipc-socket ...]
+        ├── weft-runtime <app_id> <session_id> [--preopen HOST::GUEST::ro|rw]... [--grant CAP]... [--ipc-socket ...]
         ├── weft-app-shell <app_id> <session_id>
-        └── weft-file-portal <socket> [--allow ...]
+        └── weft-file-portal <socket> [--allow ...] [--allow-read ...]
 ```
 
 ## IPC
@@ -69,15 +69,30 @@ Every WebSocket connection must complete the upgrade and send `HELLO` as its fir
 
 ## Capability Enforcement
 
-Capabilities are declared in `wapp.toml` under `[package] capabilities`. `weft-pack check` validates that only known capabilities are listed. At runtime, `weft-appd` reads capabilities and maps them to WASI preopened directories and host function availability:
+Capabilities are declared in `wapp.toml` under `[package] capabilities`. One vocabulary (`weft_ipc_types::capability`) is used by `weft-pack check`, which rejects unknown strings, by `weft-appd`, which derives the session's effective grants, and by `weft-runtime`, which enforces them.
+
+`weft-appd` derives grants once, before a session exists. `LAUNCH_APP` is answered with an error and nothing starts when the app ID is malformed (code 400), the package is not installed (404), a declared capability is unknown, unsupported on this host or cannot be satisfied (403), or the host cannot provide the resources (500, for example without `HOME`). All capabilities are checked before the app's data directory is created. Without `WEFT_RUNTIME_BIN`, appd starts no processes and derives no grants. The runtime does not read the manifest; it receives the grants as arguments:
+
+- `--preopen HOST::GUEST::ro|rw` for each directory, with the access mode the capability names;
+- `--grant <capability>` for each host-import capability.
+
+Each capability-controlled host import (fetch, notifications, clipboard) checks its grant on every call and returns an error naming the missing capability when it is not granted. `notify` and `ipc` need no capability.
 
 | Capability | Effect |
 |---|---|
-| `fs:rw:app-data` | Preopen `~/.local/share/weft/apps/<id>/data` as `/data` |
-| `fs:read:app-data` | Same, read-only |
-| `fs:rw:xdg-documents` | Preopen `~/Documents` as `/xdg/documents` |
-| `net:fetch` | Enables `weft:app/fetch` host function |
-| `sys:notifications` | Enables `weft:app/notifications` host function |
+| `fs:read:app-data` / `fs:rw:app-data` | Preopen `~/.local/share/weft/apps/<id>/data` as `/data`, read-only or read-write |
+| `fs:read:xdg-documents` / `fs:rw:xdg-documents` | Preopen the documents directory from the XDG user-dirs configuration (`XDG_DOCUMENTS_DIR`) as `/xdg/documents`; the launch fails when none is configured |
+| `net:fetch:<host>` | `weft:app/fetch` to that exact host (a lowercase DNS name or dotted IPv4 address) over HTTP or HTTPS, on any port |
+| `net:fetch:*` | `weft:app/fetch` to any host |
+| `sys:notifications` | `weft:app/notifications` |
+| `sys:clipboard:read` / `sys:clipboard:write` | `weft:app/clipboard#read` / `#write` |
+| `hw:gpu:compute` / `hw:gpu:render` | Not supported; the launch fails |
+
+Fetch does not follow redirects: a redirect is returned to the component as a response, so every destination it requests is checked against its grants. HTTP error statuses are responses too; only policy and transport failures are errors. Only the methods GET, HEAD, POST, PUT, PATCH, DELETE and OPTIONS are accepted, and a component cannot set `Host`, `Content-Length`, `Transfer-Encoding` or other hop-by-hop headers. Connecting times out after 10 seconds and the whole request after 30 seconds, not counting DNS resolution; response bodies are limited to 16 MiB. Fetch requires a runtime built with the `net-fetch` feature.
+
+Fetch grants name hosts, not addresses: ports are not restricted, and a host that resolves to a loopback or private address (or `net:fetch:*`) can reach local services. IPv6 literals cannot be granted.
+
+`tests/runtime/check_grants.py` runs the real runtime on a probe component (`tests/components/grants-probe`) under each kind of grant.
 
 ## Package Format
 

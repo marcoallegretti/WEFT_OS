@@ -75,10 +75,11 @@ See `docs/building.md` for full instructions including Wasm component builds, Ni
 
 ## CI
 
-Four jobs on every push to `main` and on pull requests:
+Jobs on every push to `main` and on pull requests:
 
 - `portable` — fmt, clippy and tests for the crates that need no Linux system libraries
 - `linux-only` — clippy and tests for compositor and shell crates
+- `runtime-grants` — clippy for `weft-runtime` with its Wasm engine and fetch, and `tests/runtime/check_grants.py`
 - `servo-embed-linux` — `cargo check --features servo-embed` for both servo crates
 - `contributor-toolkit` — links, metadata and catalog of the contributor toolkit, and runner tests
 

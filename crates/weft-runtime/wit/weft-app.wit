@@ -21,8 +21,8 @@ interface ipc {
     recv: func() -> option<string>;
 }
 
-/// Host interface for outbound HTTP requests.  Requires the net:fetch
-/// capability to be declared in wapp.toml.
+/// Host interface for outbound HTTP requests.  Requires a net:fetch:<host>
+/// or net:fetch:* capability in wapp.toml covering the request's host.
 interface fetch {
     record response {
         status: u16,

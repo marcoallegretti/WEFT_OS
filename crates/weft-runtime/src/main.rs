@@ -2,6 +2,10 @@ use std::path::PathBuf;
 
 use anyhow::Context;
 
+mod grants;
+
+use grants::{Grants, Preopen};
+
 fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(
@@ -14,7 +18,7 @@ fn main() -> anyhow::Result<()> {
     if args.len() < 3 {
         anyhow::bail!(
             "usage: weft-runtime <app_id> <session_id> \
-             [--preopen HOST::GUEST]... [--ipc-socket PATH]"
+             [--preopen HOST::GUEST::ro|rw]... [--grant CAPABILITY]... [--ipc-socket PATH]"
         );
     }
     let app_id = &args[1];
@@ -22,7 +26,8 @@ fn main() -> anyhow::Result<()> {
         .parse()
         .with_context(|| format!("invalid session_id: {}", args[2]))?;
 
-    let mut preopen: Vec<(String, String)> = Vec::new();
+    let mut preopen: Vec<Preopen> = Vec::new();
+    let mut grants = Grants::default();
     let mut ipc_socket: Option<String> = None;
 
     let mut i = 3usize;
@@ -31,11 +36,11 @@ fn main() -> anyhow::Result<()> {
             "--preopen" => {
                 i += 1;
                 let spec = args.get(i).context("--preopen requires an argument")?;
-                if let Some((host, guest)) = spec.split_once("::") {
-                    preopen.push((host.to_string(), guest.to_string()));
-                } else {
-                    preopen.push((spec.clone(), spec.clone()));
-                }
+                preopen.push(Preopen::parse(spec)?);
+            }
+            "--grant" => {
+                i += 1;
+                grants.add(args.get(i).context("--grant requires an argument")?)?;
             }
             "--ipc-socket" => {
                 i += 1;
@@ -64,7 +69,7 @@ fn main() -> anyhow::Result<()> {
     }
 
     tracing::info!(session_id, %app_id, wasm = %wasm_path.display(), "executing module");
-    run_module(&wasm_path, &preopen, ipc_socket.as_deref())?;
+    run_module(&wasm_path, &preopen, grants, ipc_socket.as_deref())?;
 
     tracing::info!(session_id, %app_id, "exiting");
     Ok(())
@@ -94,7 +99,8 @@ fn resolve_package(app_id: &str) -> anyhow::Result<PathBuf> {
 #[cfg(not(feature = "wasmtime-runtime"))]
 fn run_module(
     _wasm_path: &std::path::Path,
-    _preopen: &[(String, String)],
+    _preopen: &[Preopen],
+    _grants: Grants,
     _ipc_socket: Option<&str>,
 ) -> anyhow::Result<()> {
     anyhow::bail!(
@@ -105,7 +111,8 @@ fn run_module(
 #[cfg(feature = "wasmtime-runtime")]
 fn run_module(
     wasm_path: &std::path::Path,
-    preopen: &[(String, String)],
+    preopen: &[Preopen],
+    grants: Grants,
     ipc_socket: Option<&str>,
 ) -> anyhow::Result<()> {
     use std::sync::{Arc, Mutex};
@@ -117,6 +124,7 @@ fn run_module(
         DirPerms, FilePerms, IoView, ResourceTable, WasiCtx, WasiCtxBuilder, WasiView,
         add_to_linker_sync, bindings::sync::Command,
     };
+    use weft_ipc_types::capability::Access;
 
     struct IpcState {
         socket: std::os::unix::net::UnixStream,
@@ -175,7 +183,6 @@ fn run_module(
     struct State {
         ctx: WasiCtx,
         table: ResourceTable,
-        ipc: Arc<Mutex<Option<IpcState>>>,
     }
 
     impl IoView for State {
@@ -197,6 +204,7 @@ fn run_module(
     let component = Component::from_file(&engine, wasm_path)
         .with_context(|| format!("load component {}", wasm_path.display()))?;
 
+    let grants = Arc::new(grants);
     let mut linker: Linker<State> = Linker::new(&engine);
     add_to_linker_sync(&mut linker).context("add WASI to linker")?;
     let ipc_state: Arc<Mutex<Option<IpcState>>> = Arc::new(Mutex::new(None));
@@ -245,34 +253,35 @@ fn run_module(
             .context("define weft:app/ipc#recv")?;
     }
 
+    // Every import below checks the session's grants on each call; an
+    // ungranted call returns an error to the component.
+    let fetch_grants = Arc::clone(&grants);
     linker
         .instance("weft:app/fetch@0.1.0")
         .context("define weft:app/fetch instance")?
         .func_wrap(
             "fetch",
-            |_: wasmtime::StoreContextMut<'_, State>,
-             (url, method, headers, body): (
-                String,
-                String,
-                Vec<(String, String)>,
-                Option<Vec<u8>>,
-            )|
-             -> wasmtime::Result<(Result<(u16, String, Vec<u8>), String>,)> {
-                let result = host_fetch(&url, &method, &headers, body.as_deref());
+            move |_: wasmtime::StoreContextMut<'_, State>,
+                  (url, method, headers, body): FetchRequest|
+                  -> wasmtime::Result<(FetchResult,)> {
+                let result = host_fetch(&fetch_grants, &url, &method, &headers, body.as_deref());
                 Ok((result,))
             },
         )
         .context("define weft:app/fetch#fetch")?;
 
+    let notify_grants = Arc::clone(&grants);
     linker
         .instance("weft:app/notifications@0.1.0")
         .context("define weft:app/notifications instance")?
         .func_wrap(
             "notify",
-            |_: wasmtime::StoreContextMut<'_, State>,
-             (title, body, icon): (String, String, Option<String>)|
-             -> wasmtime::Result<(Result<(), String>,)> {
-                let result = host_notify(&title, &body, icon.as_deref());
+            move |_: wasmtime::StoreContextMut<'_, State>,
+                  (title, body, icon): (String, String, Option<String>)|
+                  -> wasmtime::Result<(Result<(), String>,)> {
+                let result = notify_grants
+                    .notifications()
+                    .and_then(|()| host_notify(&title, &body, icon.as_deref()));
                 Ok((result,))
             },
         )
@@ -282,23 +291,29 @@ fn run_module(
         let mut clipboard = linker
             .instance("weft:app/clipboard@0.1.0")
             .context("define weft:app/clipboard instance")?;
+        let read_grants = Arc::clone(&grants);
         clipboard
             .func_wrap(
                 "read",
-                |_: wasmtime::StoreContextMut<'_, State>,
-                 ()|
-                 -> wasmtime::Result<(Result<String, String>,)> {
-                    Ok((host_clipboard_read(),))
+                move |_: wasmtime::StoreContextMut<'_, State>,
+                      ()|
+                      -> wasmtime::Result<(Result<String, String>,)> {
+                    Ok((read_grants
+                        .clipboard_read()
+                        .and_then(|()| host_clipboard_read()),))
                 },
             )
             .context("define weft:app/clipboard#read")?;
+        let write_grants = Arc::clone(&grants);
         clipboard
             .func_wrap(
                 "write",
-                |_: wasmtime::StoreContextMut<'_, State>,
-                 (text,): (String,)|
-                 -> wasmtime::Result<(Result<(), String>,)> {
-                    Ok((host_clipboard_write(&text),))
+                move |_: wasmtime::StoreContextMut<'_, State>,
+                      (text,): (String,)|
+                      -> wasmtime::Result<(Result<(), String>,)> {
+                    Ok((write_grants
+                        .clipboard_write()
+                        .and_then(|()| host_clipboard_write(&text)),))
                 },
             )
             .context("define weft:app/clipboard#write")?;
@@ -320,10 +335,14 @@ fn run_module(
         ctx_builder.env("WEFT_FILE_PORTAL_SOCKET", &portal_socket);
     }
 
-    for (host_path, guest_path) in preopen {
+    for dir in preopen {
+        let (dir_perms, file_perms) = match dir.access {
+            Access::Read => (DirPerms::READ, FilePerms::READ),
+            Access::ReadWrite => (DirPerms::all(), FilePerms::all()),
+        };
         ctx_builder
-            .preopened_dir(host_path, guest_path, DirPerms::all(), FilePerms::all())
-            .with_context(|| format!("preopen dir {host_path}"))?;
+            .preopened_dir(&dir.host, &dir.guest, dir_perms, file_perms)
+            .with_context(|| format!("preopen dir {}", dir.host))?;
     }
 
     let ctx = ctx_builder.build();
@@ -332,7 +351,6 @@ fn run_module(
         State {
             ctx,
             table: ResourceTable::new(),
-            ipc: ipc_state,
         },
     );
 
@@ -346,41 +364,131 @@ fn run_module(
         .map_err(|()| anyhow::anyhow!("wasm component run exited with error"))
 }
 
+/// Arguments of `weft:app/fetch#fetch`: URL, method, headers and body.
+#[cfg(feature = "wasmtime-runtime")]
+type FetchRequest = (String, String, Vec<(String, String)>, Option<Vec<u8>>);
+
+/// `weft:app/fetch.response`.
+#[cfg(feature = "wasmtime-runtime")]
+#[derive(
+    wasmtime::component::ComponentType, wasmtime::component::Lift, wasmtime::component::Lower,
+)]
+#[component(record)]
+struct FetchResponse {
+    status: u16,
+    #[component(name = "content-type")]
+    content_type: String,
+    body: Vec<u8>,
+}
+
+/// Result of `weft:app/fetch#fetch`.
+#[cfg(feature = "wasmtime-runtime")]
+type FetchResult = Result<FetchResponse, String>;
+
+/// Request headers a component may not set.
+#[cfg(all(feature = "wasmtime-runtime", feature = "net-fetch"))]
+const FORBIDDEN_FETCH_HEADERS: &[&str] = &[
+    "host",
+    "content-length",
+    "transfer-encoding",
+    "connection",
+    "keep-alive",
+    "proxy-authorization",
+    "proxy-connection",
+    "te",
+    "trailer",
+    "upgrade",
+];
+
+/// Longest response body returned to a component.
+#[cfg(all(feature = "wasmtime-runtime", feature = "net-fetch"))]
+const MAX_FETCH_RESPONSE: u64 = 16 * 1024 * 1024;
+
+/// Performs a granted HTTP request. Redirects are returned to the component
+/// as responses rather than followed, so every destination it reaches is
+/// checked against its grants. HTTP error statuses are responses too; only
+/// policy and transport failures are errors.
 #[cfg(all(feature = "wasmtime-runtime", feature = "net-fetch"))]
 fn host_fetch(
+    grants: &Grants,
     url: &str,
     method: &str,
     headers: &[(String, String)],
     body: Option<&[u8]>,
-) -> Result<(u16, String, Vec<u8>), String> {
+) -> FetchResult {
     use std::io::Read;
-    let mut req = ureq::request(method, url);
+    use std::time::Duration;
+    grants.fetch_any()?;
+    let parsed = url::Url::parse(url).map_err(|e| format!("invalid URL: {e}"))?;
+    if !matches!(parsed.scheme(), "http" | "https") {
+        return Err(format!("unsupported URL scheme '{}'", parsed.scheme()));
+    }
+    let host = parsed.host_str().ok_or("URL has no host")?;
+    grants.fetch_host(host)?;
+    // The method is written into the request line as given, so only known
+    // methods are accepted.
+    if !matches!(
+        method,
+        "GET" | "HEAD" | "POST" | "PUT" | "PATCH" | "DELETE" | "OPTIONS"
+    ) {
+        return Err(format!("unsupported HTTP method '{method}'"));
+    }
+    // The destination and message framing belong to the runtime: a component
+    // must not redirect a granted request to another host through `Host` or
+    // change how the body is delimited.
+    for (name, _) in headers {
+        if FORBIDDEN_FETCH_HEADERS
+            .iter()
+            .any(|forbidden| name.eq_ignore_ascii_case(forbidden))
+        {
+            return Err(format!("header '{name}' is set by the runtime"));
+        }
+    }
+    let agent = ureq::AgentBuilder::new()
+        .redirects(0)
+        .timeout_connect(Duration::from_secs(10))
+        .timeout(Duration::from_secs(30))
+        .build();
+    let mut req = agent.request_url(method, &parsed);
     for (name, value) in headers {
         req = req.set(name, value);
     }
     let response = match body {
         Some(b) => req.send_bytes(b),
         None => req.call(),
-    }
-    .map_err(|e| e.to_string())?;
+    };
+    let response = match response {
+        Ok(response) | Err(ureq::Error::Status(_, response)) => response,
+        Err(e) => return Err(e.to_string()),
+    };
     let status = response.status();
     let content_type = response.content_type().to_owned();
     let mut body_bytes = Vec::new();
     response
         .into_reader()
+        .take(MAX_FETCH_RESPONSE + 1)
         .read_to_end(&mut body_bytes)
         .map_err(|e| e.to_string())?;
-    Ok((status, content_type, body_bytes))
+    if body_bytes.len() as u64 > MAX_FETCH_RESPONSE {
+        return Err(format!("response body exceeds {MAX_FETCH_RESPONSE} bytes"));
+    }
+    Ok(FetchResponse {
+        status,
+        content_type,
+        body: body_bytes,
+    })
 }
 
 #[cfg(all(feature = "wasmtime-runtime", not(feature = "net-fetch")))]
 fn host_fetch(
+    grants: &Grants,
     _url: &str,
     _method: &str,
     _headers: &[(String, String)],
     _body: Option<&[u8]>,
-) -> Result<(u16, String, Vec<u8>), String> {
-    Err("net-fetch capability not compiled in".to_owned())
+) -> FetchResult {
+    grants.fetch_any()?;
+    Err("this runtime was built without network fetch support".to_owned())
 }
 
 #[cfg(feature = "wasmtime-runtime")]
@@ -528,8 +636,13 @@ mod tests {
     #[cfg(not(feature = "wasmtime-runtime"))]
     #[test]
     fn engine_disabled_build_refuses_to_run_components() {
-        let err = run_module(std::path::Path::new("app.wasm"), &[], None)
-            .expect_err("a build without wasmtime-runtime must not report success");
+        let err = run_module(
+            std::path::Path::new("app.wasm"),
+            &[],
+            Grants::default(),
+            None,
+        )
+        .expect_err("a build without wasmtime-runtime must not report success");
         assert!(err.to_string().contains("wasmtime-runtime"));
     }
 

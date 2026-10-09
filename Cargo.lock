@@ -10544,6 +10544,7 @@ dependencies = [
  "sha2",
  "tar",
  "toml 0.8.23",
+ "weft-ipc-types",
  "zstd",
 ]
 
@@ -10558,8 +10559,10 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "ureq",
+ "url",
  "wasmtime",
  "wasmtime-wasi",
+ "weft-ipc-types",
 ]
 
 [[package]]

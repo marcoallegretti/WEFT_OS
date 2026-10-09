@@ -1,3 +1,6 @@
+pub mod capability;
+pub mod package;
+
 use serde::{Deserialize, Serialize};
 
 pub const MAX_FRAME_LEN: usize = 4 * 1024 * 1024;

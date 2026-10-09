@@ -17,6 +17,7 @@ mod compositor_client {
 
     pub type CompositorSender = mpsc::Sender<AppdToCompositor>;
 }
+mod grants;
 mod ipc;
 mod mount;
 mod runtime;
@@ -424,6 +425,28 @@ pub(crate) async fn dispatch(req: Request, registry: &Registry) -> Response {
             app_id,
             surface_id: _,
         } => {
+            // The package's capabilities are granted before a session exists;
+            // a package this host cannot satisfy is refused, not started.
+            let grants = if !weft_ipc_types::package::is_valid_app_id(&app_id) {
+                Err(grants::Refusal {
+                    code: 400,
+                    message: "invalid app ID".to_owned(),
+                })
+            } else if std::env::var("WEFT_RUNTIME_BIN").is_ok() {
+                grants::for_app(&app_id)
+            } else {
+                Ok(grants::SessionGrants::default())
+            };
+            let grants = match grants {
+                Ok(grants) => grants,
+                Err(refusal) => {
+                    tracing::warn!(%app_id, error = %refusal.message, "launch refused");
+                    return Response::Error {
+                        code: refusal.code,
+                        message: format!("{app_id}: {}", refusal.message),
+                    };
+                }
+            };
             let session_id = registry.lock().await.launch(&app_id);
             tracing::info!(session_id, %app_id, "launched");
             let abort_rx = registry.lock().await.register_abort(session_id);
@@ -456,9 +479,16 @@ pub(crate) async fn dispatch(req: Request, registry: &Registry) -> Response {
             let reg = Arc::clone(registry);
             let aid = app_id.clone();
             tokio::spawn(async move {
-                if let Err(e) =
-                    runtime::supervise(session_id, &aid, reg, abort_rx, compositor_tx, ipc_socket)
-                        .await
+                if let Err(e) = runtime::supervise(
+                    session_id,
+                    &aid,
+                    grants,
+                    reg,
+                    abort_rx,
+                    compositor_tx,
+                    ipc_socket,
+                )
+                .await
                 {
                     tracing::warn!(session_id, error = %e, "runtime supervisor error");
                 }
@@ -604,7 +634,7 @@ mod tests {
 
     static ENV_LOCK: std::sync::OnceLock<tokio::sync::Mutex<()>> = std::sync::OnceLock::new();
 
-    fn env_lock() -> &'static tokio::sync::Mutex<()> {
+    pub(crate) fn env_lock() -> &'static tokio::sync::Mutex<()> {
         ENV_LOCK.get_or_init(|| tokio::sync::Mutex::new(()))
     }
 
@@ -678,7 +708,61 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn launch_is_refused_when_capabilities_cannot_be_granted() {
+        let _env = env_lock().lock().await;
+        let store = std::env::temp_dir().join(format!("weft_refuse_{}", std::process::id()));
+        let app_dir = store.join("org.example.gpu");
+        std::fs::create_dir_all(&app_dir).unwrap();
+        std::fs::write(
+            app_dir.join("wapp.toml"),
+            "[package]\nid = \"org.example.gpu\"\ncapabilities = [\"hw:gpu:compute\"]\n",
+        )
+        .unwrap();
+        let prior_store = std::env::var("WEFT_APP_STORE").ok();
+        let prior_bin = std::env::var("WEFT_RUNTIME_BIN").ok();
+        // SAFETY: env_lock is held and the runtime is current_thread.
+        unsafe {
+            std::env::set_var("WEFT_APP_STORE", &store);
+            std::env::set_var("WEFT_RUNTIME_BIN", "/nonexistent/weft-runtime");
+        }
+
+        let reg = make_registry();
+        let resp = dispatch(
+            Request::LaunchApp {
+                app_id: "org.example.gpu".into(),
+                surface_id: 0,
+            },
+            &reg,
+        )
+        .await;
+
+        // SAFETY: as above.
+        unsafe {
+            match prior_store {
+                Some(v) => std::env::set_var("WEFT_APP_STORE", v),
+                None => std::env::remove_var("WEFT_APP_STORE"),
+            }
+            match prior_bin {
+                Some(v) => std::env::set_var("WEFT_RUNTIME_BIN", v),
+                None => std::env::remove_var("WEFT_RUNTIME_BIN"),
+            }
+        }
+        let _ = std::fs::remove_dir_all(&store);
+
+        match resp {
+            Response::Error { code, message } => {
+                assert_eq!(code, 403);
+                assert!(message.contains("hw:gpu:compute"), "{message}");
+            }
+            other => panic!("expected a refusal, got {other:?}"),
+        }
+        assert!(reg.lock().await.running_sessions().is_empty());
+        assert!(matches!(reg.lock().await.state(1), AppStateKind::NotFound));
+    }
+
+    #[tokio::test]
     async fn dispatch_launch_returns_ack() {
+        let _env = env_lock().lock().await;
         let reg = make_registry();
         let mut rx = reg.lock().await.subscribe();
         let resp = dispatch(
@@ -707,10 +791,11 @@ mod tests {
 
     #[tokio::test]
     async fn dispatch_terminate_known_returns_stopped() {
+        let _env = env_lock().lock().await;
         let reg = make_registry();
         let ack = dispatch(
             Request::LaunchApp {
-                app_id: "app".into(),
+                app_id: "com.test.app".into(),
                 surface_id: 0,
             },
             &reg,
@@ -958,6 +1043,7 @@ mod tests {
         runtime::supervise(
             session_id,
             "test.app",
+            grants::SessionGrants::default(),
             Arc::clone(&registry),
             abort_rx,
             None,
@@ -1027,6 +1113,7 @@ mod tests {
         runtime::supervise(
             session_id,
             "test.abort.startup",
+            grants::SessionGrants::default(),
             Arc::clone(&registry),
             abort_rx,
             None,
@@ -1075,6 +1162,7 @@ mod tests {
         runtime::supervise(
             session_id,
             "test.spawn.fail",
+            grants::SessionGrants::default(),
             Arc::clone(&registry),
             abort_rx,
             None,
@@ -1233,6 +1321,7 @@ mod tests {
             runtime::supervise(
                 session_id,
                 "test.app",
+                grants::SessionGrants::default(),
                 Arc::clone(&registry),
                 abort_rx,
                 None,

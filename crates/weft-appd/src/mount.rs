@@ -108,6 +108,7 @@ mod tests {
 
     #[test]
     fn find_image_returns_none_when_absent() {
+        let _env = crate::tests::env_lock().blocking_lock();
         unsafe { std::env::set_var("WEFT_APP_STORE", "/tmp/nonexistent_weft_store_xyz") };
         let result = find_image("com.example.missing");
         unsafe { std::env::remove_var("WEFT_APP_STORE") };

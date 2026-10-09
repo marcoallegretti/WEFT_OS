@@ -140,71 +140,6 @@ fn systemd_cgroup_available() -> bool {
         .exists()
 }
 
-fn resolve_preopens(app_id: &str) -> Vec<(String, String)> {
-    #[derive(serde::Deserialize)]
-    struct Pkg {
-        capabilities: Option<Vec<String>>,
-    }
-    #[derive(serde::Deserialize)]
-    struct M {
-        package: Pkg,
-    }
-
-    let pkg_dir = crate::app_store_roots().into_iter().find_map(|root| {
-        let dir = root.join(app_id);
-        if dir.join("wapp.toml").exists() {
-            Some(dir)
-        } else {
-            None
-        }
-    });
-
-    let caps = match pkg_dir {
-        None => return Vec::new(),
-        Some(dir) => {
-            let Ok(text) = std::fs::read_to_string(dir.join("wapp.toml")) else {
-                return Vec::new();
-            };
-            match toml::from_str::<M>(&text) {
-                Ok(m) => m.package.capabilities.unwrap_or_default(),
-                Err(_) => return Vec::new(),
-            }
-        }
-    };
-
-    let home = match std::env::var("HOME") {
-        Ok(h) => PathBuf::from(h),
-        Err(_) => return Vec::new(),
-    };
-
-    let mut preopens = Vec::new();
-    for cap in &caps {
-        match cap.as_str() {
-            "fs:rw:app-data" | "fs:read:app-data" => {
-                let data_dir = home
-                    .join(".local/share/weft/apps")
-                    .join(app_id)
-                    .join("data");
-                let _ = std::fs::create_dir_all(&data_dir);
-                preopens.push((data_dir.to_string_lossy().into_owned(), "/data".to_string()));
-            }
-            "fs:rw:xdg-documents" | "fs:read:xdg-documents" => {
-                let docs = home.join("Documents");
-                if docs.exists() {
-                    preopens.push((
-                        docs.to_string_lossy().into_owned(),
-                        "/xdg/documents".to_string(),
-                    ));
-                }
-            }
-            other => {
-                tracing::debug!(capability = other, "not mapped to preopen; skipped");
-            }
-        }
-    }
-    preopens
-}
-
 async fn kill_portal(portal: Option<(PathBuf, tokio::process::Child)>) {
     if let Some((sock, mut child)) = portal {
         let _ = child.kill().await;
@@ -248,7 +183,7 @@ fn portal_socket_path(session_id: u64) -> Option<PathBuf> {
 
 fn spawn_file_portal(
     session_id: u64,
-    allowed_paths: &[(String, String)],
+    dirs: &[crate::grants::GrantedDir],
 ) -> Option<(PathBuf, tokio::process::Child)> {
     let bin = std::env::var("WEFT_FILE_PORTAL_BIN").ok()?;
     let socket = portal_socket_path(session_id)?;
@@ -257,8 +192,12 @@ fn spawn_file_portal(
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null());
-    for (host, _) in allowed_paths {
-        cmd.arg("--allow").arg(host);
+    for dir in dirs {
+        let flag = match dir.access {
+            weft_ipc_types::capability::Access::Read => "--allow-read",
+            weft_ipc_types::capability::Access::ReadWrite => "--allow",
+        };
+        cmd.arg(flag).arg(&dir.host);
     }
     let child = cmd.kill_on_drop(true).spawn().ok()?;
     tracing::info!(session_id, socket = %socket.display(), "file portal spawned");
@@ -268,6 +207,7 @@ fn spawn_file_portal(
 pub(crate) async fn supervise(
     session_id: u64,
     app_id: &str,
+    grants: crate::grants::SessionGrants,
     registry: Registry,
     abort_rx: tokio::sync::oneshot::Receiver<()>,
     compositor_tx: Option<CompositorSender>,
@@ -297,8 +237,7 @@ pub(crate) async fn supervise(
     let (mount_orch, store_override) =
         crate::mount::MountOrchestrator::mount_if_needed(app_id, session_id);
 
-    let preopens = resolve_preopens(app_id);
-    let portal = spawn_file_portal(session_id, &preopens);
+    let portal = spawn_file_portal(session_id, &grants.dirs);
 
     let mut cmd = if systemd_cgroup_available() {
         let mut c = tokio::process::Command::new("systemd-run");
@@ -327,8 +266,11 @@ pub(crate) async fn supervise(
         cmd.env("WEFT_FILE_PORTAL_SOCKET", sock);
     }
 
-    for (host, guest) in &preopens {
-        cmd.arg("--preopen").arg(format!("{host}::{guest}"));
+    for dir in &grants.dirs {
+        cmd.arg("--preopen").arg(dir.preopen_arg());
+    }
+    for capability in &grants.imports {
+        cmd.arg("--grant").arg(capability.to_string());
     }
 
     let mut session = OwnedSession {

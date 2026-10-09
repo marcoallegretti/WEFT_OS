@@ -7,4 +7,4 @@ __pycache__/
 /infra/vm/*.qcow2
 
 Thumbs.db
-
+/tests/components/*/target/

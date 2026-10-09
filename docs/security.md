@@ -6,7 +6,9 @@ WEFT OS enforces a capability-based security model. No capability is granted by 
 
 ## Capability Verification
 
-`weft-pack check` validates capability strings against a known set (`KNOWN_CAPS`) before installation. Unknown capability strings are rejected. The validated capability list is read by `weft-appd` at session start to map capabilities to concrete resource grants.
+`weft-pack check` validates capability strings against the shared vocabulary in `weft_ipc_types::capability`. Unknown capability strings are rejected. At launch, `weft-appd` derives the session's grants from the manifest and refuses to start a package with a capability that is unknown, unsupported or unsatisfiable. `weft-runtime` enforces the grants it is given: read-only directories are preopened read-only, and each host import checks its grant on every call. See the capability table in `architecture.md`.
+
+Installing a package does not yet ask the user to approve its capabilities; every declared, supported capability is granted at launch.
 
 ## Process Isolation
 
@@ -14,7 +16,7 @@ Each app session runs as a separate OS process (`weft-runtime`). When systemd is
 
 ## Filesystem Isolation
 
-Apps access the filesystem only through WASI preopened directories. Each capability maps to a specific host path preopened at a fixed guest path. The `weft-file-portal` process enforces path allowlists and blocks `..` traversal for apps that use the portal protocol.
+Apps access the filesystem only through WASI preopened directories. Each capability maps to a specific host path preopened at a fixed guest path. The `weft-file-portal` process applies the same directory grants and access modes, but checks paths lexically: it blocks `..` traversal, not symbolic links. Components cannot currently reach its socket, since the runtime grants them no socket access.
 
 ## Package Signing
 
