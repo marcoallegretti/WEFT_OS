@@ -22,7 +22,7 @@ Apps access the filesystem only through WASI preopened directories. Each capabil
 
 Packages are signed with Ed25519 (`ed25519-dalek`). The signature covers the SHA-256 hash of `wapp.toml` and `app.wasm`. `weft-pack verify` checks the signature before installation.
 
-For verified read-only package storage, `weft-pack build-image` produces an EROFS image protected with dm-verity. Mounting requires the setuid `weft-mount-helper` which calls `veritysetup`.
+For verified read-only package storage, `weft-pack build-image` produces an EROFS image protected with dm-verity. Mounting requires the setuid-root `weft-mount-helper`, which calls `veritysetup`. Its callers can mount only images they can read, at their own runtime directory, read-only, without set-user-ID programs, devices or executables, at most 64 at a time (see `architecture.md`). A user can therefore have the kernel parse an EROFS image of their own making: the EROFS driver's handling of crafted images is part of the attack surface wherever the helper is installed. The NixOS image installs it through a `security.wrappers` entry that only the `users` group may run.
 
 ## Seccomp
 

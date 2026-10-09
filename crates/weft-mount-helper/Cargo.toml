@@ -10,3 +10,4 @@ path = "src/main.rs"
 
 [dependencies]
 anyhow = "1.0"
+libc = "0.2"
