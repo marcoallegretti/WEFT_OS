@@ -723,10 +723,12 @@ mod tests {
         let name = format!("weft-appd-tests-data-{}", std::process::id());
         if let Ok(entries) = std::fs::read_dir(std::env::temp_dir()) {
             for entry in entries.flatten() {
+                // Only data homes of test processes that have exited.
                 let stale = entry
                     .file_name()
                     .to_str()
-                    .is_some_and(|n| n.starts_with("weft-appd-tests-data-") && n != name);
+                    .and_then(|n| n.strip_prefix("weft-appd-tests-data-"))
+                    .is_some_and(|pid| !std::path::Path::new("/proc").join(pid).exists());
                 if stale {
                     let _ = std::fs::remove_dir_all(entry.path());
                 }

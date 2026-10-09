@@ -213,28 +213,29 @@ fn record_first_owner(
         }
         None => {}
     }
-    let data = weft_ipc_types::package::app_data_dir(data_home, app_id);
-    match std::fs::symlink_metadata(&data) {
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-        Err(e) => {
-            return Err(Refusal::new(
-                500,
-                format!("cannot inspect {}: {e}", data.display()),
-            ));
-        }
-        Ok(_) => {
-            return Err(Refusal::new(
-                403,
-                format!(
-                    "{} holds app data for {app_id} with no recorded owner; it is not given to \
-                     publisher {} without weft-pack install --claim-data",
-                    data.display(),
-                    signer.to_hex()
-                ),
-            ));
-        }
+    // Data in the earlier layout counts: it would be moved to this app's
+    // data directory when the session starts.
+    let home = std::env::var_os("HOME")
+        .map(std::path::PathBuf::from)
+        .filter(|home| home.is_absolute());
+    match weft_ipc_types::package::existing_app_data(data_home, home.as_deref(), app_id) {
+        Err(e) => Err(Refusal::new(
+            500,
+            format!("cannot inspect the app data of {app_id}: {e}"),
+        )),
+        Ok(Some(data)) => Err(Refusal::new(
+            403,
+            format!(
+                "{} holds app data for {app_id} with no recorded owner, so it is not given to \
+                 publisher {}. To give it to this publisher, install the package into the user \
+                 store with weft-pack install --claim-data (uninstalling it there first); \
+                 otherwise move the data aside",
+                data.display(),
+                signer.to_hex()
+            ),
+        )),
+        Ok(None) => write_owner(record, Owner::Verified(signer)).map_err(host),
     }
-    write_owner(record, Owner::Verified(signer)).map_err(host)
 }
 
 impl LaunchPackage {
@@ -455,6 +456,65 @@ mod tests {
             refused.message
         );
         assert_eq!(owner, None);
+    }
+
+    #[test]
+    fn unowned_data_in_the_earlier_layout_is_not_given_away() {
+        let _env = crate::tests::env_lock().blocking_lock();
+        let store = demo_store("legacy_data", true);
+        let home = store.join("home");
+        let legacy = weft_ipc_types::package::legacy_app_data_dir(&home, DEMO);
+        std::fs::create_dir_all(&legacy).unwrap();
+        let prior = std::env::var_os("HOME");
+        // SAFETY: env_lock is held.
+        unsafe { std::env::set_var("HOME", &home) };
+        let refused = refusal(resolve(DEMO));
+        unsafe {
+            match prior {
+                Some(v) => std::env::set_var("HOME", v),
+                None => std::env::remove_var("HOME"),
+            }
+        }
+        let owner = read_owner(&owner_record_path(&store.join("share"), DEMO)).unwrap();
+        finish(&store);
+        assert_eq!(refused.code, 403, "{}", refused.message);
+        assert!(
+            refused.message.contains("no recorded owner"),
+            "{}",
+            refused.message
+        );
+        assert_eq!(owner, None);
+    }
+
+    #[test]
+    fn only_the_signed_manifest_is_accepted() {
+        let _env = crate::tests::env_lock().blocking_lock();
+        let store = demo_store("manifest", true);
+        record(&store, DEMO, Owner::Verified(demo_key()));
+        let root = store.join(DEMO);
+        let signed = std::fs::read(root.join(MANIFEST_FILE)).unwrap();
+        let mut other = signed.clone();
+        other.extend_from_slice(b"\n# other\n");
+        let accepted = verify_owner(DEMO, &root, &signed);
+        let refused = verify_owner(DEMO, &root, &other).err();
+        finish(&store);
+        assert!(accepted.is_ok());
+        let refused = refused.expect("a manifest that was not signed was accepted");
+        assert_eq!(refused.code, 403, "{}", refused.message);
+    }
+
+    #[test]
+    fn development_content_does_not_depend_on_the_trust_store() {
+        let _env = crate::tests::env_lock().blocking_lock();
+        let store = store("dev_store", ID, "app.wasm");
+        let keys = store.join("keys");
+        std::fs::create_dir_all(&keys).unwrap();
+        std::fs::write(keys.join("broken.pub"), "not a key").unwrap();
+        // SAFETY: as in `store`.
+        unsafe { std::env::set_var("WEFT_TRUSTED_KEYS", &keys) };
+        let resolved = resolve(ID).map(|p| p.root);
+        finish(&store);
+        assert_eq!(resolved.ok(), Some(store.join(ID)));
     }
 
     #[test]

@@ -491,13 +491,15 @@ fn admit(
              its owner, so another publisher or a development build cannot take the ID over"
         ),
         None => {
-            let data = weft_ipc_types::package::app_data_dir(data_home, app_id);
-            let no_data = match std::fs::symlink_metadata(&data) {
-                Err(e) if e.kind() == std::io::ErrorKind::NotFound => true,
-                Err(e) => return Err(e).with_context(|| format!("inspect {}", data.display())),
-                Ok(_) => false,
-            };
-            if !no_data && !claim_data {
+            // Data in the earlier layout counts: weft-appd moves it to the
+            // app's data directory when the app next launches.
+            let home = std::env::var_os("HOME")
+                .map(PathBuf::from)
+                .filter(|home| home.is_absolute());
+            let existing =
+                weft_ipc_types::package::existing_app_data(data_home, home.as_deref(), app_id)
+                    .with_context(|| format!("inspect the app data of {app_id}"))?;
+            if let Some(data) = existing.filter(|_| !claim_data) {
                 anyhow::bail!(
                     "{} holds app data for {app_id} with no recorded owner; install with \
                      --claim-data to give it to {owner}, or move it aside",
@@ -1396,6 +1398,28 @@ mod tests {
         std::fs::set_permissions(&absolute, std::fs::Permissions::from_mode(0o750)).unwrap();
         create_store(&absolute).unwrap();
         assert_eq!(mode(&absolute), 0o750);
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn unowned_data_in_the_earlier_layout_needs_a_claim() {
+        let home = temp_root("legacy_claim");
+        let app_id = "org.weft.test.legacyclaim";
+        write_package(&home.join("src"), app_id, APP_DATA);
+        let legacy = weft_ipc_types::package::legacy_app_data_dir(&home, app_id);
+        std::fs::create_dir_all(&legacy).unwrap();
+        let other = home.join("other");
+        let unclaimed = with_home(&home, || {
+            install_package_to(&home.join("src"), &other, InstallMode::Development)
+        });
+        let message = format!("{:#}", unclaimed.unwrap_err());
+        assert!(message.contains("--claim-data"), "{message}");
+        assert_eq!(owner_of(&home, app_id), None);
+        with_home(&home, || {
+            install_into(&home.join("src"), &other, InstallMode::Development, true)
+        })
+        .unwrap();
+        assert_eq!(owner_of(&home, app_id), Some(Owner::Development));
         let _ = std::fs::remove_dir_all(&home);
     }
 

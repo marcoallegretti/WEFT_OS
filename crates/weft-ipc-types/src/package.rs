@@ -79,6 +79,30 @@ pub fn legacy_app_data_dir(home: &Path, app_id: &str) -> PathBuf {
         .join("data")
 }
 
+/// Where app data for `app_id` already exists, in the current layout or in
+/// the earlier one under `home`, if anywhere. Data in the earlier layout is
+/// moved to the current one when the app next launches, so it counts too.
+pub fn existing_app_data(
+    data_home: &Path,
+    home: Option<&Path>,
+    app_id: &str,
+) -> std::io::Result<Option<PathBuf>> {
+    let places = std::iter::once(app_data_dir(data_home, app_id))
+        .chain(home.map(|home| legacy_app_data_dir(home, app_id)));
+    for place in places {
+        match std::fs::symlink_metadata(&place) {
+            Ok(_) => return Ok(Some(place)),
+            Err(e)
+                if matches!(
+                    e.kind(),
+                    std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory
+                ) => {}
+            Err(e) => return Err(e),
+        }
+    }
+    Ok(None)
+}
+
 /// The result of moving data from the earlier layout.
 #[derive(Debug, PartialEq, Eq)]
 pub enum Migration {
