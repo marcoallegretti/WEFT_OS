@@ -674,7 +674,7 @@ pub fn run(
     ui: &std::path::Path,
 ) -> anyhow::Result<()> {
     let url = ServoUrl::from_file_path(ui)
-        .map_err(|()| anyhow::anyhow!("{} is not an absolute path", ui.display()))?;
+        .map_err(|_| anyhow::anyhow!("{} is not an absolute path", ui.display()))?;
     tracing::info!(%app_id, %url, "showing application UI");
 
     let event_loop = EventLoop::<ServoWake>::with_user_event()
