@@ -125,13 +125,14 @@ impl SessionRegistry {
                 Some(AppStateKind::Stopping)
             }
             Some(sender) => {
-                // A full queue already holds a request; a forced one that
-                // does not fit is preceded by one the supervisor acts on.
-                let _ = sender.try_send(if force {
-                    runtime::Stop::Force
-                } else {
-                    runtime::Stop::Close
-                });
+                // A close is queued only into an empty queue, so a forced
+                // request always finds room; one already queued says the
+                // same as a repeat.
+                if force {
+                    let _ = sender.try_send(runtime::Stop::Force);
+                } else if sender.capacity() == runtime::STOP_QUEUE {
+                    let _ = sender.try_send(runtime::Stop::Close);
+                }
                 if !force && matches!(state, AppStateKind::Running) {
                     return Some(AppStateKind::Running);
                 }
@@ -1814,7 +1815,8 @@ mod tests {
             while !matches!(rx.recv().await, Ok(Response::AppReady { .. })) {}
         })
         .await;
-        dispatch(
+        // The close is under way: the session is running while it is asked.
+        let asked = dispatch(
             Request::TerminateApp {
                 session_id,
                 force: false,
@@ -1822,6 +1824,17 @@ mod tests {
             &registry,
         )
         .await;
+        // Repeats fill no queue a forced stop then cannot enter.
+        for _ in 0..3 {
+            dispatch(
+                Request::TerminateApp {
+                    session_id,
+                    force: false,
+                },
+                &registry,
+            )
+            .await;
+        }
         tokio::time::sleep(std::time::Duration::from_millis(300)).await;
         let forced_at = std::time::Instant::now();
         let reply = dispatch(
@@ -1865,6 +1878,16 @@ mod tests {
                 }
             ),
             "{reply:?}"
+        );
+        assert!(
+            matches!(
+                asked,
+                Response::AppState {
+                    state: AppStateKind::Running,
+                    ..
+                }
+            ),
+            "{asked:?}"
         );
         assert!(stopped.is_ok(), "the forced stop did not stop the session");
         // The forced stop does not wait out the close timeout.
