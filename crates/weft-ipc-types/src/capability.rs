@@ -104,11 +104,15 @@ impl fmt::Display for Capability {
 /// A host in the canonical form URL parsing produces, so that a grant can
 /// be compared with a request's host as a string: a lowercase DNS name of
 /// 1–63 character labels of letters, digits and inner hyphens (at most 253
-/// characters) whose last label is not numeric, or an IPv4 address in
+/// characters) whose last label is neither numeric nor `0x`-prefixed, or an IPv4 address in
 /// dotted-decimal form without leading zeros. IPv6 literals are not
 /// supported.
 fn is_host_name(host: &str) -> bool {
     let labels: Vec<&str> = host.split('.').collect();
+    // URL parsing reads a last label of `0x…` as a hexadecimal number.
+    if labels.last().is_some_and(|last| last.starts_with("0x")) {
+        return false;
+    }
     if labels
         .last()
         .is_some_and(|last| !last.is_empty() && last.bytes().all(|b| b.is_ascii_digit()))
@@ -182,6 +186,7 @@ mod tests {
             "net:fetch:1.2.3",
             "net:fetch:example.123",
             "net:fetch:[::1]",
+            "net:fetch:example.0x1",
             "sys:clipboard",
         ] {
             assert!(text.parse::<Capability>().is_err(), "{text:?} accepted");
