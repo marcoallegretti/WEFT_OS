@@ -43,7 +43,10 @@ pub struct WeftAppdIpc {
     /// Sessions whose first toplevel was reported to appd.
     reported: HashSet<u64>,
     /// Where clients report their session's disconnection.
-    disconnected: Option<channel::Sender<u64>>,
+    disconnected: Option<channel::Sender<(u64, ClientId)>>,
+    /// Bytes for appd that did not fit in the socket buffer, sent before
+    /// anything else so frames stay whole.
+    out_buf: Vec<u8>,
 }
 
 #[cfg(unix)]
@@ -58,25 +61,56 @@ impl WeftAppdIpc {
             sessions: HashMap::new(),
             reported: HashSet::new(),
             disconnected: None,
+            out_buf: Vec::new(),
         }
     }
 
     pub fn send(&mut self, msg: &CompositorToAppd) {
-        use std::io::Write;
-        let Some(stream) = &mut self.write_stream else {
-            return;
-        };
         match frame_encode(msg) {
             Ok(frame) => {
-                if stream.write_all(&frame).is_err() {
-                    // A partly written frame breaks the stream's framing:
-                    // end the connection, whose read side then cleans up.
-                    tracing::warn!("compositor IPC write failed; closing the appd connection");
-                    let _ = stream.shutdown(std::net::Shutdown::Both);
-                    self.write_stream = None;
+                if self.write_stream.is_some() {
+                    self.out_buf.extend_from_slice(&frame);
+                    self.flush();
                 }
             }
             Err(e) => tracing::warn!(?e, "failed to encode compositor IPC message"),
+        }
+    }
+
+    /// Writes what appd's socket accepts now; the rest waits for the next
+    /// send or read. A backlog appd never drains, or a write error, ends the
+    /// connection, whose read side then cleans up.
+    fn flush(&mut self) {
+        use std::io::Write;
+        let Some(stream) = &mut self.write_stream else {
+            self.out_buf.clear();
+            return;
+        };
+        while !self.out_buf.is_empty() {
+            match stream.write(&self.out_buf) {
+                Ok(0) => break,
+                Ok(n) => {
+                    self.out_buf.drain(..n);
+                }
+                Err(e) if e.kind() == io::ErrorKind::WouldBlock => break,
+                Err(e) if e.kind() == io::ErrorKind::Interrupted => {}
+                Err(e) => {
+                    tracing::warn!(
+                        ?e,
+                        "compositor IPC write failed; closing the appd connection"
+                    );
+                    let _ = stream.shutdown(std::net::Shutdown::Both);
+                    self.write_stream = None;
+                    self.out_buf.clear();
+                    return;
+                }
+            }
+        }
+        if self.out_buf.len() > MAX_FRAME_LEN {
+            tracing::warn!("weft-appd is not reading compositor IPC; closing the connection");
+            let _ = stream.shutdown(std::net::Shutdown::Both);
+            self.write_stream = None;
+            self.out_buf.clear();
         }
     }
 
@@ -176,6 +210,7 @@ impl WeftAppdIpc {
     fn disconnect(&mut self) -> Vec<ClientId> {
         self.connected = false;
         self.write_stream = None;
+        self.out_buf.clear();
         self.read_buf.clear();
         self.fds.clear();
         self.reported.clear();
@@ -293,15 +328,18 @@ pub fn setup(state: &mut WeftCompositorState) -> anyhow::Result<()> {
     tracing::info!(path = %socket_path.display(), "compositor IPC socket open");
 
     // Clients bound to a session report their disconnection here.
-    let (sender, receiver) = channel::channel::<u64>();
+    let (sender, receiver) = channel::channel::<(u64, ClientId)>();
     if let Some(ipc) = state.appd_ipc.as_mut() {
         ipc.disconnected = Some(sender);
     }
     state
         .loop_handle
         .insert_source(receiver, |event, _, state| {
-            if let channel::Event::Msg(session_id) = event
+            // Only the session's current client: a client closed when its
+            // appd went away may report after a new appd reused the ID.
+            if let channel::Event::Msg((session_id, client)) = event
                 && let Some(ipc) = state.appd_ipc.as_mut()
+                && ipc.sessions.get(&session_id) == Some(&client)
             {
                 ipc.sessions.remove(&session_id);
                 ipc.reported.remove(&session_id);
@@ -343,7 +381,7 @@ pub fn setup(state: &mut WeftCompositorState) -> anyhow::Result<()> {
                                 ipc.fds.clear();
                             }
                             stream.set_nonblocking(true).ok();
-                            let _ = handle.insert_source(
+                            let registered = handle.insert_source(
                                 Generic::new(stream, Interest::READ, Mode::Edge),
                                 |_, stream, state| {
                                     // Safety: calloop wraps the fd in NoIoDrop to prevent
@@ -355,6 +393,9 @@ pub fn setup(state: &mut WeftCompositorState) -> anyhow::Result<()> {
                                     };
                                     for msg in messages {
                                         handle_message(state, msg);
+                                    }
+                                    if let Some(ipc) = state.appd_ipc.as_mut() {
+                                        ipc.flush();
                                     }
                                     if eof {
                                         tracing::info!(
@@ -378,6 +419,12 @@ pub fn setup(state: &mut WeftCompositorState) -> anyhow::Result<()> {
                                     }
                                 },
                             );
+                            if let Err(e) = registered {
+                                tracing::warn!(?e, "cannot watch the appd IPC connection");
+                                if let Some(ipc) = state.appd_ipc.as_mut() {
+                                    ipc.disconnect();
+                                }
+                            }
                         }
                         Err(e) if e.kind() == io::ErrorKind::WouldBlock => break,
                         Err(e) => tracing::warn!(?e, "accept error on compositor IPC socket"),
@@ -500,6 +547,54 @@ mod tests {
         assert_eq!(connections, MAX_PENDING_FDS + 4);
         assert_eq!(messages.len(), 2 * (MAX_PENDING_FDS + 4));
         assert!(ipc.fds.is_empty());
+    }
+
+    #[test]
+    fn a_slow_appd_gets_whole_frames_later_instead_of_losing_its_apps() {
+        let (appd, compositor) = UnixStream::pair().unwrap();
+        compositor.set_nonblocking(true).unwrap();
+        let mut ipc = WeftAppdIpc::new(PathBuf::from("/nonexistent"));
+        ipc.write_stream = Some(compositor);
+        ipc.connected = true;
+        // More than the socket buffer holds while appd is not reading.
+        let count = 20_000u64;
+        for session_id in 0..count {
+            ipc.send(&CompositorToAppd::SurfaceReady { session_id });
+        }
+        assert!(
+            ipc.write_stream.is_some(),
+            "a full buffer closed the connection"
+        );
+        assert!(!ipc.out_buf.is_empty());
+
+        // appd reads; every flush moves more, and every frame arrives whole.
+        appd.set_nonblocking(true).unwrap();
+        let mut received = Vec::new();
+        let mut buf = [0u8; 65536];
+        loop {
+            ipc.flush();
+            use std::io::Read;
+            match (&appd).read(&mut buf) {
+                Ok(n) => received.extend_from_slice(&buf[..n]),
+                Err(e) if e.kind() == io::ErrorKind::WouldBlock => {
+                    if ipc.out_buf.is_empty() {
+                        break;
+                    }
+                }
+                Err(e) => panic!("{e}"),
+            }
+        }
+        let mut frames = 0u64;
+        while !received.is_empty() {
+            let len = u32::from_le_bytes(received[..4].try_into().unwrap()) as usize;
+            let frame: CompositorToAppd = frame_decode(&received[..4 + len]).unwrap();
+            assert!(
+                matches!(frame, CompositorToAppd::SurfaceReady { session_id } if session_id == frames)
+            );
+            received.drain(..4 + len);
+            frames += 1;
+        }
+        assert_eq!(frames, count);
     }
 
     #[test]

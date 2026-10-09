@@ -218,6 +218,14 @@ async fn run() -> anyhow::Result<()> {
     }
 
     if let Some(app_ids) = load_session() {
+        // Apps need the compositor connection; give it a moment to come up.
+        let compositor = registry.lock().await.compositor_tx.clone();
+        if let Some(compositor) = compositor {
+            let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
+            while !compositor.is_connected() && tokio::time::Instant::now() < deadline {
+                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            }
+        }
         tracing::info!(count = app_ids.len(), "restoring previous session");
         for app_id in app_ids {
             let _ = dispatch(
@@ -438,8 +446,20 @@ pub(crate) async fn dispatch(req: Request, registry: &Registry) -> Response {
             // The package is resolved and its capabilities granted before a
             // session exists; a package this host cannot satisfy is refused,
             // not started.
+            let compositor_down = registry
+                .lock()
+                .await
+                .compositor_tx
+                .as_ref()
+                .is_some_and(|tx| !tx.is_connected());
             let launch = if !weft_ipc_types::package::is_valid_app_id(&app_id) {
                 Err(grants::Refusal::new(400, "invalid app ID"))
+            } else if compositor_down {
+                // An app started now could never show a window.
+                Err(grants::Refusal::new(
+                    503,
+                    "weft-compositor is not connected",
+                ))
             } else if std::env::var("WEFT_RUNTIME_BIN").is_ok() {
                 resolve_launch(app_id.clone()).await.map(Some)
             } else {
@@ -1242,7 +1262,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn without_a_connected_compositor_the_app_shell_is_not_started() {
+    async fn without_a_connected_compositor_nothing_is_started() {
         use std::os::unix::fs::PermissionsExt;
         let _env = env_lock().lock().await;
         use_test_runtime_dir();
@@ -1283,8 +1303,7 @@ mod tests {
             tx,
             std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
         ));
-        let mut rx = registry.lock().await.subscribe();
-        let _ = dispatch(
+        let refused = dispatch(
             Request::LaunchApp {
                 app_id: "org.example.nocomp".into(),
                 surface_id: 0,
@@ -1292,16 +1311,7 @@ mod tests {
             &registry,
         )
         .await;
-        let stopped = tokio::time::timeout(std::time::Duration::from_secs(10), async {
-            while !matches!(
-                rx.recv().await,
-                Ok(Response::AppState {
-                    state: AppStateKind::Stopped,
-                    ..
-                })
-            ) {}
-        })
-        .await;
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
         let started = std::fs::read_to_string(&log).unwrap_or_default();
 
         for (key, value) in prior {
@@ -1314,9 +1324,12 @@ mod tests {
             }
         }
         let _ = std::fs::remove_dir_all(&dir);
-        assert!(stopped.is_ok(), "session did not stop");
-        // Only the runtime started; no app shell, and nothing was queued.
-        assert_eq!(started.lines().count(), 1, "{started}");
+        assert!(
+            matches!(refused, Response::Error { code: 503, .. }),
+            "{refused:?}"
+        );
+        // Nothing started and nothing was queued for the compositor.
+        assert_eq!(started, "");
         assert!(compositor.try_recv().is_err());
     }
 

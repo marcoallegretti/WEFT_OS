@@ -64,7 +64,7 @@ pub struct SessionBinding {
     pub session_id: u64,
     pub app_id: String,
     /// Reports the session's disconnection to the event loop.
-    pub disconnected: smithay::reexports::calloop::channel::Sender<u64>,
+    pub disconnected: smithay::reexports::calloop::channel::Sender<(u64, ClientId)>,
 }
 
 /// Whether `client` connected through the display socket rather than
@@ -77,9 +77,9 @@ pub fn outside_sessions(client: &Client) -> bool {
 
 impl ClientData for WeftClientState {
     fn initialized(&self, _client_id: ClientId) {}
-    fn disconnected(&self, _client_id: ClientId, _reason: DisconnectReason) {
+    fn disconnected(&self, client_id: ClientId, _reason: DisconnectReason) {
         if let Some(binding) = &self.session {
-            let _ = binding.disconnected.send(binding.session_id);
+            let _ = binding.disconnected.send((binding.session_id, client_id));
         }
     }
 }
