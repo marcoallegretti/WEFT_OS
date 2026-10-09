@@ -175,6 +175,10 @@ pub fn is_public(ip: std::net::IpAddr) -> bool {
             if let Some(v4) = v6.to_ipv4_mapped() {
                 return is_public(IpAddr::V4(v4));
             }
+            // IPv4-translated (::ffff:0:a.b.c.d).
+            if seg[..6] == [0, 0, 0, 0, 0xffff, 0] {
+                return is_public(embedded(seg[6], seg[7]));
+            }
             if seg[..6] == [0; 6] && !(seg[6] == 0 && seg[7] <= 1) {
                 return is_public(embedded(seg[6], seg[7]));
             }
@@ -197,9 +201,9 @@ pub fn is_public(ip: std::net::IpAddr) -> bool {
                 // Teredo, benchmarking, ORCHID and documentation.
                 || (seg[0] == 0x2001 && seg[1] == 0)
                 || (seg[0] == 0x2001 && seg[1] == 0x0002 && seg[2] == 0)
-                || (seg[0] == 0x2001 && (seg[1] & 0xfff0) == 0x0010)
+                || (seg[0] == 0x2001 && matches!(seg[1] & 0xfff0, 0x0010 | 0x0020))
                 || (seg[0] == 0x2001 && seg[1] == 0x0db8)
-                || (seg[0] & 0xfff0) == 0x3ff0)
+                || (seg[0] == 0x3fff && (seg[1] & 0xf000) == 0))
         }
     }
 }
@@ -250,6 +254,7 @@ mod tests {
             "2606:4700::1111",
             "64:ff9b::5db8:d822",
             "2002:5db8:d822::1",
+            "3ffe::1",
         ] {
             assert!(is_public(public.parse().unwrap()), "{public}");
         }
@@ -275,6 +280,9 @@ mod tests {
             "::ffff:10.0.0.1",
             "64:ff9b::a00:1",
             "64:ff9b:1::1",
+            "64:ff9b:0:0:1::1",
+            "::ffff:0:a00:1",
+            "2001:20::1",
             "2001:db8::1",
             "fec0::1",
             "::7f00:1",
