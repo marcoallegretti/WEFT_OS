@@ -14,7 +14,11 @@ const DEFAULT_MAX_MEMORY_MIB: usize = 256;
 use grants::{Grants, Preopen};
 
 fn main() -> anyhow::Result<()> {
+    // Standard output carries the readiness line to weft-appd, which keeps
+    // standard error as the process's log.
     tracing_subscriber::fmt()
+        .with_writer(std::io::stderr)
+        .with_ansi(std::io::IsTerminal::is_terminal(&std::io::stderr()))
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
                 .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
