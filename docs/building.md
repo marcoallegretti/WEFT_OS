@@ -67,6 +67,16 @@ reveals the page so premature readiness becomes visible.
 
 Logs and the last capture are written to `target/frame-check`.
 
+`tests/frame/check_input.py` uses the same nested desktop to send real X
+pointer and keyboard input (with `xdotool`) through `weft-compositor` to
+`weft-servo-shell` showing `tests/frame/input.html`, and checks that the
+page reacts to clicks on either side of a boundary and to the `a` and
+`Shift+a` keys. Logs and the last capture are written to `target/input-check`.
+
+```sh
+python3 tests/frame/check_input.py
+```
+
 ## Demo apps (wasm32-wasip2)
 
 Each demo is a standalone crate in `examples/`. Pre-built `app.wasm` binaries are committed. To rebuild:
