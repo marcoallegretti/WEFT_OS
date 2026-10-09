@@ -76,7 +76,7 @@ impl WebViewDelegate for WeftWebViewDelegate {
     /// The webview carries the session's bridge, so it stays within the
     /// application's own UI files.
     fn request_navigation(&self, _webview: servo::WebView, request: NavigationRequest) {
-        if request.url.as_str().starts_with(&self.scope) {
+        if in_scope(request.url.as_str(), &self.scope) {
             request.allow();
         } else {
             tracing::warn!(url = %request.url, "navigation outside the application UI denied");
@@ -132,6 +132,16 @@ fn ui_scope(entry: &ServoUrl) -> String {
     url[..end].to_owned()
 }
 
+/// Whether `url` lies inside the UI directory `scope`. Encoded path
+/// separators are refused, since a file loader may decode them into a path
+/// that leaves the directory.
+fn in_scope(url: &str, scope: &str) -> bool {
+    url.strip_prefix(scope).is_some_and(|rest| {
+        let rest = rest.to_ascii_lowercase();
+        !rest.contains("%2f") && !rest.contains("%5c")
+    })
+}
+
 /// `value` as a single-quoted JavaScript string literal.
 fn js_string(value: &str) -> String {
     let mut literal = String::with_capacity(value.len() + 2);
@@ -158,7 +168,8 @@ fn bridge_script(port: u16, session_id: u64, token: &str, scope: &str) -> String
     let scope = js_string(scope);
     format!(
         r#"(function () {{
-  if (window !== window.top || location.href.indexOf({scope}) !== 0) return;
+  var rest = location.href.indexOf({scope}) === 0 ? location.href.slice({scope}.length) : null;
+  if (window !== window.top || rest === null || /%2f|%5c/i.test(rest)) return;
   var ws = new WebSocket('ws://127.0.0.1:{port}/app');
   var queue = [];
   var open = false;

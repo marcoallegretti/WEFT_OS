@@ -29,7 +29,7 @@ pub(crate) type Registry = Arc<Mutex<SessionRegistry>>;
 struct SessionEntry {
     app_id: String,
     state: AppStateKind,
-    /// Credential binding one application bridge connection to this session.
+    /// Credential that binds application bridge connections to this session.
     bridge_token: Option<String>,
 }
 
@@ -285,7 +285,11 @@ async fn run() -> anyhow::Result<()> {
     registry.lock().await.shutdown_all();
     tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;
     let _ = std::fs::remove_file(&socket_path);
-    if let Ok(path) = system_token_path() {
+    // A newer appd may already have replaced the file; only this instance's
+    // own token is removed.
+    if let Ok(path) = system_token_path()
+        && std::fs::read_to_string(&path).is_ok_and(|t| t == ws_auth.system_token)
+    {
         let _ = std::fs::remove_file(path);
     }
     Ok(())

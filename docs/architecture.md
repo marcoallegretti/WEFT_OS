@@ -12,11 +12,11 @@ Smithay-based Wayland compositor. Implements the `zweft-shell-unstable-v1` proto
 
 ### weft-servo-shell
 
-System UI host. Renders one WebView pointing at `system-ui.html` using the embedded Servo engine (feature-gated behind `servo-embed`). Connects to the compositor as window type `panel`. Dispatches the `zweft_shell_manager_v1` event queue each frame. Forwards navigation gestures received from the compositor to `weft-appd` over WebSocket. Reads the appd WebSocket port and system token from `$XDG_RUNTIME_DIR/weft/` and hands both to the page through `window.weftAppdEndpoint(port, token)`; the shell hands the token only to the system UI document and denies navigation away from it, and the launcher shows package names as text, never markup.
+System UI host. Renders one WebView pointing at `system-ui.html` using the embedded Servo engine (feature-gated behind `servo-embed`). Connects to the compositor as window type `panel`. Dispatches the `zweft_shell_manager_v1` event queue each frame. Forwards navigation gestures received from the compositor to `weft-appd` over WebSocket. Reads the appd WebSocket port and system token from `$XDG_RUNTIME_DIR/weft/` and hands both to the page through `window.weftAppdEndpoint(port, token)`; the shell hands the token only to the system UI document and denies top-level navigation away from it, and the launcher shows package names as text, never markup.
 
 ### weft-app-shell
 
-Per-application Servo host. Spawned by `weft-appd` after the Wasm runtime signals READY. Takes `<app_id>` and `<session_id>` as arguments. Resolves `weft-app://<app_id>/ui/index.html` and injects the `weftIpc` WebSocket bridge into the page. The bridge authenticates with the per-session token from `WEFT_BRIDGE_TOKEN` and can only exchange messages with its own session. It is installed only in top-level documents inside the application's UI directory, and navigation outside that directory is denied. Registers with the compositor as window type `application`. Exits when the appd session ends.
+Per-application Servo host. Spawned by `weft-appd` after the Wasm runtime signals READY. Takes `<app_id>` and `<session_id>` as arguments. Resolves `weft-app://<app_id>/ui/index.html` and injects the `weftIpc` WebSocket bridge into the page. The bridge authenticates with the per-session token from `WEFT_BRIDGE_TOKEN` and can only exchange messages with its own session. It is installed only in top-level documents inside the application's UI directory, and top-level navigation outside that directory is denied; framed documents never receive the bridge. Registers with the compositor as window type `application`. Exits when the appd session ends.
 
 ### weft-appd
 

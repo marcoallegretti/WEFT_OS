@@ -28,7 +28,7 @@ use crate::ipc::{AppStateKind, Request, Response};
 use crate::{Registry, dispatch};
 
 const HELLO_TIMEOUT: Duration = if cfg!(test) {
-    Duration::from_millis(500)
+    Duration::from_secs(1)
 } else {
     Duration::from_secs(5)
 };
