@@ -631,12 +631,22 @@ fn scan_installed_apps() -> Vec<AppInfo> {
             continue;
         };
         for entry in entries.flatten() {
-            let Ok(m) = weft_ipc_types::manifest::Manifest::read(&entry.path()) else {
+            // Only an app's active package, named after the ID its manifest
+            // declares, is installed; staging copies, revisions and stray
+            // directories or links are not.
+            let Some(name) = entry.file_name().to_str().map(str::to_owned) else {
                 continue;
             };
-            // Only a directory named after the ID its manifest declares is an
-            // installed package; staging copies and stray directories are not.
-            if entry.file_name().to_str() != Some(m.package.id.as_str()) {
+            if !weft_ipc_types::package::is_valid_app_id(&name) {
+                continue;
+            }
+            let Ok(Some(found)) = weft_ipc_types::store::active(&root, &name) else {
+                continue;
+            };
+            let Ok(m) = weft_ipc_types::manifest::Manifest::read(found.dir()) else {
+                continue;
+            };
+            if m.package.id != name {
                 continue;
             }
             if seen.insert(m.package.id.clone()) {

@@ -118,10 +118,21 @@ pub struct Pin {
 
 /// Pins the package directory `dir`. The lock is taken on the directory
 /// that is opened, and the path must still name that directory afterwards:
-/// a revision removed or replaced in between is not pinned.
+/// a revision removed or replaced in between is not pinned. A directory a
+/// package operation holds is not waited for, so nobody able to lock a
+/// package directory can stall launches; the launch is refused instead.
 pub fn pin(dir: &Path) -> std::io::Result<Pin> {
     let file = File::open(dir)?;
-    file.lock_shared()?;
+    match file.try_lock_shared() {
+        Ok(()) => {}
+        Err(std::fs::TryLockError::WouldBlock) => {
+            return Err(std::io::Error::other(format!(
+                "{} is being changed; try again",
+                dir.display()
+            )));
+        }
+        Err(std::fs::TryLockError::Error(e)) => return Err(e),
+    }
     if !same_file(&file, dir)? {
         return Err(std::io::Error::other(format!(
             "{} changed while it was being pinned",
