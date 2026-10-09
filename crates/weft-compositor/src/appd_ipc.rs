@@ -285,6 +285,10 @@ fn handle_message(state: &mut WeftCompositorState, msg: AppdToCompositor) {
                     .kill_client(client, DisconnectReason::ConnectionClosed);
             }
         }
+        AppdToCompositor::AppCloseRequest { session_id } => {
+            let closed = state.close_session_windows(session_id);
+            tracing::info!(session_id, windows = closed, "session asked to close");
+        }
         AppdToCompositor::AppFocusRequest { session_id } => {
             if state.activate_session(session_id) {
                 tracing::info!(session_id, "session activated");

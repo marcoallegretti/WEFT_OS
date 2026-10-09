@@ -26,6 +26,10 @@ pub enum AppdToCompositor {
     AppFocusRequest {
         session_id: u64,
     },
+    /// Asks the session's windows to close, as a user close would.
+    AppCloseRequest {
+        session_id: u64,
+    },
 }
 
 /// Messages sent from weft-compositor to weft-appd.

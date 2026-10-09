@@ -220,13 +220,17 @@ def run(args, desktop, xdotool):
     if states[3] != states[1]:
         raise AssertionError("count after ArrowDown does not match the count after one ArrowUp")
 
-    # Ending the session closes its client in the compositor.
+    # Ending the session closes the app as a user close would: the
+    # compositor asks its window to close and the app shell exits by itself.
     appd.send({"type": "TERMINATE_APP", "session_id": session_id})
     deadline = time.monotonic() + 15
-    closed = f"closing the client of an ended session session_id={session_id}"
-    while closed not in desktop.log_text("compositor"):
+    asked = f"session asked to close session_id={session_id} windows=1"
+    closed = (f'stopping session session_id={session_id} reason="closed on request; '
+              'app shell exited (Ok(ExitStatus(unix_wait_status(0))))"')
+    while asked not in desktop.log_text("compositor") or closed not in desktop.log_text("appd"):
         if time.monotonic() > deadline:
-            raise AssertionError(f"the compositor did not close the session's client: {closed!r}")
+            raise AssertionError("the session did not close on request; see compositor.log "
+                                 "and appd.log")
         time.sleep(0.3)
 
 

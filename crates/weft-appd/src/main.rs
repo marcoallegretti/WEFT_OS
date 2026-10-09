@@ -86,10 +86,19 @@ impl SessionRegistry {
         })
     }
 
+    /// Asks a session to stop: a running session is closed as a user close
+    /// would close it, a starting one is stopped at once. The session stays
+    /// registered, Stopping, until its supervisor settles it.
     fn terminate(&mut self, session_id: u64) -> bool {
-        let found = self.sessions.remove(&session_id).is_some();
-        self.abort_senders.remove(&session_id);
-        found
+        match self.abort_senders.remove(&session_id) {
+            Some(sender) => {
+                let _ = sender.send(());
+                self.set_state(session_id, AppStateKind::Stopping);
+                true
+            }
+            // A session no supervisor runs has nothing to settle.
+            None => self.sessions.remove(&session_id).is_some(),
+        }
     }
 
     pub(crate) fn register_abort(&mut self, session_id: u64) -> tokio::sync::oneshot::Receiver<()> {
@@ -532,10 +541,10 @@ pub(crate) async fn dispatch(req: Request, registry: &Registry) -> Response {
         Request::TerminateApp { session_id } => {
             let found = registry.lock().await.terminate(session_id);
             if found {
-                tracing::info!(session_id, "terminated");
+                tracing::info!(session_id, "stop requested");
                 Response::AppState {
                     session_id,
-                    state: AppStateKind::Stopped,
+                    state: AppStateKind::Stopping,
                 }
             } else {
                 Response::Error {
@@ -915,7 +924,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn dispatch_terminate_known_returns_stopped() {
+    async fn dispatch_terminate_known_returns_stopping() {
         let _env = env_lock().lock().await;
         let reg = make_registry();
         let ack = dispatch(
@@ -930,11 +939,13 @@ mod tests {
             Response::LaunchAck { session_id, .. } => session_id,
             _ => panic!("expected LaunchAck"),
         };
+        // The reply says the session is stopping; Stopped is broadcast once
+        // its supervisor has settled it.
         let resp = dispatch(Request::TerminateApp { session_id }, &reg).await;
         assert!(matches!(
             resp,
             Response::AppState {
-                state: AppStateKind::Stopped,
+                state: AppStateKind::Stopping,
                 ..
             }
         ));
@@ -1350,6 +1361,115 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
+    async fn an_app_that_ignores_a_close_is_terminated_after_the_timeout() {
+        use std::os::unix::fs::PermissionsExt;
+        let _env = env_lock().lock().await;
+        use_test_runtime_dir();
+        let dir = std::env::temp_dir().join(format!("weft_test_close_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let app = dir.join("store/org.example.close");
+        write_test_package(&app, "org.example.close", "");
+        // Both children report ready and then ignore everything.
+        let child = dir.join("child.sh");
+        std::fs::write(
+            &child,
+            "#!/bin/sh\necho READY $WEFT_READY_TOKEN\nexec sleep 30\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&child, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let vars = [
+            ("WEFT_RUNTIME_BIN", child.clone().into_os_string()),
+            ("WEFT_APP_SHELL_BIN", child.clone().into_os_string()),
+            ("WEFT_DISABLE_CGROUP", "1".into()),
+            ("WEFT_APP_STORE", dir.join("store").into_os_string()),
+        ];
+        let prior: Vec<_> = vars
+            .iter()
+            .map(|(k, _)| (*k, std::env::var_os(k)))
+            .collect();
+        for (key, value) in &vars {
+            // SAFETY: env_lock is held on a current_thread runtime.
+            unsafe { std::env::set_var(key, value) };
+        }
+
+        let registry = make_registry();
+        let (tx, mut compositor) = tokio::sync::mpsc::channel(8);
+        registry.lock().await.compositor_tx = Some(compositor_client::CompositorSender::new(
+            tx,
+            std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true)),
+        ));
+        let mut rx = registry.lock().await.subscribe();
+        let ack = dispatch(
+            Request::LaunchApp {
+                app_id: "org.example.close".into(),
+                surface_id: 0,
+            },
+            &registry,
+        )
+        .await;
+        let Response::LaunchAck { session_id, .. } = ack else {
+            panic!("{ack:?}");
+        };
+        let ready = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            while !matches!(rx.recv().await, Ok(Response::AppReady { .. })) {}
+        })
+        .await;
+        let started = std::time::Instant::now();
+        let reply = dispatch(Request::TerminateApp { session_id }, &registry).await;
+        let stopped = tokio::time::timeout(std::time::Duration::from_secs(15), async {
+            while !matches!(
+                rx.recv().await,
+                Ok(Response::AppState {
+                    state: AppStateKind::Stopped,
+                    ..
+                })
+            ) {}
+        })
+        .await;
+        let elapsed = started.elapsed();
+        let mut sent = Vec::new();
+        while let Ok(out) = compositor.try_recv() {
+            sent.push(out.msg);
+        }
+
+        for (key, value) in prior {
+            // SAFETY: as above.
+            unsafe {
+                match value {
+                    Some(v) => std::env::set_var(key, v),
+                    None => std::env::remove_var(key),
+                }
+            }
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(ready.is_ok(), "the session did not become ready");
+        assert!(
+            matches!(
+                reply,
+                Response::AppState {
+                    state: AppStateKind::Stopping,
+                    ..
+                }
+            ),
+            "{reply:?}"
+        );
+        assert!(stopped.is_ok(), "the session did not stop");
+        // The app was asked to close, given the timeout, then terminated.
+        assert!(
+            sent.iter().any(|m| matches!(
+                m,
+                weft_ipc_types::AppdToCompositor::AppCloseRequest { session_id: s } if *s == session_id
+            )),
+            "{sent:?}"
+        );
+        assert!(elapsed >= runtime::CLOSE_TIMEOUT, "{elapsed:?}");
+        assert!(
+            elapsed < runtime::CLOSE_TIMEOUT + std::time::Duration::from_secs(5),
+            "{elapsed:?}"
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
     async fn without_a_connected_compositor_nothing_is_started() {
         use std::os::unix::fs::PermissionsExt;
         let _env = env_lock().lock().await;
@@ -1746,9 +1866,10 @@ mod tests {
         .await
         .unwrap();
 
+        // The session stays registered until it settles, then is Stopped.
         assert!(matches!(
             registry.lock().await.state(session_id),
-            AppStateKind::NotFound
+            AppStateKind::Stopped
         ));
 
         let broadcast = rx.try_recv();

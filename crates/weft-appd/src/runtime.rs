@@ -449,13 +449,21 @@ pub(crate) async fn supervise(
         status = session.app_shell.as_mut().expect("app shell spawned").wait() => {
             format!("app shell exited ({status:?})")
         }
-        _ = &mut abort_rx => "terminate requested".to_owned(),
+        requested = &mut abort_rx => match requested {
+            Ok(()) => session.close(session_id).await,
+            // The sender is dropped only when appd shuts down.
+            Err(_) => "appd is shutting down".to_owned(),
+        },
         _ = session.relay.as_mut().expect("relay opened").ended() => {
             "component closed its IPC connection".to_owned()
         }
     };
     session.settle(&registry, &reason).await
 }
+
+/// How long an application may take to close after being asked, for
+/// example to save, before its processes are terminated.
+pub(crate) const CLOSE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 
 /// Creates the session's Wayland connection and queues the compositor's end
 /// for the compositor, returning the app shell's end.
@@ -514,6 +522,33 @@ struct OwnedSession {
 }
 
 impl OwnedSession {
+    /// Closes a running session as a user close would: the compositor asks
+    /// its windows to close and the app shell gets `CLOSE_TIMEOUT` to exit by
+    /// itself. Returns the terminal reason; settling terminates whatever is
+    /// still running.
+    async fn close(&mut self, session_id: u64) -> String {
+        let asked = self.client_attached
+            && self.compositor_tx.as_ref().is_some_and(|tx| {
+                tx.is_connected()
+                    && tx
+                        .try_send(AppdToCompositor::AppCloseRequest { session_id }.into())
+                        .is_ok()
+            });
+        if !asked {
+            return "terminate requested; the compositor could not ask the app to close".to_owned();
+        }
+        let Some(app_shell) = self.app_shell.as_mut() else {
+            return "terminate requested".to_owned();
+        };
+        match tokio::time::timeout(CLOSE_TIMEOUT, app_shell.wait()).await {
+            Ok(status) => format!("closed on request; app shell exited ({status:?})"),
+            Err(_) => format!(
+                "close requested; the app shell did not exit within {} s and was terminated",
+                CLOSE_TIMEOUT.as_secs()
+            ),
+        }
+    }
+
     async fn settle(self, registry: &Registry, reason: &str) -> anyhow::Result<()> {
         let session_id = self.session_id;
         tracing::info!(session_id, reason, "stopping session");
