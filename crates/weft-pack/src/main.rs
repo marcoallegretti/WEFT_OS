@@ -285,8 +285,7 @@ fn install_into(
     mode: InstallMode,
     claim_data: bool,
 ) -> anyhow::Result<()> {
-    std::fs::create_dir_all(store_root)
-        .with_context(|| format!("create {}", store_root.display()))?;
+    create_store(store_root)?;
     if !(path.extension().is_some_and(|e| e == "zst" || e == "tar")
         || path.to_string_lossy().ends_with(".app.tar.zst"))
     {
@@ -305,6 +304,31 @@ fn install_into(
         .and_then(|()| install_dir(&unpacked.join(name), store_root, mode, claim_data));
     let _ = std::fs::remove_dir_all(&unpacked);
     result
+}
+
+/// Creates the store and any missing parents at 0755 whatever the umask, so
+/// a store created by a root install is readable by every user.
+fn create_store(store_root: &Path) -> anyhow::Result<()> {
+    let mut missing: Vec<&Path> = store_root
+        .ancestors()
+        .take_while(|dir| std::fs::symlink_metadata(dir).is_err())
+        .collect();
+    missing.reverse();
+    for dir in missing {
+        match std::fs::create_dir(dir) {
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            other => other.with_context(|| format!("create {}", dir.display()))?,
+        }
+        #[cfg(unix)]
+        std::fs::set_permissions(dir, std::os::unix::fs::PermissionsExt::from_mode(0o755))
+            .with_context(|| format!("set the mode of {}", dir.display()))?;
+    }
+    anyhow::ensure!(
+        store_root.is_dir(),
+        "{} is not a directory",
+        store_root.display()
+    );
+    Ok(())
 }
 
 /// Creates a new directory with a random name in `parent`, accessible only to
@@ -688,8 +712,9 @@ fn list_installed() {
 /// files, so a symbolic link or special file stops the copy rather than
 /// being followed. The walk holds each directory open and opens its entries
 /// relative to it without following links, checking that each opened entry
-/// has the device and inode it was listed with, so a link or another file
-/// swapped in anywhere in the source during the copy cannot redirect it.
+/// has the type, device and inode it had when examined just before the
+/// open, so a link or another file swapped in anywhere in the source during
+/// the copy cannot redirect it.
 /// Modes are not copied: the signature does not cover them, so installed
 /// directories are 0755 and files 0644, or 0755 when the source is
 /// executable, and nothing installed is writable by other users.
