@@ -89,6 +89,7 @@ python3 tests/frame/check_notes.py     # Notes stores exactly what is typed, ref
 python3 tests/frame/check_app_data.py  # Notes data from the earlier layout is moved and kept
 python3 tests/frame/check_confinement.py  # an app page reaches only its UI files and its session bridge
 python3 tests/frame/check_activation.py   # apps fill the work area above the taskbar; launch and ACTIVATE_APP raise and focus
+python3 tests/frame/check_system_ui.py    # the system UI's launcher and taskbar work from the keyboard alone, reached with a Super tap
 ```
 
 ## Demo apps (wasm32-wasip2)
