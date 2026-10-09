@@ -70,6 +70,16 @@ fn main() -> anyhow::Result<()> {
     Ok(())
 }
 
+/// The readiness line for weft-appd: `READY <token>` with the session token
+/// from `WEFT_READY_TOKEN`, or `READY` when run without appd.
+#[cfg(feature = "wasmtime-runtime")]
+fn ready_line() -> String {
+    match std::env::var("WEFT_READY_TOKEN") {
+        Ok(token) => format!("READY {token}"),
+        Err(_) => "READY".to_owned(),
+    }
+}
+
 fn resolve_package(app_id: &str) -> anyhow::Result<PathBuf> {
     for store_root in package_store_roots() {
         let pkg_dir = store_root.join(app_id);
@@ -198,7 +208,7 @@ fn run_module(
             .instance("weft:app/notify@0.1.0")
             .context("define weft:app/notify instance")?
             .func_wrap("ready", |_: wasmtime::StoreContextMut<'_, State>, ()| {
-                println!("READY");
+                println!("{}", ready_line());
                 Ok::<(), wasmtime::Error>(())
             })
             .context("define weft:app/notify#ready")?;

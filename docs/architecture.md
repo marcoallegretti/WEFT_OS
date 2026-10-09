@@ -20,7 +20,7 @@ Per-application Servo host. Spawned by `weft-appd` after the Wasm runtime signal
 
 ### weft-appd
 
-Session supervisor. Listens on a Unix socket (MessagePack protocol) and a WebSocket port (JSON). For each session: spawns `weft-runtime`, waits for READY, spawns `weft-app-shell`, manages the per-session IPC relay, and supervises child processes. Handles graceful termination and cgroup resource limits (via systemd-run when available).
+Session supervisor. Listens on a Unix socket (MessagePack protocol) and a WebSocket port (JSON). For each session: spawns `weft-runtime` and waits for its READY, spawns `weft-app-shell` (`WEFT_APP_SHELL_BIN` is required) and waits for its READY, and only then reports the session running (`APP_READY`). A child reports readiness by printing `READY <token>` on stdout, where the token is a random per-session value appd passes in `WEFT_READY_TOKEN`; Wasm guests and pages share those stdout streams but cannot read the token, so their output cannot fake readiness. Each wait times out after 30 seconds. If either child fails to start, fails to become ready or exits, or the session is terminated, the whole session is stopped: both children, the file portal, the compositor association and any image mount are released. Manages the per-session IPC relay and applies cgroup resource limits to the runtime via systemd-run when available.
 
 ### weft-runtime
 
@@ -93,7 +93,8 @@ Package store roots (in priority order):
 | Variable | Default | Description |
 |---|---|---|
 | `WEFT_RUNTIME_BIN` | — | Path to `weft-runtime` binary |
-| `WEFT_APP_SHELL_BIN` | — | Path to `weft-app-shell` binary |
+| `WEFT_APP_SHELL_BIN` | — | Path to `weft-app-shell` binary; required to launch apps |
+| `WEFT_READY_TOKEN` | set by appd | Per-session readiness token passed to `weft-runtime` and `weft-app-shell` |
 | `WEFT_FILE_PORTAL_BIN` | — | Path to `weft-file-portal` binary |
 | `WEFT_MOUNT_HELPER` | — | Path to `weft-mount-helper` binary |
 | `WEFT_APP_STORE` | — | Override package store root |

@@ -89,6 +89,15 @@ impl WebViewDelegate for WeftWebViewDelegate {
     }
 }
 
+/// The readiness line for weft-appd: `READY <token>` with the session token
+/// from `WEFT_READY_TOKEN`, or `READY` when run without appd.
+fn ready_line() -> String {
+    match std::env::var("WEFT_READY_TOKEN") {
+        Ok(token) => format!("READY {token}"),
+        Err(_) => "READY".to_owned(),
+    }
+}
+
 /// Servo preferences shared by the WEFT hosts.
 fn host_preferences() -> servo::Preferences {
     servo::Preferences {
@@ -243,7 +252,7 @@ impl App {
         }
         if !self.ready_signalled && self.signals.settled.load(Ordering::Relaxed) {
             self.ready_signalled = true;
-            println!("READY");
+            println!("{}", ready_line());
             use std::io::Write;
             let _ = std::io::stdout().flush();
         }
