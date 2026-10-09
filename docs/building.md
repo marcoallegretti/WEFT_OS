@@ -133,7 +133,7 @@ cp examples/keys/weft-sign.pub ~/.config/weft/trusted-keys/weft-demo.pub
 weft-pack install examples/org.weft.demo.notes
 ```
 
-Unsigned packages under development install with `weft-pack install <dir> --dev`, recorded as development content. See `docs/security.md` for the trust store and app ID ownership.
+Unsigned packages under development install with `weft-pack install <dir> --dev`, recorded as development content and marked `(development)` by `weft-pack list`. See `docs/security.md` for the trust store and app ID ownership.
 
 ## NixOS VM (requires Nix with flakes)
 

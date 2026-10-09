@@ -263,31 +263,44 @@ fn install_package(path: &Path, mode: InstallMode) -> anyhow::Result<()> {
 }
 
 fn install_package_to(path: &Path, store_root: &Path, mode: InstallMode) -> anyhow::Result<()> {
-    let dir_buf;
-    let dir: &Path = if path.extension().is_some_and(|e| e == "zst" || e == "tar")
-        || path.to_string_lossy().ends_with(".app.tar.zst")
+    std::fs::create_dir_all(store_root)
+        .with_context(|| format!("create {}", store_root.display()))?;
+    if !(path.extension().is_some_and(|e| e == "zst" || e == "tar")
+        || path.to_string_lossy().ends_with(".app.tar.zst"))
     {
-        let tmp = std::env::temp_dir().join(format!(
-            "weft-install-{}",
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap_or_default()
-                .subsec_nanos()
-        ));
-        std::fs::create_dir_all(&tmp)
-            .with_context(|| format!("create temp dir {}", tmp.display()))?;
-        unbundle_package(path, &tmp)?;
-        let name = path
-            .file_name()
-            .and_then(|n| n.to_str())
-            .and_then(|n| n.strip_suffix(".app.tar.zst"))
-            .context("cannot determine app_id from archive filename")?;
-        dir_buf = tmp.join(name);
-        &dir_buf
-    } else {
-        path
-    };
+        return install_dir(path, store_root, mode);
+    }
+    let name = path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .and_then(|n| n.strip_suffix(".app.tar.zst"))
+        .context("cannot determine app_id from archive filename")?;
+    // A fresh private directory in the store, removed whatever happens, so
+    // nothing can be planted in it and nothing is left behind.
+    let unpacked = private_scratch_dir(store_root, ".unpack")?;
+    let result = unbundle_package(path, &unpacked)
+        .and_then(|()| install_dir(&unpacked.join(name), store_root, mode));
+    let _ = std::fs::remove_dir_all(&unpacked);
+    result
+}
 
+/// Creates a new directory with a random name in `parent`, accessible only to
+/// the user.
+fn private_scratch_dir(parent: &Path, prefix: &str) -> anyhow::Result<PathBuf> {
+    let dir = parent.join(format!(
+        "{prefix}-{}",
+        hex::encode(rand::random::<[u8; 8]>())
+    ));
+    let mut builder = std::fs::DirBuilder::new();
+    #[cfg(unix)]
+    std::os::unix::fs::DirBuilderExt::mode(&mut builder, 0o700);
+    builder
+        .create(&dir)
+        .with_context(|| format!("create {}", dir.display()))?;
+    Ok(dir)
+}
+
+fn install_dir(dir: &Path, store_root: &Path, mode: InstallMode) -> anyhow::Result<()> {
     check_package(dir)?;
     let manifest = load_manifest(dir)?;
     let app_id = &manifest.package.id;
@@ -312,36 +325,53 @@ fn install_package_to(path: &Path, store_root: &Path, mode: InstallMode) -> anyh
     // The package is copied into the store first and every decision is made
     // on that copy, so the bytes that are checked and trusted are the bytes
     // that become installed. Only then does one rename make it available.
-    std::fs::create_dir_all(store_root)
-        .with_context(|| format!("create {}", store_root.display()))?;
     let staging = store_root.join(format!(
         ".staging-{app_id}-{}",
         hex::encode(rand::random::<[u8; 8]>())
     ));
-    let staged = copy_dir(dir, &staging)
+    let admitted = copy_dir(dir, &staging)
         .with_context(|| format!("copy {} -> {}", dir.display(), staging.display()))
-        .and_then(|()| admit(&staging, app_id, mode))
-        .and_then(|owner| {
-            weft_ipc_types::package::rename_no_replace(&staging, &dest)
-                .with_context(|| format!("move {} -> {}", staging.display(), dest.display()))?;
-            Ok(owner)
-        });
-    let owner = match staged {
-        Ok(owner) => owner,
+        .and_then(|()| admit(&staging, app_id, mode));
+    let admission = match admitted {
+        Ok(admission) => admission,
         Err(e) => {
             let _ = std::fs::remove_dir_all(&staging);
             return Err(e);
         }
     };
+    let owner = admission.owner;
+    place(&staging, &dest, admission)?;
     println!("installed {} -> {} ({owner})", app_id, dest.display());
+    Ok(())
+}
+
+/// The owner a staged package was admitted under, and the owner record this
+/// installation created, if any.
+struct Admission {
+    owner: Owner,
+    created_record: Option<PathBuf>,
+}
+
+/// Makes the staged package available at `dest`. If that fails, the staging
+/// copy is removed, and so is an owner record this installation created, so
+/// a failed first installation leaves no claim on the app ID.
+fn place(staging: &Path, dest: &Path, admission: Admission) -> anyhow::Result<()> {
+    if let Err(e) = weft_ipc_types::package::rename_no_replace(staging, dest) {
+        let _ = std::fs::remove_dir_all(staging);
+        if let Some(record) = &admission.created_record {
+            let _ = std::fs::remove_file(record);
+        }
+        return Err(e).with_context(|| format!("move {} -> {}", staging.display(), dest.display()));
+    }
     Ok(())
 }
 
 /// Checks the staged copy of a package and establishes who owns its app ID:
 /// the trusted publisher that signed it, or, only when asked, development.
 /// The first installation of an ID records its owner, and every later one
-/// must have the same owner.
-fn admit(staged: &Path, app_id: &str, mode: InstallMode) -> anyhow::Result<Owner> {
+/// must have the same owner. The record is written before the package is
+/// placed, so concurrent installations by different owners cannot both win.
+fn admit(staged: &Path, app_id: &str, mode: InstallMode) -> anyhow::Result<Admission> {
     use weft_ipc_types::trust::{owner_record_path, read_owner, write_owner};
     check_package(staged)?;
     let manifest = load_manifest(staged)?;
@@ -369,15 +399,21 @@ fn admit(staged: &Path, app_id: &str, mode: InstallMode) -> anyhow::Result<Owner
     let data_home = weft_ipc_types::package::data_home()
         .context("cannot locate the data home to record who owns the app ID")?;
     let record = owner_record_path(&data_home, app_id);
-    match read_owner(&record)? {
-        Some(existing) if existing == owner => {}
+    let created_record = match read_owner(&record)? {
+        Some(existing) if existing == owner => None,
         Some(existing) => anyhow::bail!(
             "{app_id} belongs to {existing}; this package is {owner}. Its app data stays with \
              its owner, so another publisher or a development build cannot take the ID over"
         ),
-        None => write_owner(&record, owner)?,
-    }
-    Ok(owner)
+        None => {
+            write_owner(&record, owner)?;
+            Some(record)
+        }
+    };
+    Ok(Admission {
+        owner,
+        created_record,
+    })
 }
 
 fn uninstall_package(app_id: &str) -> anyhow::Result<()> {
@@ -424,7 +460,7 @@ fn uninstall_package_from(app_id: &str, store_root: &Path) -> anyhow::Result<()>
     // while the data remains; with no data left, the ID is free again.
     if let Some(data_home) = weft_ipc_types::package::data_home()
         && std::fs::symlink_metadata(weft_ipc_types::package::app_data_dir(&data_home, app_id))
-            .is_err()
+            .is_err_and(|e| e.kind() == std::io::ErrorKind::NotFound)
     {
         let _ = std::fs::remove_file(weft_ipc_types::trust::owner_record_path(&data_home, app_id));
     }
@@ -524,7 +560,20 @@ fn list_installed() {
                 continue;
             }
             if seen.insert(m.package.id.clone()) {
-                pkgs.push((m.package.id, m.package.name, m.package.version));
+                let development = weft_ipc_types::package::data_home().is_some_and(|home| {
+                    matches!(
+                        weft_ipc_types::trust::read_owner(
+                            &weft_ipc_types::trust::owner_record_path(&home, &m.package.id)
+                        ),
+                        Ok(Some(Owner::Development))
+                    )
+                });
+                let version = if development {
+                    format!("{}  (development)", m.package.version)
+                } else {
+                    m.package.version
+                };
+                pkgs.push((m.package.id, m.package.name, version));
             }
         }
         pkgs.sort_by(|a, b| a.0.cmp(&b.0));
@@ -540,18 +589,25 @@ fn list_installed() {
 
 /// Copies a package directory. Packages hold only directories and regular
 /// files, so a symbolic link or special file stops the copy rather than
-/// being followed.
+/// being followed. Modes are not copied: the signature does not cover them,
+/// so installed directories are 0755 and files 0644, or 0755 when the source
+/// is executable, and nothing installed is writable by other users.
 fn copy_dir(src: &Path, dst: &Path) -> anyhow::Result<()> {
-    std::fs::create_dir(dst).with_context(|| format!("create {}", dst.display()))?;
+    let mut builder = std::fs::DirBuilder::new();
+    #[cfg(unix)]
+    std::os::unix::fs::DirBuilderExt::mode(&mut builder, 0o755);
+    builder
+        .create(dst)
+        .with_context(|| format!("create {}", dst.display()))?;
     for entry in std::fs::read_dir(src)? {
         let entry = entry?;
         let src_path = entry.path();
         let dst_path = dst.join(entry.file_name());
-        let kind = std::fs::symlink_metadata(&src_path)?.file_type();
-        if kind.is_dir() {
+        let metadata = std::fs::symlink_metadata(&src_path)?;
+        if metadata.is_dir() {
             copy_dir(&src_path, &dst_path)?;
-        } else if kind.is_file() {
-            std::fs::copy(&src_path, &dst_path)
+        } else if metadata.is_file() {
+            copy_file(&src_path, &dst_path, &metadata)
                 .with_context(|| format!("copy {}", src_path.display()))?;
         } else {
             anyhow::bail!(
@@ -560,6 +616,22 @@ fn copy_dir(src: &Path, dst: &Path) -> anyhow::Result<()> {
             );
         }
     }
+    Ok(())
+}
+
+fn copy_file(src: &Path, dst: &Path, metadata: &std::fs::Metadata) -> std::io::Result<()> {
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+        let executable = metadata.permissions().mode() & 0o111 != 0;
+        options.mode(if executable { 0o755 } else { 0o644 });
+    }
+    #[cfg(not(unix))]
+    let _ = metadata;
+    let mut target = options.open(dst)?;
+    std::io::copy(&mut std::fs::File::open(src)?, &mut target)?;
     Ok(())
 }
 
@@ -933,6 +1005,119 @@ mod tests {
         assert!(refused.is_err());
         assert!(!store.join(app_id).exists());
         assert!(sign_package(&home.join("src"), &key(&home, "publisher", 6, true)).is_err());
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn a_development_id_does_not_become_verified() {
+        let home = temp_root("dev_owned");
+        let store = home.join("store");
+        let app_id = "org.weft.test.devowned";
+        write_package(&home.join("src"), app_id, APP_DATA);
+        with_trust(&home, || {
+            install_package_to(&home.join("src"), &store, InstallMode::Development)
+        })
+        .unwrap();
+        let data = weft_ipc_types::package::app_data_dir(&home.join("share"), app_id);
+        std::fs::create_dir_all(&data).unwrap();
+        with_trust(&home, || uninstall_package_from(app_id, &store)).unwrap();
+
+        sign_package(&home.join("src"), &key(&home, "publisher", 7, true)).unwrap();
+        let refused = with_trust(&home, || {
+            install_package_to(&home.join("src"), &store, InstallMode::Verified)
+        });
+        let message = format!("{:#}", refused.unwrap_err());
+        assert!(message.contains("belongs to development"), "{message}");
+        assert!(!store.join(app_id).exists());
+        assert_eq!(owner_of(&home, app_id), Some(Owner::Development));
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn a_failed_placement_leaves_no_claim_on_the_id() {
+        let home = temp_root("placement");
+        let staging = home.join(".staging-x");
+        let dest = home.join("org.weft.test.placed");
+        std::fs::create_dir_all(&staging).unwrap();
+        std::fs::create_dir_all(dest.join("ui")).unwrap();
+        let record = home.join("owners/org.weft.test.placed");
+        weft_ipc_types::trust::write_owner(&record, Owner::Development).unwrap();
+
+        let admission = Admission {
+            owner: Owner::Development,
+            created_record: Some(record.clone()),
+        };
+        assert!(place(&staging, &dest, admission).is_err());
+        assert!(!staging.exists());
+        assert!(!record.exists());
+        assert!(
+            dest.join("ui").is_dir(),
+            "the existing package is untouched"
+        );
+
+        // A record that existed before this installation is kept.
+        std::fs::create_dir_all(&staging).unwrap();
+        weft_ipc_types::trust::write_owner(&record, Owner::Development).unwrap();
+        let admission = Admission {
+            owner: Owner::Development,
+            created_record: None,
+        };
+        assert!(place(&staging, &dest, admission).is_err());
+        assert!(record.exists());
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn installed_files_are_not_writable_by_others() {
+        use std::os::unix::fs::PermissionsExt;
+        let home = temp_root("modes");
+        let store = home.join("store");
+        let app_id = "org.weft.test.modes";
+        write_package(&home.join("src"), app_id, "");
+        let set = |rel: &str, mode: u32| {
+            std::fs::set_permissions(
+                home.join("src").join(rel),
+                std::fs::Permissions::from_mode(mode),
+            )
+            .unwrap()
+        };
+        set("ui/index.html", 0o666);
+        set("app.wasm", 0o777);
+        set("ui", 0o777);
+        with_trust(&home, || {
+            install_package_to(&home.join("src"), &store, InstallMode::Development)
+        })
+        .unwrap();
+        let mode = |rel: &str| {
+            std::fs::metadata(store.join(app_id).join(rel))
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777
+        };
+        assert_eq!(mode("ui/index.html"), 0o644);
+        assert_eq!(mode("app.wasm"), 0o755);
+        assert_eq!(mode("ui"), 0o755);
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn packages_with_non_utf8_names_are_refused() {
+        use std::os::unix::ffi::OsStrExt;
+        let home = temp_root("non_utf8");
+        let store = home.join("store");
+        let app_id = "org.weft.test.nonutf8";
+        write_package(&home.join("src"), app_id, "");
+        let name = std::ffi::OsStr::from_bytes(b"ui/\xff.html");
+        std::fs::write(home.join("src").join(name), b"").unwrap();
+        let refused = with_trust(&home, || {
+            install_package_to(&home.join("src"), &store, InstallMode::Development)
+        });
+        assert!(refused.is_err());
+        assert!(!store.join(app_id).exists());
+        assert!(!staging_left(&store));
         let _ = std::fs::remove_dir_all(&home);
     }
 
@@ -1381,6 +1566,11 @@ entry = "ui/index.html"
             let _ = fs::create_dir_all(&store);
             install_package_to(&archive, &store, InstallMode::Development).unwrap();
             assert!(store.join(&app_id).join("app.wasm").exists());
+            let scratch_left = fs::read_dir(&store).unwrap().flatten().any(|e| {
+                let name = e.file_name().to_string_lossy().into_owned();
+                name.starts_with(".unpack") || name.starts_with(".staging-")
+            });
+            assert!(!scratch_left, "archive install left scratch directories");
 
             let _ = fs::remove_dir_all(&src);
             let _ = fs::remove_dir_all(&bundle_dir);

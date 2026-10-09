@@ -10,7 +10,7 @@
 use std::fmt;
 use std::path::{Path, PathBuf};
 
-use ed25519_dalek::{Signature, Verifier, VerifyingKey};
+use ed25519_dalek::{Signature, VerifyingKey};
 use sha2::{Digest, Sha256};
 
 /// The signature file at the root of a signed package.
@@ -127,7 +127,7 @@ impl PublisherKey {
 
     /// Whether `signature` signs `digest` with this key.
     pub fn signed(&self, digest: &[u8; 32], signature: &Signature) -> bool {
-        self.0.verify(digest, signature).is_ok()
+        self.0.verify_strict(digest, signature).is_ok()
     }
 }
 
@@ -261,7 +261,9 @@ pub fn read_owner(record: &Path) -> Result<Option<Owner>, TrustError> {
     }
 }
 
-/// Records the owner of an app ID. An existing record is never replaced.
+/// Records the owner of an app ID. An existing record is never replaced, and
+/// a record is either absent or complete: it is written and synced under a
+/// temporary name, then linked into place.
 pub fn write_owner(record: &Path, owner: Owner) -> Result<(), TrustError> {
     use std::io::Write;
     let parent = record.parent().expect("owner records live in a directory");
@@ -270,13 +272,27 @@ pub fn write_owner(record: &Path, owner: Owner) -> Result<(), TrustError> {
         Owner::Verified(key) => format!("verified {}\n", key.to_hex()),
         Owner::Development => "development\n".to_owned(),
     };
-    let mut file = std::fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(record)
-        .map_err(io(record))?;
-    file.write_all(text.as_bytes()).map_err(io(record))?;
-    file.sync_all().map_err(io(record))
+    let name = record
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("record");
+    let temp = parent.join(format!(".{name}.{}.tmp", std::process::id()));
+    let _ = std::fs::remove_file(&temp);
+    let written = (|| {
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&temp)?;
+        file.write_all(text.as_bytes())?;
+        file.sync_all()
+    })()
+    .map_err(io(&temp));
+    let linked = written.and_then(|()| std::fs::hard_link(&temp, record).map_err(io(record)));
+    let _ = std::fs::remove_file(&temp);
+    linked?;
+    std::fs::File::open(parent)
+        .and_then(|dir| dir.sync_all())
+        .map_err(io(parent))
 }
 
 #[cfg(test)]
