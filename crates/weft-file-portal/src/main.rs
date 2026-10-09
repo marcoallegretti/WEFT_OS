@@ -267,18 +267,20 @@ fn handle_connection(stream: std::os::unix::net::UnixStream, roots: &[Root]) {
         }
     };
     let _ = stream.set_read_timeout(Some(IDLE_TIMEOUT));
+    let _ = stream.set_write_timeout(Some(IDLE_TIMEOUT));
     let mut reader = BufReader::new(stream);
     let mut line = Vec::new();
     loop {
         line.clear();
         match (&mut reader)
-            .take(MAX_LINE as u64 + 2)
+            .take(MAX_LINE as u64 + 3)
             .read_until(b'\n', &mut line)
         {
             Ok(0) | Err(_) => break,
             Ok(_) => {}
         }
-        if line.strip_suffix(b"\n").unwrap_or(&line).len() > MAX_LINE {
+        let content = line.strip_suffix(b"\n").unwrap_or(&line);
+        if content.strip_suffix(b"\r").unwrap_or(content).len() > MAX_LINE {
             let _ = writer.write_all(b"{\"error\":\"request too long\"}\n");
             break;
         }
@@ -382,8 +384,16 @@ fn write(root: &Root, rest: &Path, data: &[u8]) -> Result<Response, Response> {
     )
     .map_err(Response::err)?;
     static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    // Unique within this portal by the counter, and across restarts by the
+    // start time, so a file left by an earlier instance does not collide.
+    static STARTED: std::sync::OnceLock<u128> = std::sync::OnceLock::new();
+    let started = STARTED.get_or_init(|| {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.as_nanos())
+    });
     let temporary = format!(
-        "{TEMPORARY_PREFIX}{}-{}",
+        "{TEMPORARY_PREFIX}{}-{started}-{}",
         std::process::id(),
         NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
     );
@@ -603,37 +613,52 @@ mod tests {
         fs::create_dir(granted.join("real")).unwrap();
         fs::write(granted.join("real/f"), b"inside").unwrap();
         let roots = grant(&granted, true);
+        // `swap` is a link, replaced in a loop, alternately to the inside
+        // directory and out of the granted one, absolute and relative.
+        std::os::unix::fs::symlink("real", granted.join("swap")).unwrap();
         let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
         let swapper = {
             let (granted, outside, stop) = (granted.clone(), dir.join("outside"), stop.clone());
             std::thread::spawn(move || {
-                // `swap` is alternately a link to the inside directory and
-                // a link out.
-                while !stop.load(std::sync::atomic::Ordering::Relaxed) {
-                    let _ = std::os::unix::fs::symlink("real", granted.join("next"));
-                    let _ = fs::rename(granted.join("next"), granted.join("swap"));
-                    let _ = std::os::unix::fs::symlink(&outside, granted.join("next"));
+                let targets = [
+                    PathBuf::from("real"),
+                    outside,
+                    PathBuf::from("../../outside"),
+                ];
+                for target in targets.iter().cycle() {
+                    if stop.load(std::sync::atomic::Ordering::Relaxed) {
+                        break;
+                    }
+                    let _ = std::os::unix::fs::symlink(target, granted.join("next"));
                     let _ = fs::rename(granted.join("next"), granted.join("swap"));
                 }
             })
         };
-        let mut inside = 0;
-        for _ in 0..2000 {
-            if let Response::OkData { data_b64 } =
-                handle_request(read_req(&granted.join("swap/f")), &roots)
-            {
-                let data =
-                    base64::Engine::decode(&base64::engine::general_purpose::STANDARD, data_b64)
-                        .unwrap();
-                assert_eq!(data, b"inside", "a read left the directory");
-                inside += 1;
+        let (mut inside, mut refused) = (0, 0);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+        while (inside < 50 || refused < 50) && std::time::Instant::now() < deadline {
+            match handle_request(read_req(&granted.join("swap/f")), &roots) {
+                Response::OkData { data_b64 } => {
+                    let data = base64::Engine::decode(
+                        &base64::engine::general_purpose::STANDARD,
+                        data_b64,
+                    )
+                    .unwrap();
+                    assert_eq!(data, b"inside", "a read left the directory");
+                    inside += 1;
+                }
+                Response::Err { error } if error.contains("leads out") => refused += 1,
+                _ => {}
             }
             let _ = handle_request(write_req(&granted.join("swap/f"), b"inside"), &roots);
         }
         stop.store(true, std::sync::atomic::Ordering::Relaxed);
         swapper.join().unwrap();
         assert_eq!(fs::read(dir.join("outside/f")).unwrap(), b"secret");
-        assert!(inside > 0, "the race never resolved inside");
+        assert!(
+            inside >= 50 && refused >= 50,
+            "the race was not exercised: {inside} reads inside, {refused} refused"
+        );
         let _ = fs::remove_dir_all(&dir);
     }
 
@@ -720,7 +745,7 @@ mod tests {
         let serve = std::thread::spawn(move || handle_connection(server, &roots));
         let mut writer = client.try_clone().unwrap();
         let sent = std::thread::spawn(move || {
-            let _ = writer.write_all(&vec![b'x'; MAX_LINE + 2]);
+            let _ = writer.write_all(&vec![b'x'; MAX_LINE + 64]);
         });
         let mut reply = String::new();
         BufReader::new(client).read_line(&mut reply).unwrap();
