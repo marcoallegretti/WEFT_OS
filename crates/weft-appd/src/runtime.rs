@@ -1,7 +1,7 @@
 use std::path::PathBuf;
 use std::time::Duration;
 
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader, BufWriter};
+use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader, BufWriter};
 use weft_ipc_types::AppdToCompositor;
 
 use crate::Registry;
@@ -37,6 +37,10 @@ impl Drop for IpcRelay {
 /// newline-delimited messages between it and the returned sender (towards
 /// the component) and the broadcast channel (from the component).
 #[cfg(unix)]
+/// The longest message from a component, its line break included: the
+/// runtime refuses longer ones, so a longer line ends the relay.
+const MAX_RELAY_FRAME: usize = 64 * 1024 + 2;
+
 pub(crate) fn spawn_ipc_relay(
     session_id: u64,
     socket_path: PathBuf,
@@ -65,14 +69,26 @@ pub(crate) fn spawn_ipc_relay(
         let (reader, writer) = tokio::io::split(stream);
         let mut reader = BufReader::new(reader);
         let mut writer = BufWriter::new(writer);
+        // The frame being read lives outside the loop: `read_until` keeps
+        // what it has read when the other branch wins, so a message from the
+        // page never splits a message from the component.
+        let mut frame = Vec::new();
         loop {
-            let mut line = String::new();
+            let mut limited = (&mut reader).take((MAX_RELAY_FRAME + 1 - frame.len()) as u64);
             tokio::select! {
-                n = reader.read_line(&mut line) => {
+                n = limited.read_until(b'\n', &mut frame) => {
                     match n {
                         Ok(0) | Err(_) => break,
+                        Ok(_) if !frame.ends_with(b"\n") => {
+                            if frame.len() > MAX_RELAY_FRAME {
+                                tracing::warn!(session_id, "IPC relay: message over the size limit");
+                                break;
+                            }
+                        }
                         Ok(_) => {
-                            let payload = line.trim_end().to_owned();
+                            let line = std::mem::take(&mut frame);
+                            let text = String::from_utf8_lossy(&line);
+                            let payload = text.trim_end_matches(['\n', '\r']).to_owned();
                             let _ = broadcast.send(Response::IpcMessage { session_id, payload });
                         }
                     }
@@ -565,6 +581,48 @@ async fn drain_stderr(stderr: tokio::process::ChildStderr, session_id: u64, proc
 #[cfg(all(test, target_os = "linux"))]
 mod tests {
     use super::SYSTEMD_SCOPE_ARGS;
+
+    fn relay_socket(name: &str) -> std::path::PathBuf {
+        std::env::temp_dir().join(format!("weft-relay-{name}-{}.sock", std::process::id()))
+    }
+
+    #[tokio::test]
+    async fn a_message_from_the_page_does_not_split_one_from_the_component() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let path = relay_socket("split");
+        let (broadcast, mut messages) = tokio::sync::broadcast::channel(16);
+        let (to_component, mut relay) = super::spawn_ipc_relay(7, path.clone(), broadcast).unwrap();
+        let mut component = tokio::net::UnixStream::connect(&path).await.unwrap();
+        component.write_all(b"{\"half\":").await.unwrap();
+        // The relay starts reading the component's message, then the page's
+        // message wins the select.
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        to_component.send("from the page".to_owned()).await.unwrap();
+        let mut received = vec![0; 14];
+        component.read_exact(&mut received).await.unwrap();
+        assert_eq!(received, b"from the page\n");
+        component.write_all(b"\"whole\"}\n").await.unwrap();
+        let message = tokio::time::timeout(std::time::Duration::from_secs(5), messages.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(
+            matches!(&message, crate::ipc::Response::IpcMessage { session_id: 7, payload } if payload == "{\"half\":\"whole\"}"),
+            "{message:?}"
+        );
+
+        // A line longer than any message ends the relay.
+        component
+            .write_all(&vec![b'x'; super::MAX_RELAY_FRAME + 1])
+            .await
+            .unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(5), relay.ended())
+            .await
+            .expect("the relay did not end on an overlong line");
+        assert!(messages.try_recv().is_err());
+        drop(relay);
+        assert!(!path.exists());
+    }
 
     /// systemd-run checks its options and their combinations before it
     /// connects to the service manager. Run against an empty runtime
