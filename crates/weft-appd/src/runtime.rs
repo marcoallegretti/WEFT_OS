@@ -70,6 +70,42 @@ pub(crate) async fn spawn_ipc_relay(
 
 const READY_TIMEOUT: Duration = Duration::from_secs(30);
 
+/// Environment variable carrying a session's readiness token to its children.
+///
+/// A child reports readiness by printing `READY <token>` on its own stdout.
+/// Application code shares that stdout (Wasm guests through inherited stdio,
+/// pages through `window.alert`) but cannot read the token, because the
+/// runtime passes the guest only the variables it names and pages cannot read
+/// the host process environment.
+const READY_TOKEN_ENV: &str = "WEFT_READY_TOKEN";
+
+/// Longest line read from a child's output; longer lines are split.
+const MAX_LINE: u64 = 64 * 1024;
+
+fn readiness_token() -> std::io::Result<String> {
+    use std::io::Read;
+    let mut bytes = [0u8; 16];
+    std::fs::File::open("/dev/urandom")?.read_exact(&mut bytes)?;
+    Ok(bytes.iter().map(|b| format!("{b:02x}")).collect())
+}
+
+/// Reads one line of at most MAX_LINE bytes, decoded lossily. Returns None at
+/// end of output.
+async fn read_child_line<R: tokio::io::AsyncBufRead + Unpin>(
+    reader: &mut R,
+) -> std::io::Result<Option<String>> {
+    use tokio::io::AsyncReadExt;
+    let mut line = Vec::new();
+    let n = (&mut *reader)
+        .take(MAX_LINE)
+        .read_until(b'\n', &mut line)
+        .await?;
+    if n == 0 {
+        return Ok(None);
+    }
+    Ok(Some(String::from_utf8_lossy(&line).trim_end().to_owned()))
+}
+
 /// `systemd-run` options that place the runtime in a transient user scope.
 ///
 /// A scope runs the command in the foreground as systemd-run's own process,
@@ -171,31 +207,23 @@ async fn kill_portal(portal: Option<(PathBuf, tokio::process::Child)>) {
     }
 }
 
-async fn spawn_app_shell(session_id: u64, app_id: &str) -> Option<tokio::process::Child> {
-    let bin = std::env::var("WEFT_APP_SHELL_BIN").ok()?;
-    let mut cmd = tokio::process::Command::new(&bin);
-    cmd.arg(app_id)
+fn spawn_app_shell(
+    bin: &str,
+    session_id: u64,
+    app_id: &str,
+    token: &str,
+) -> std::io::Result<tokio::process::Child> {
+    let child = tokio::process::Command::new(bin)
+        .arg(app_id)
         .arg(session_id.to_string())
+        .env(READY_TOKEN_ENV, token)
         .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null());
-    match cmd.spawn() {
-        Ok(child) => {
-            tracing::info!(session_id, %app_id, bin = %bin, "app shell spawned");
-            Some(child)
-        }
-        Err(e) => {
-            tracing::warn!(session_id, %app_id, error = %e, "failed to spawn app shell");
-            None
-        }
-    }
-}
-
-async fn kill_app_shell(child: Option<tokio::process::Child>) {
-    if let Some(mut c) = child {
-        let _ = c.kill().await;
-        let _ = c.wait().await;
-    }
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .kill_on_drop(true)
+        .spawn()?;
+    tracing::info!(session_id, %app_id, bin, "app shell spawned");
+    Ok(child)
 }
 
 fn portal_socket_path(session_id: u64) -> Option<PathBuf> {
@@ -219,7 +247,7 @@ fn spawn_file_portal(
     for (host, _) in allowed_paths {
         cmd.arg("--allow").arg(host);
     }
-    let child = cmd.spawn().ok()?;
+    let child = cmd.kill_on_drop(true).spawn().ok()?;
     tracing::info!(session_id, socket = %socket.display(), "file portal spawned");
     Some((socket, child))
 }
@@ -237,14 +265,19 @@ pub(crate) async fn supervise(
         Ok(b) => b,
         Err(_) => {
             tracing::debug!(session_id, %app_id, "WEFT_RUNTIME_BIN not set; skipping process spawn");
-            let mut reg = registry.lock().await;
-            reg.set_state(session_id, AppStateKind::Stopped);
-            reg.remove_abort_sender(session_id);
-            let _ = reg.broadcast().send(Response::AppState {
-                session_id,
-                state: AppStateKind::Stopped,
-            });
-            return Ok(());
+            return stop_unstarted(&registry, session_id).await;
+        }
+    };
+
+    let Ok(shell_bin) = std::env::var("WEFT_APP_SHELL_BIN") else {
+        tracing::warn!(session_id, %app_id, "WEFT_APP_SHELL_BIN not set; no UI host to start");
+        return stop_unstarted(&registry, session_id).await;
+    };
+    let token = match readiness_token() {
+        Ok(token) => token,
+        Err(e) => {
+            tracing::error!(session_id, %app_id, error = %e, "cannot create readiness token");
+            return stop_unstarted(&registry, session_id).await;
         }
     };
 
@@ -265,7 +298,9 @@ pub(crate) async fn supervise(
         .arg(session_id.to_string())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
-        .stdin(std::process::Stdio::null());
+        .stdin(std::process::Stdio::null())
+        .env(READY_TOKEN_ENV, &token)
+        .kill_on_drop(true);
 
     if let Some(ref sock) = ipc_socket_path {
         cmd.arg("--ipc-socket").arg(sock);
@@ -283,119 +318,158 @@ pub(crate) async fn supervise(
         cmd.arg("--preopen").arg(format!("{host}::{guest}"));
     }
 
-    let mut child = match cmd.spawn() {
-        Ok(c) => c,
-        Err(e) => {
-            tracing::warn!(session_id, %app_id, error = %e, "failed to spawn runtime; marking session stopped");
-            kill_portal(portal).await;
-            let mut reg = registry.lock().await;
-            reg.set_state(session_id, AppStateKind::Stopped);
-            let _ = reg.broadcast().send(Response::AppState {
-                session_id,
-                state: AppStateKind::Stopped,
-            });
-            return Ok(());
-        }
+    let mut session = OwnedSession {
+        session_id,
+        runtime: None,
+        app_shell: None,
+        portal,
+        mount: mount_orch,
+        compositor_tx,
+        surface_announced: false,
     };
 
-    if let Some(tx) = &compositor_tx {
-        let pid = child.id().unwrap_or(0);
-        let _ = tx
-            .send(AppdToCompositor::AppSurfaceCreated {
+    let mut runtime = match cmd.spawn() {
+        Ok(c) => c,
+        Err(e) => {
+            return session
+                .settle(&registry, &format!("failed to spawn runtime: {e}"))
+                .await;
+        }
+    };
+    if let Some(tx) = &session.compositor_tx {
+        let pid = runtime.id().unwrap_or(0);
+        // A full queue (compositor disconnected) must not stall the session.
+        session.surface_announced = tx
+            .try_send(AppdToCompositor::AppSurfaceCreated {
                 app_id: app_id.to_owned(),
                 session_id,
                 pid,
             })
-            .await;
+            .is_ok();
+        if !session.surface_announced {
+            tracing::warn!(
+                session_id,
+                "compositor queue unavailable; surface not announced"
+            );
+        }
     }
+    let runtime_stdout = runtime.stdout.take().expect("stdout piped");
+    tokio::spawn(drain_stderr(
+        runtime.stderr.take().expect("stderr piped"),
+        session_id,
+        "runtime",
+    ));
+    session.runtime = Some(runtime);
 
-    let stdout = child.stdout.take().expect("stdout piped");
-    let stderr = child.stderr.take().expect("stderr piped");
-
-    let ready_result = tokio::select! {
-        r = tokio::time::timeout(READY_TIMEOUT, wait_for_ready(stdout)) => Some(r),
-        _ = &mut abort_rx => None,
-    };
-
-    let app_shell = match ready_result {
-        Some(Ok(Ok(remaining_stdout))) => {
-            {
-                let mut reg = registry.lock().await;
-                reg.set_state(session_id, AppStateKind::Running);
-                let _ = reg.broadcast().send(Response::AppReady {
-                    session_id,
-                    app_id: app_id.to_owned(),
-                });
-            }
-            tracing::info!(session_id, %app_id, "app ready");
-            tokio::spawn(drain_stdout(remaining_stdout, session_id));
-            spawn_app_shell(session_id, app_id).await
-        }
-        Some(Ok(Err(e))) => {
-            tracing::warn!(session_id, %app_id, error = %e, "stdout read error before READY; killing process");
-            let _ = child.kill().await;
-            kill_portal(portal).await;
-            let mut reg = registry.lock().await;
-            reg.set_state(session_id, AppStateKind::Stopped);
-            reg.remove_abort_sender(session_id);
-            let _ = reg.broadcast().send(Response::AppState {
-                session_id,
-                state: AppStateKind::Stopped,
-            });
-            return Ok(());
-        }
-        Some(Err(_elapsed)) => {
-            tracing::warn!(session_id, %app_id, "READY timeout after 30s; killing process");
-            let _ = child.kill().await;
-            kill_portal(portal).await;
-            let mut reg = registry.lock().await;
-            reg.set_state(session_id, AppStateKind::Stopped);
-            reg.remove_abort_sender(session_id);
-            let _ = reg.broadcast().send(Response::AppState {
-                session_id,
-                state: AppStateKind::Stopped,
-            });
-            return Ok(());
-        }
-        None => {
-            tracing::info!(session_id, %app_id, "abort during startup; killing process");
-            let _ = child.kill().await;
-            kill_portal(portal).await;
-            let mut reg = registry.lock().await;
-            reg.set_state(session_id, AppStateKind::Stopped);
-            let _ = reg.broadcast().send(Response::AppState {
-                session_id,
-                state: AppStateKind::Stopped,
-            });
-            return Ok(());
+    // The component must initialize before the UI host starts.
+    let runtime_stdout = match wait_for_child_ready(runtime_stdout, &token, &mut abort_rx).await {
+        Ok(reader) => reader,
+        Err(reason) => {
+            return session
+                .settle(&registry, &format!("runtime {reason}"))
+                .await;
         }
     };
+    tokio::spawn(drain_stdout(runtime_stdout, session_id));
 
-    tokio::spawn(drain_stderr(stderr, session_id));
-
-    tokio::select! {
-        status = child.wait() => {
-            tracing::info!(session_id, %app_id, exit_status = ?status, "process exited");
+    let mut app_shell = match spawn_app_shell(&shell_bin, session_id, app_id, &token) {
+        Ok(child) => child,
+        Err(e) => {
+            return session
+                .settle(&registry, &format!("failed to spawn app shell: {e}"))
+                .await;
         }
-        _ = abort_rx => {
-            tracing::info!(session_id, %app_id, "abort received; sending SIGTERM");
-            let _ = child.kill().await;
+    };
+    let shell_stdout = app_shell.stdout.take().expect("stdout piped");
+    tokio::spawn(drain_stderr(
+        app_shell.stderr.take().expect("stderr piped"),
+        session_id,
+        "app shell",
+    ));
+    session.app_shell = Some(app_shell);
+
+    // Running requires the UI host to have presented the loaded document.
+    let shell_stdout = tokio::select! {
+        r = wait_for_child_ready(shell_stdout, &token, &mut abort_rx) => {
+            r.map_err(|reason| format!("app shell {reason}"))
         }
-    }
-
-    kill_app_shell(app_shell).await;
-
-    if let Some(tx) = &compositor_tx {
-        let _ = tx
-            .send(AppdToCompositor::AppSurfaceDestroyed { session_id })
-            .await;
-    }
-
-    mount_orch.umount();
-
-    kill_portal(portal).await;
+        status = session.runtime.as_mut().expect("runtime spawned").wait() => {
+            Err(format!("runtime exited before the app shell was ready ({status:?})"))
+        }
+    };
+    let shell_stdout = match shell_stdout {
+        Ok(reader) => reader,
+        Err(reason) => return session.settle(&registry, &reason).await,
+    };
+    tokio::spawn(drain_stdout(shell_stdout, session_id));
 
     {
+        let mut reg = registry.lock().await;
+        reg.set_state(session_id, AppStateKind::Running);
+        let _ = reg.broadcast().send(Response::AppReady {
+            session_id,
+            app_id: app_id.to_owned(),
+        });
+    }
+    tracing::info!(session_id, %app_id, "app ready");
+
+    let reason = tokio::select! {
+        status = session.runtime.as_mut().expect("runtime spawned").wait() => {
+            format!("runtime exited ({status:?})")
+        }
+        status = session.app_shell.as_mut().expect("app shell spawned").wait() => {
+            format!("app shell exited ({status:?})")
+        }
+        _ = &mut abort_rx => "terminate requested".to_owned(),
+    };
+    session.settle(&registry, &reason).await
+}
+
+/// Marks a session that never started any process as stopped.
+async fn stop_unstarted(registry: &Registry, session_id: u64) -> anyhow::Result<()> {
+    let mut reg = registry.lock().await;
+    reg.set_state(session_id, AppStateKind::Stopped);
+    reg.remove_abort_sender(session_id);
+    let _ = reg.broadcast().send(Response::AppState {
+        session_id,
+        state: AppStateKind::Stopped,
+    });
+    Ok(())
+}
+
+/// The processes, portal, compositor association and image mount a session
+/// owns. `settle` releases all of them on every exit path: spawn failure,
+/// readiness failure, timeout, abort and child exit. The IPC relay is not yet
+/// owned here.
+struct OwnedSession {
+    session_id: u64,
+    runtime: Option<tokio::process::Child>,
+    app_shell: Option<tokio::process::Child>,
+    portal: Option<(PathBuf, tokio::process::Child)>,
+    mount: crate::mount::MountOrchestrator,
+    compositor_tx: Option<CompositorSender>,
+    surface_announced: bool,
+}
+
+impl OwnedSession {
+    async fn settle(self, registry: &Registry, reason: &str) -> anyhow::Result<()> {
+        let session_id = self.session_id;
+        tracing::info!(session_id, reason, "stopping session");
+        kill_child(self.app_shell).await;
+        kill_child(self.runtime).await;
+        if self.surface_announced
+            && let Some(tx) = &self.compositor_tx
+            && tx
+                .try_send(AppdToCompositor::AppSurfaceDestroyed { session_id })
+                .is_err()
+        {
+            tracing::warn!(
+                session_id,
+                "compositor queue unavailable; surface not released"
+            );
+        }
+        self.mount.umount();
+        kill_portal(self.portal).await;
         let mut reg = registry.lock().await;
         reg.set_state(session_id, AppStateKind::Stopped);
         reg.remove_abort_sender(session_id);
@@ -403,42 +477,60 @@ pub(crate) async fn supervise(
             session_id,
             state: AppStateKind::Stopped,
         });
+        Ok(())
     }
+}
 
-    Ok(())
+async fn kill_child(child: Option<tokio::process::Child>) {
+    if let Some(mut child) = child {
+        let _ = child.kill().await;
+    }
+}
+
+/// Waits for a child to print `READY <token>`, for at most READY_TIMEOUT.
+/// Returns why it did not become ready otherwise.
+async fn wait_for_child_ready(
+    stdout: tokio::process::ChildStdout,
+    token: &str,
+    abort_rx: &mut tokio::sync::oneshot::Receiver<()>,
+) -> Result<BufReader<tokio::process::ChildStdout>, String> {
+    tokio::select! {
+        r = tokio::time::timeout(READY_TIMEOUT, wait_for_ready(stdout, token)) => match r {
+            Ok(Ok(reader)) => Ok(reader),
+            Ok(Err(e)) => Err(format!("did not become ready: {e}")),
+            Err(_) => Err(format!("not ready after {}s", READY_TIMEOUT.as_secs())),
+        },
+        _ = abort_rx => Err("startup aborted".to_owned()),
+    }
 }
 
 async fn wait_for_ready(
     stdout: tokio::process::ChildStdout,
+    token: &str,
 ) -> anyhow::Result<BufReader<tokio::process::ChildStdout>> {
+    let expected = format!("READY {token}");
     let mut reader = BufReader::new(stdout);
     loop {
-        let mut line = String::new();
-        let n = reader.read_line(&mut line).await?;
-        if n == 0 {
-            return Err(anyhow::anyhow!("stdout closed without READY signal"));
-        }
-        if line.trim() == "READY" {
-            return Ok(reader);
+        match read_child_line(&mut reader).await? {
+            None => return Err(anyhow::anyhow!("stdout closed without READY signal")),
+            // Earlier output without a trailing newline can precede the
+            // readiness line; the secret token alone establishes it.
+            Some(line) if line.ends_with(&expected) => return Ok(reader),
+            Some(_) => {}
         }
     }
 }
 
 async fn drain_stdout(mut reader: BufReader<tokio::process::ChildStdout>, session_id: u64) {
-    let mut line = String::new();
-    loop {
-        line.clear();
-        match reader.read_line(&mut line).await {
-            Ok(0) | Err(_) => break,
-            Ok(_) => tracing::debug!(session_id, stdout = %line.trim_end(), "app stdout"),
-        }
+    while let Ok(Some(line)) = read_child_line(&mut reader).await {
+        tracing::debug!(session_id, stdout = %line, "child stdout");
     }
 }
 
-async fn drain_stderr(stderr: tokio::process::ChildStderr, session_id: u64) {
-    let mut lines = BufReader::new(stderr).lines();
-    while let Ok(Some(line)) = lines.next_line().await {
-        tracing::warn!(session_id, stderr = %line, "app stderr");
+async fn drain_stderr(stderr: tokio::process::ChildStderr, session_id: u64, process: &str) {
+    let mut reader = BufReader::new(stderr);
+    while let Ok(Some(line)) = read_child_line(&mut reader).await {
+        tracing::info!(session_id, process, stderr = %line, "child stderr");
     }
 }
 

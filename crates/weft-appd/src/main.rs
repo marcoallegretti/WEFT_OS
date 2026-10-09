@@ -853,14 +853,28 @@ mod tests {
         let _env = env_lock().lock().await;
         let script =
             std::env::temp_dir().join(format!("weft_test_runtime_{}.sh", std::process::id()));
-        std::fs::write(&script, "#!/bin/sh\necho READY\nsleep 1\n").unwrap();
+        std::fs::write(
+            &script,
+            "#!/bin/sh\necho READY $WEFT_READY_TOKEN\nexec sleep 1\n",
+        )
+        .unwrap();
         std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
 
+        let shell = std::env::temp_dir().join(format!("weft_test_shell_{}.sh", std::process::id()));
+        std::fs::write(
+            &shell,
+            "#!/bin/sh\necho READY $WEFT_READY_TOKEN\nexec sleep 1\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&shell, std::fs::Permissions::from_mode(0o755)).unwrap();
+
         let prior = std::env::var("WEFT_RUNTIME_BIN").ok();
+        let prior_shell = std::env::var("WEFT_APP_SHELL_BIN").ok();
         let prior_cgroup = std::env::var("WEFT_DISABLE_CGROUP").ok();
         // SAFETY: single-threaded test (flavor = "current_thread"); no concurrent env access.
         unsafe {
             std::env::set_var("WEFT_RUNTIME_BIN", &script);
+            std::env::set_var("WEFT_APP_SHELL_BIN", &shell);
             std::env::set_var("WEFT_DISABLE_CGROUP", "1");
         }
 
@@ -899,11 +913,16 @@ mod tests {
         ));
 
         let _ = std::fs::remove_file(&script);
+        let _ = std::fs::remove_file(&shell);
         // SAFETY: single-threaded test; restoring env to prior state.
         unsafe {
             match prior {
                 Some(v) => std::env::set_var("WEFT_RUNTIME_BIN", v),
                 None => std::env::remove_var("WEFT_RUNTIME_BIN"),
+            }
+            match prior_shell {
+                Some(v) => std::env::set_var("WEFT_APP_SHELL_BIN", v),
+                None => std::env::remove_var("WEFT_APP_SHELL_BIN"),
             }
             match prior_cgroup {
                 Some(v) => std::env::set_var("WEFT_DISABLE_CGROUP", v),
@@ -1078,5 +1097,214 @@ mod tests {
                 None => std::env::remove_var("XDG_RUNTIME_DIR"),
             }
         }
+    }
+
+    /// Outcome of one supervised session with scripted runtime and app shell.
+    #[cfg(unix)]
+    struct SessionRun {
+        notifications: Vec<Response>,
+        state: AppStateKind,
+        elapsed: std::time::Duration,
+        runtime_pid: Option<i32>,
+    }
+
+    /// Runs `supervise` with shell scripts standing in for weft-runtime and
+    /// weft-app-shell. The runtime script's PID is recorded so a test can check
+    /// that the session did not leave it running.
+    #[cfg(unix)]
+    async fn run_scripted_session(runtime_body: &str, shell_body: Option<&str>) -> SessionRun {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = std::env::temp_dir().join(format!(
+            "weft_session_{}_{}",
+            std::process::id(),
+            SESSION_RUN.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let pid_file = dir.join("runtime.pid");
+        let write = |name: &str, body: &str| {
+            let path = dir.join(name);
+            std::fs::write(&path, format!("#!/bin/sh\n{body}\n")).unwrap();
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+            path
+        };
+        let runtime = write(
+            "runtime.sh",
+            &format!("echo $$ > {}\n{runtime_body}", pid_file.display()),
+        );
+        let shell = shell_body.map(|body| write("shell.sh", body));
+
+        let _restore = RestoreOnDrop {
+            prior: SCRIPTED_ENV
+                .iter()
+                .map(|n| (*n, std::env::var(n).ok()))
+                .collect(),
+            dir: dir.clone(),
+        };
+        // SAFETY: callers hold env_lock and use a current_thread runtime.
+        unsafe {
+            std::env::set_var("WEFT_RUNTIME_BIN", &runtime);
+            match &shell {
+                Some(path) => std::env::set_var("WEFT_APP_SHELL_BIN", path),
+                None => std::env::remove_var("WEFT_APP_SHELL_BIN"),
+            }
+            std::env::set_var("WEFT_DISABLE_CGROUP", "1");
+        }
+
+        let registry = make_registry();
+        let mut rx = registry.lock().await.subscribe();
+        let session_id = registry.lock().await.launch("test.app");
+        let abort_rx = registry.lock().await.register_abort(session_id);
+        let started = std::time::Instant::now();
+        tokio::time::timeout(
+            std::time::Duration::from_secs(20),
+            runtime::supervise(
+                session_id,
+                "test.app",
+                Arc::clone(&registry),
+                abort_rx,
+                None,
+                None,
+            ),
+        )
+        .await
+        .expect("session did not settle")
+        .unwrap();
+        let elapsed = started.elapsed();
+
+        let mut notifications = Vec::new();
+        while let Ok(n) = rx.try_recv() {
+            notifications.push(n);
+        }
+        let state = registry.lock().await.state(session_id);
+        let runtime_pid = std::fs::read_to_string(&pid_file)
+            .ok()
+            .and_then(|s| s.trim().parse().ok());
+
+        SessionRun {
+            notifications,
+            state,
+            elapsed,
+            runtime_pid,
+        }
+    }
+
+    #[cfg(unix)]
+    static SESSION_RUN: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+
+    #[cfg(unix)]
+    const SCRIPTED_ENV: [&str; 3] = [
+        "WEFT_RUNTIME_BIN",
+        "WEFT_APP_SHELL_BIN",
+        "WEFT_DISABLE_CGROUP",
+    ];
+
+    /// Restores the scripted-session environment and removes its scripts,
+    /// also when an assertion fails.
+    #[cfg(unix)]
+    struct RestoreOnDrop {
+        prior: Vec<(&'static str, Option<String>)>,
+        dir: std::path::PathBuf,
+    }
+
+    #[cfg(unix)]
+    impl Drop for RestoreOnDrop {
+        fn drop(&mut self) {
+            // SAFETY: the owning test holds env_lock on a current_thread runtime.
+            unsafe {
+                for (name, value) in &self.prior {
+                    match value {
+                        Some(v) => std::env::set_var(name, v),
+                        None => std::env::remove_var(name),
+                    }
+                }
+            }
+            let _ = std::fs::remove_dir_all(&self.dir);
+        }
+    }
+
+    #[cfg(unix)]
+    fn became_ready(run: &SessionRun) -> bool {
+        run.notifications
+            .iter()
+            .any(|n| matches!(n, Response::AppReady { .. }))
+    }
+
+    #[cfg(unix)]
+    fn process_alive(pid: i32) -> bool {
+        std::path::Path::new(&format!("/proc/{pid}")).exists()
+            && !std::fs::read_to_string(format!("/proc/{pid}/stat"))
+                .map(|stat| stat.split_whitespace().nth(2) == Some("Z"))
+                .unwrap_or(true)
+    }
+
+    #[cfg(unix)]
+    #[tokio::test(flavor = "current_thread")]
+    async fn session_is_not_ready_until_app_shell_is_ready() {
+        let _env = env_lock().lock().await;
+        let run = run_scripted_session(
+            "echo READY $WEFT_READY_TOKEN\nexec sleep 30",
+            Some("sleep 0.3\nexit 1"),
+        )
+        .await;
+        assert!(!became_ready(&run), "{:?}", run.notifications);
+        assert!(matches!(run.state, AppStateKind::Stopped));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test(flavor = "current_thread")]
+    async fn session_stops_when_runtime_exits_before_app_shell_is_ready() {
+        let _env = env_lock().lock().await;
+        let run = run_scripted_session(
+            "echo READY $WEFT_READY_TOKEN\nexit 0",
+            Some("exec sleep 30"),
+        )
+        .await;
+        assert!(!became_ready(&run), "{:?}", run.notifications);
+        assert!(matches!(run.state, AppStateKind::Stopped));
+        assert!(run.elapsed < std::time::Duration::from_secs(10));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test(flavor = "current_thread")]
+    async fn session_without_app_shell_never_becomes_ready() {
+        let _env = env_lock().lock().await;
+        let run = run_scripted_session("echo READY $WEFT_READY_TOKEN\nexec sleep 30", None).await;
+        assert!(!became_ready(&run), "{:?}", run.notifications);
+        assert!(matches!(run.state, AppStateKind::Stopped));
+        assert!(
+            run.runtime_pid.is_none(),
+            "runtime started without a UI host"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test(flavor = "current_thread")]
+    async fn readiness_requires_the_session_token() {
+        let _env = env_lock().lock().await;
+        // Application output can contain READY lines; only the token counts.
+        let run = run_scripted_session(
+            "echo READY $WEFT_READY_TOKEN\nexec sleep 30",
+            Some("echo READY\necho READY 0123456789abcdef\nsleep 0.3"),
+        )
+        .await;
+        assert!(!became_ready(&run), "{:?}", run.notifications);
+        assert!(matches!(run.state, AppStateKind::Stopped));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test(flavor = "current_thread")]
+    async fn app_shell_exit_ends_running_session_and_runtime() {
+        let _env = env_lock().lock().await;
+        let run = run_scripted_session(
+            "echo READY $WEFT_READY_TOKEN\nexec sleep 30",
+            Some("echo READY $WEFT_READY_TOKEN\nexec sleep 0.3"),
+        )
+        .await;
+        assert!(became_ready(&run), "{:?}", run.notifications);
+        assert!(matches!(run.state, AppStateKind::Stopped));
+        assert!(run.elapsed < std::time::Duration::from_secs(10));
+        let pid = run.runtime_pid.expect("runtime started");
+        assert!(!process_alive(pid), "runtime {pid} left running");
     }
 }
