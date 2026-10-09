@@ -418,6 +418,8 @@ mod tests {
         assert!(other.try_lock().is_err());
         drop(held);
         assert!(other.try_lock().is_ok());
+        assert!(lock_owner(&home, "../outside").is_err());
+        assert!(!home.join("weft/outside.lock").exists());
         std::fs::remove_dir_all(&home).unwrap();
     }
 

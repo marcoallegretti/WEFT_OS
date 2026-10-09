@@ -109,14 +109,15 @@ fn main() -> anyhow::Result<()> {
             eprintln!("usage:");
             eprintln!("  weft-pack check        <dir>             validate a package directory");
             eprintln!("  weft-pack info         <dir>             print package metadata");
+            eprintln!("  weft-pack install      <dir> [--dev] [--claim-data]");
             eprintln!(
-                "  weft-pack install      <dir> [--dev] [--claim-data]  install a package signed by a trusted key"
+                "                                           install a package signed by a trusted key"
             );
             eprintln!(
-                "                                           (--dev: unsigned development content;"
+                "                                           --dev: as unsigned development content"
             );
             eprintln!(
-                "                                           --claim-data: adopt app data with no owner)"
+                "                                           --claim-data: adopt app data with no owner"
             );
             eprintln!("  weft-pack uninstall    <app_id>          remove installed package");
             eprintln!("  weft-pack list                           list installed packages");
@@ -295,7 +296,8 @@ fn install_into(
         .file_name()
         .and_then(|n| n.to_str())
         .and_then(|n| n.strip_suffix(".app.tar.zst"))
-        .context("cannot determine app_id from archive filename")?;
+        .filter(|n| weft_ipc_types::package::is_valid_app_id(n))
+        .context("the archive must be named <app_id>.app.tar.zst")?;
     // A fresh private directory in the store, removed whatever happens, so
     // nothing can be planted in it and nothing is left behind.
     let unpacked = private_scratch_dir(store_root, ".unpack")?;
@@ -539,15 +541,16 @@ fn uninstall_package_from(app_id: &str, store_root: &Path) -> anyhow::Result<()>
 /// while any store this host knows holds the package.
 fn installed_in_another_store(app_id: &str, store_root: &Path) -> bool {
     let mut roots = list_installed_roots();
-    roots.extend(
-        ["/usr/share/weft/apps"].iter().map(PathBuf::from).chain(
-            std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".local/share/weft/apps")),
-        ),
-    );
+    roots.push(PathBuf::from("/usr/share/weft/apps"));
+    roots.extend(std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".local/share/weft/apps")));
+    roots.sort();
+    roots.dedup();
+    // Only a package counts, as in `list`: a leftover empty or data-only
+    // directory does not hold the ID.
     roots
         .iter()
         .filter(|root| root.as_path() != store_root)
-        .any(|root| std::fs::symlink_metadata(root.join(app_id)).is_ok())
+        .any(|root| Manifest::read(&root.join(app_id)).is_ok_and(|m| m.package.id == app_id))
 }
 
 /// Removes the owner record of `app_id` when the app has no data, and
@@ -683,80 +686,92 @@ fn list_installed() {
 
 /// Copies a package directory. Packages hold only directories and regular
 /// files, so a symbolic link or special file stops the copy rather than
-/// being followed. Modes are not copied: the signature does not cover them,
-/// so installed directories are 0755 and files 0644, or 0755 when the source
-/// is executable, and nothing installed is writable by other users.
+/// being followed. The walk holds each directory open and opens its entries
+/// relative to it without following links, checking that each opened entry
+/// has the device and inode it was listed with, so a link or another file
+/// swapped in anywhere in the source during the copy cannot redirect it.
+/// Modes are not copied: the signature does not cover them, so installed
+/// directories are 0755 and files 0644, or 0755 when the source is
+/// executable, and nothing installed is writable by other users.
+#[cfg(unix)]
 fn copy_dir(src: &Path, dst: &Path) -> anyhow::Result<()> {
-    let mut builder = std::fs::DirBuilder::new();
-    #[cfg(unix)]
-    std::os::unix::fs::DirBuilderExt::mode(&mut builder, 0o755);
-    builder
+    use rustix::fs::{CWD, Mode, OFlags};
+    let root = rustix::fs::openat(
+        CWD,
+        src,
+        OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+        Mode::empty(),
+    )
+    .with_context(|| format!("open {}", src.display()))?;
+    copy_tree(&root, src, dst)
+}
+
+#[cfg(not(unix))]
+fn copy_dir(_src: &Path, _dst: &Path) -> anyhow::Result<()> {
+    anyhow::bail!("installing packages requires a Unix host")
+}
+
+#[cfg(unix)]
+fn copy_tree(dir: &rustix::fd::OwnedFd, shown: &Path, dst: &Path) -> anyhow::Result<()> {
+    use rustix::fs::{AtFlags, FileType, Mode, OFlags};
+    use std::os::unix::ffi::OsStrExt;
+    use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
+
+    std::fs::DirBuilder::new()
+        .mode(0o755)
         .create(dst)
         .with_context(|| format!("create {}", dst.display()))?;
-    for entry in std::fs::read_dir(src)? {
-        let entry = entry?;
-        let src_path = entry.path();
-        let dst_path = dst.join(entry.file_name());
-        let metadata = std::fs::symlink_metadata(&src_path)?;
-        if metadata.is_dir() {
-            copy_dir(&src_path, &dst_path)?;
-        } else if metadata.is_file() {
-            copy_file(&src_path, &dst_path, &metadata)
-                .with_context(|| format!("copy {}", src_path.display()))?;
-        } else {
-            anyhow::bail!(
+    let mut entries =
+        rustix::fs::Dir::read_from(dir).with_context(|| format!("read {}", shown.display()))?;
+    while let Some(entry) = entries.read() {
+        let entry = entry.with_context(|| format!("read {}", shown.display()))?;
+        let name = entry.file_name();
+        if matches!(name.to_bytes(), b"." | b"..") {
+            continue;
+        }
+        let src_path = shown.join(std::ffi::OsStr::from_bytes(name.to_bytes()));
+        let dst_path = dst.join(std::ffi::OsStr::from_bytes(name.to_bytes()));
+        let listed = rustix::fs::statat(dir, name, AtFlags::SYMLINK_NOFOLLOW)
+            .with_context(|| format!("inspect {}", src_path.display()))?;
+        let kind = FileType::from_raw_mode(listed.st_mode);
+        let flags = match kind {
+            FileType::Directory => OFlags::DIRECTORY,
+            FileType::RegularFile => OFlags::NONBLOCK | OFlags::NOCTTY,
+            _ => anyhow::bail!(
                 "{} is not a regular file or directory; packages cannot contain links",
                 src_path.display()
-            );
+            ),
+        };
+        let opened = rustix::fs::openat(
+            dir,
+            name,
+            flags | OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+            Mode::empty(),
+        )
+        .with_context(|| format!("open {}", src_path.display()))?;
+        let found = rustix::fs::fstat(&opened)?;
+        anyhow::ensure!(
+            FileType::from_raw_mode(found.st_mode) == kind
+                && found.st_dev == listed.st_dev
+                && found.st_ino == listed.st_ino,
+            "{} changed while it was copied",
+            src_path.display()
+        );
+        if kind == FileType::Directory {
+            copy_tree(&opened, &src_path, &dst_path)?;
+        } else {
+            let executable = found.st_mode & 0o111 != 0;
+            let mut target = std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .mode(if executable { 0o755 } else { 0o644 })
+                .open(&dst_path)
+                .with_context(|| format!("create {}", dst_path.display()))?;
+            std::io::copy(&mut std::fs::File::from(opened), &mut target)
+                .with_context(|| format!("copy {}", src_path.display()))?;
         }
     }
     Ok(())
-}
-
-fn copy_file(src: &Path, dst: &Path, metadata: &std::fs::Metadata) -> std::io::Result<()> {
-    let source = open_regular_file(src, metadata)?;
-    let mut options = std::fs::OpenOptions::new();
-    options.write(true).create_new(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
-        let executable = metadata.permissions().mode() & 0o111 != 0;
-        options.mode(if executable { 0o755 } else { 0o644 });
-    }
-    let mut target = options.open(dst)?;
-    std::io::copy(&mut &source, &mut target)?;
-    Ok(())
-}
-
-/// Opens `src` for reading only if it is still the regular file that was
-/// listed as `listed`: the last component is not followed, a FIFO or device
-/// swapped in is not waited on, and the opened file must have the listed
-/// device and inode, so a link swapped in for any directory on the way, or
-/// another file renamed into place, cannot redirect the copy.
-fn open_regular_file(src: &Path, listed: &std::fs::Metadata) -> std::io::Result<std::fs::File> {
-    let mut options = std::fs::OpenOptions::new();
-    options.read(true);
-    #[cfg(unix)]
-    std::os::unix::fs::OpenOptionsExt::custom_flags(
-        &mut options,
-        libc::O_NOFOLLOW | libc::O_NONBLOCK | libc::O_NOCTTY,
-    );
-    let file = options.open(src)?;
-    let opened = file.metadata()?;
-    #[cfg(unix)]
-    let same = {
-        use std::os::unix::fs::MetadataExt;
-        opened.dev() == listed.dev() && opened.ino() == listed.ino()
-    };
-    #[cfg(not(unix))]
-    let same = listed.is_file();
-    if !opened.is_file() || !same {
-        return Err(std::io::Error::other(format!(
-            "{} changed while it was copied",
-            src.display()
-        )));
-    }
-    Ok(file)
 }
 
 fn build_image(dir: &Path, out_path: Option<&Path>) -> anyhow::Result<()> {
@@ -1283,44 +1298,80 @@ mod tests {
         let _ = std::fs::remove_dir_all(&home);
     }
 
-    #[cfg(target_os = "linux")]
+    #[test]
+    fn uninstalling_one_of_two_copies_keeps_the_record() {
+        let home = temp_root("two_copies");
+        let app_id = "org.weft.test.twocopies";
+        write_package(&home.join("src"), app_id, "");
+        let user_store = home.join(".local/share/weft/apps");
+        let other = home.join("other");
+        for store in [&user_store, &other] {
+            with_home(&home, || {
+                install_package_to(&home.join("src"), store, InstallMode::Development)
+            })
+            .unwrap();
+        }
+        with_home(&home, || uninstall_package_from(app_id, &other)).unwrap();
+        assert_eq!(owner_of(&home, app_id), Some(Owner::Development));
+
+        // A leftover directory that is not a package does not hold the ID.
+        std::fs::remove_dir_all(user_store.join(app_id)).unwrap();
+        std::fs::create_dir_all(user_store.join(app_id)).unwrap();
+        with_home(&home, || {
+            install_package_to(&home.join("src"), &other, InstallMode::Development)
+        })
+        .unwrap();
+        with_home(&home, || uninstall_package_from(app_id, &other)).unwrap();
+        assert_eq!(owner_of(&home, app_id), None);
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    #[cfg(unix)]
     #[test]
     fn copies_never_follow_links_swapped_in() {
+        use rustix::fs::{CWD, Mode, OFlags};
         let home = temp_root("swapped");
-        for dir in ["outside", "pkg/dir", "pkg/held"] {
+        for dir in ["outside", "pkg/dir", "held"] {
             std::fs::create_dir_all(home.join(dir)).unwrap();
         }
-        std::fs::write(home.join("outside/secret"), b"secret").unwrap();
-        std::fs::write(home.join("pkg/file"), b"listed").unwrap();
+        std::fs::write(home.join("outside/secret"), b"outside").unwrap();
         std::fs::write(home.join("pkg/dir/secret"), b"listed").unwrap();
-        let listed = |rel: &str| std::fs::symlink_metadata(home.join(rel)).unwrap();
-        let (file, in_dir) = (listed("pkg/file"), listed("pkg/dir/secret"));
-        assert!(open_regular_file(&home.join("pkg/file"), &file).is_ok());
+        let open_dir = |path: &Path| {
+            rustix::fs::openat(
+                CWD,
+                path,
+                OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW,
+                Mode::empty(),
+            )
+            .unwrap()
+        };
 
-        // The listed file moved aside and replaced by a link, then by a hard
-        // link to another existing file.
-        std::fs::rename(home.join("pkg/file"), home.join("pkg/held/file")).unwrap();
-        std::os::unix::fs::symlink(home.join("outside/secret"), home.join("pkg/file")).unwrap();
-        assert!(open_regular_file(&home.join("pkg/file"), &file).is_err());
-        std::fs::remove_file(home.join("pkg/file")).unwrap();
-        std::fs::hard_link(home.join("outside/secret"), home.join("pkg/file")).unwrap();
-        assert!(open_regular_file(&home.join("pkg/file"), &file).is_err());
-
-        // A listed directory replaced by a link to one holding the same name.
-        std::fs::rename(home.join("pkg/dir"), home.join("pkg/held/dir")).unwrap();
+        // A directory replaced by a link after it was opened, before its
+        // entries are read: the copy reads the directory that was opened.
+        let dir = open_dir(&home.join("pkg/dir"));
+        std::fs::rename(home.join("pkg/dir"), home.join("held/dir")).unwrap();
         std::os::unix::fs::symlink(home.join("outside"), home.join("pkg/dir")).unwrap();
-        assert!(open_regular_file(&home.join("pkg/dir/secret"), &in_dir).is_err());
+        copy_tree(&dir, &home.join("pkg/dir"), &home.join("copied")).unwrap();
+        assert_eq!(
+            std::fs::read(home.join("copied/secret")).unwrap(),
+            b"listed"
+        );
 
-        // A FIFO swapped in is refused without waiting for a writer.
+        // A link where an entry is listed is refused, and so is a FIFO,
+        // without waiting for a writer.
+        let pkg = open_dir(&home.join("pkg"));
+        assert!(copy_tree(&pkg, &home.join("pkg"), &home.join("copied_link")).is_err());
+        std::fs::remove_file(home.join("pkg/dir")).unwrap();
         rustix::fs::mknodat(
-            rustix::fs::CWD,
+            CWD,
             home.join("pkg/fifo"),
             rustix::fs::FileType::Fifo,
-            rustix::fs::Mode::from_raw_mode(0o600),
+            Mode::from_raw_mode(0o600),
             0,
         )
         .unwrap();
-        assert!(open_regular_file(&home.join("pkg/fifo"), &file).is_err());
+        let pkg = open_dir(&home.join("pkg"));
+        assert!(copy_tree(&pkg, &home.join("pkg"), &home.join("copied_fifo")).is_err());
         let _ = std::fs::remove_dir_all(&home);
     }
 

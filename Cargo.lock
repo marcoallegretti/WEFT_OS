@@ -10542,7 +10542,6 @@ dependencies = [
  "anyhow",
  "ed25519-dalek",
  "hex",
- "libc",
  "rand 0.8.5",
  "rustix 1.1.4",
  "sha2",
