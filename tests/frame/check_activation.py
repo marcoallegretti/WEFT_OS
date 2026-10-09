@@ -3,13 +3,14 @@
 
 The harness runs weft-servo-shell with a solid green page as the system
 panel, and weft-appd with two test applications, one red and one blue, on a
-nested desktop (see session.py). Each application page turns a lighter shade
-of its colour when it receives a key press. In the presented pixels:
+nested desktop (see session.py). Each application page switches between its
+colour and a lighter shade on every key press. In the presented pixels:
 
 - the panel fills the compositor output and stays beneath the applications;
 - each newly launched application is shown on top and receives keys;
 - ACTIVATE_APP, the request the taskbar sends, brings the other session's
   window back to the front with keyboard focus;
+- when the focused application ends, the remaining one gets keyboard focus;
 - ACTIVATE_APP for a session that is not running is refused.
 
 The applications are unsigned test packages, recorded as development content
@@ -42,8 +43,9 @@ PANEL_PAGE = ('<!DOCTYPE html><html><body style="margin:0;background:rgb(0,160,0
 def app_page(color, pressed):
     return ('<!DOCTYPE html><html><body style="margin:0;width:100vw;height:100vh;'
             f'background:rgb{color}"><script>'
-            'addEventListener("keydown", function () {'
-            f'document.body.style.background = "rgb{pressed}"; }});'
+            'var pressed = false;'
+            'addEventListener("keydown", function () { pressed = !pressed;'
+            f'document.body.style.background = pressed ? "rgb{pressed}" : "rgb{color}"; }});'
             '</script></body></html>')
 
 
@@ -172,6 +174,12 @@ def run(args, desktop, store, home):
     shown(red, pressed=True)
     activate(blue)
     shown(blue, pressed=True)
+
+    # When the focused application ends, keyboard focus returns to the other.
+    appd.send({"type": "TERMINATE_APP", "session_id": sessions[blue]})
+    shown(red, pressed=True)
+    key("a")
+    shown(red)
 
     appd.send({"type": "ACTIVATE_APP", "session_id": 999})
     reply = appd.wait_for(lambda m: m.get("type") == "ERROR", 10)

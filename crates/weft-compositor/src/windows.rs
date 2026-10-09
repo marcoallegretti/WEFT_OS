@@ -1,9 +1,10 @@
 //! Stacking, focus and activation of toplevel windows.
 //!
 //! The compositor decides the order: the trusted shell's panel, which
-//! fills the output, stays beneath every application window; a newly mapped
-//! application window, a clicked one and one appd asks to activate is raised
-//! to the top, marked activated and given keyboard focus.
+//! fills the output, stays beneath every application window; a session's
+//! first window, a clicked window and one appd asks to activate is raised to
+//! the top, marked activated and given keyboard focus. When the focused
+//! window closes, the topmost remaining application window gets focus.
 
 use smithay::desktop::Window;
 use smithay::reexports::wayland_protocols::xdg::shell::server::xdg_toplevel;
@@ -37,8 +38,13 @@ impl WeftCompositorState {
     /// activated and gives it keyboard focus. A panel is focused but stays
     /// beneath the applications.
     pub fn activate_window(&mut self, window: &Window) {
-        let panel = self.is_panel(window);
-        if !panel {
+        if self.is_panel(window) {
+            // The panel takes focus without rising; no application window
+            // stays marked activated.
+            for other in self.space.elements() {
+                other.set_activated(false);
+            }
+        } else {
             self.space.raise_element(window, true);
         }
         self.send_pending_configures();
@@ -114,6 +120,62 @@ impl WeftCompositorState {
             .collect();
         for window in &others {
             self.space.raise_element(window, false);
+        }
+    }
+
+    /// Maps a new toplevel. A session's first window comes to the front with
+    /// keyboard focus; its later windows, and windows of clients outside
+    /// any session after the first, are shown without taking focus, so a
+    /// client cannot take keystrokes meant for another application by
+    /// creating windows. A panel is fitted and kept beneath.
+    pub fn map_new_window(&mut self, window: Window) {
+        let session = window_session(&window);
+        let first = !self
+            .space
+            .elements()
+            .any(|other| window_session(other) == session);
+        self.space.map_element(window.clone(), (0, 0), false);
+        if self.is_panel(&window) {
+            self.fit_panels();
+        } else if first {
+            self.activate_window(&window);
+        }
+    }
+
+    /// Unmaps a closed toplevel and, if it had keyboard focus, gives focus
+    /// to the topmost remaining application window, or the panel.
+    pub fn window_closed(&mut self, surface: &WlSurface) {
+        let Some(window) = self
+            .space
+            .elements()
+            .find(|window| window.wl_surface().is_some_and(|s| *s == *surface))
+            .cloned()
+        else {
+            return;
+        };
+        self.space.unmap_elem(&window);
+        let had_focus = self
+            .seat
+            .get_keyboard()
+            .and_then(|keyboard| keyboard.current_focus())
+            .is_none_or(|focus| focus == *surface);
+        if !had_focus {
+            return;
+        }
+        let next = self
+            .space
+            .elements()
+            .rev()
+            .find(|window| !self.is_panel(window))
+            .or_else(|| self.space.elements().next())
+            .cloned();
+        match next {
+            Some(next) => self.activate_window(&next),
+            None => {
+                if let Some(keyboard) = self.seat.get_keyboard() {
+                    keyboard.set_focus(self, None, SERIAL_COUNTER.next_serial());
+                }
+            }
         }
     }
 

@@ -556,8 +556,12 @@ pub(crate) async fn dispatch(req: Request, registry: &Registry) -> Response {
             // The compositor owns stacking and focus; appd asks it to act
             // for a session it supervises.
             let sent = reg.compositor_tx.as_ref().is_some_and(|tx| {
-                tx.try_send(weft_ipc_types::AppdToCompositor::AppFocusRequest { session_id }.into())
-                    .is_ok()
+                tx.is_connected()
+                    && tx
+                        .try_send(
+                            weft_ipc_types::AppdToCompositor::AppFocusRequest { session_id }.into(),
+                        )
+                        .is_ok()
             });
             if sent {
                 Response::AppState { session_id, state }
@@ -1337,7 +1341,7 @@ mod tests {
         ));
 
         // Without the compositor connection the request is refused.
-        drop(compositor);
+        connected.store(false, std::sync::atomic::Ordering::Release);
         let unsent = dispatch(Request::ActivateApp { session_id }, &registry).await;
         assert!(
             matches!(unsent, Response::Error { code: 503, .. }),
