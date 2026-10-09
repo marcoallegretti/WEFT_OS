@@ -79,7 +79,7 @@ python .agents/scripts/verify.py portable linux
 | Profile | Runs | Prerequisites |
 |---|---|---|
 | `toolkit` | Link, anchor, metadata, catalog and issue-form checks; runner tests | `pip install -r .agents/scripts/requirements.txt` |
-| `portable` | `cargo fmt --check`; Clippy and tests for crates built on every host | Pinned toolchain |
+| `portable` | `cargo fmt --check`; Clippy and tests for crates that need no Linux system libraries | Pinned toolchain |
 | `linux` | Clippy and tests for `weft-compositor` and the feature-disabled shells | Linux Wayland, input, DRM and systemd development libraries |
 | `servo-embed` | `cargo check` of both Servo hosts with the real renderer feature | As `linux`, plus the Servo build dependencies; long first build |
 | `runtime` | Clippy and tests for `weft-runtime` with `wasmtime-runtime,net-fetch` | Pinned toolchain |
