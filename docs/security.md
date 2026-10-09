@@ -16,7 +16,7 @@ Each app session runs as a separate OS process (`weft-runtime`). When systemd is
 
 ## Filesystem Isolation
 
-Apps access the filesystem only through WASI preopened directories. Each capability maps to a specific host path preopened at a fixed guest path. The `weft-file-portal` process applies the same directory grants and access modes, but checks paths lexically: it blocks `..` traversal, not symbolic links. Components cannot currently reach its socket, since the runtime grants them no socket access.
+Apps access the filesystem only through WASI preopened directories. Each capability maps to a specific host path preopened at a fixed guest path. The `weft-file-portal` process applies the same directory grants and access modes. It opens each granted directory once and resolves every request beneath that descriptor with `openat2(RESOLVE_BENEATH)`, so the kernel keeps the operation inside the directory: `..`, links pointing outside and links swapped in during the operation are refused. Requests must name a path without `.` or `..` components; files are limited to 16 MiB, listings to 10,000 entries, requests to one line of about 22 MiB, and the portal to 4 connections at a time. Writes replace a file atomically (a write to a name that is a link replaces the link) and never create directories. Components cannot currently reach its socket, since the runtime grants them no socket access, and the socket's path is not passed to them.
 
 ## Package Signing
 

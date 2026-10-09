@@ -323,10 +323,6 @@ fn run_module(
         }
     }
 
-    if let Ok(portal_socket) = std::env::var("WEFT_FILE_PORTAL_SOCKET") {
-        ctx_builder.env("WEFT_FILE_PORTAL_SOCKET", &portal_socket);
-    }
-
     for dir in preopen {
         let (dir_perms, file_perms) = match dir.access {
             Access::Read => (DirPerms::READ, FilePerms::READ),

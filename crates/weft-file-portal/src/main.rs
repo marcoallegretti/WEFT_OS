@@ -1,17 +1,31 @@
-#[cfg(unix)]
-use std::io::{BufRead, BufReader, Write};
-use std::path::{Path, PathBuf};
+//! A per-session file proxy for the directories a session is granted.
+//!
+//! Requests name absolute host paths inside a granted directory. Each
+//! granted directory is opened once at startup, and every operation resolves
+//! the rest of the path relative to that descriptor with `openat2` and
+//! `RESOLVE_BENEATH`, so the kernel keeps it inside the directory while it
+//! runs: `..`, absolute symbolic links, links that point outside and links
+//! replaced during the operation cannot leave it. Paths must name their
+//! location directly, without `.` or `..` components. Writes replace a file
+//! atomically and never create directories.
+
+#[cfg(target_os = "linux")]
+use std::io::{BufRead, BufReader, Read, Write};
+use std::path::{Component, Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
-#[cfg(unix)]
-use std::sync::Arc;
-
-#[cfg(unix)]
-use anyhow::Context;
-
-#[cfg(unix)]
-use std::os::unix::net::{UnixListener, UnixStream};
+/// The largest file read or written, in bytes.
+const MAX_FILE: usize = 16 * 1024 * 1024;
+/// The longest request line: a write of the largest file, base64-encoded,
+/// with room for its path.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+const MAX_LINE: usize = MAX_FILE / 3 * 4 + 64 * 1024;
+/// The most entries one listing returns.
+const MAX_ENTRIES: usize = 10_000;
+/// The most connections served at once.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+const MAX_CONNECTIONS: usize = 4;
 
 #[derive(Deserialize)]
 #[serde(tag = "op", rename_all = "snake_case")]
@@ -38,8 +52,13 @@ impl Response {
     }
 }
 
-#[cfg(unix)]
+#[cfg(target_os = "linux")]
 fn main() -> anyhow::Result<()> {
+    use anyhow::Context;
+    use std::os::unix::net::UnixListener;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
     let args: Vec<String> = std::env::args().collect();
     if args.len() < 2 {
         eprintln!(
@@ -49,32 +68,49 @@ fn main() -> anyhow::Result<()> {
     }
 
     let socket_path = &args[1];
-    let allowed = Arc::new(parse_allowed(&args[2..]));
+    let mut roots = Vec::new();
+    for grant in parse_allowed(&args[2..]) {
+        match Root::open(grant) {
+            Ok(root) => roots.push(root),
+            Err((path, e)) => eprintln!("cannot open granted directory {}: {e}", path.display()),
+        }
+    }
+    let roots = Arc::new(roots);
 
     if Path::new(socket_path).exists() {
         std::fs::remove_file(socket_path)
             .with_context(|| format!("remove stale socket {socket_path}"))?;
     }
-
     let listener =
         UnixListener::bind(socket_path).with_context(|| format!("bind {socket_path}"))?;
 
+    let active = Arc::new(AtomicUsize::new(0));
     for stream in listener.incoming() {
-        match stream {
-            Ok(s) => {
-                let allowed = Arc::clone(&allowed);
-                std::thread::spawn(move || handle_connection(s, &allowed));
+        let mut stream = match stream {
+            Ok(s) => s,
+            Err(e) => {
+                eprintln!("accept error: {e}");
+                continue;
             }
-            Err(e) => eprintln!("accept error: {e}"),
+        };
+        if active.fetch_add(1, Ordering::SeqCst) >= MAX_CONNECTIONS {
+            active.fetch_sub(1, Ordering::SeqCst);
+            let _ = stream.write_all(b"{\"error\":\"too many connections\"}\n");
+            continue;
         }
+        let roots = Arc::clone(&roots);
+        let active = Arc::clone(&active);
+        std::thread::spawn(move || {
+            handle_connection(stream, &roots);
+            active.fetch_sub(1, Ordering::SeqCst);
+        });
     }
-
     Ok(())
 }
 
-#[cfg(not(unix))]
+#[cfg(not(target_os = "linux"))]
 fn main() -> anyhow::Result<()> {
-    anyhow::bail!("weft-file-portal requires a Unix platform")
+    anyhow::bail!("weft-file-portal requires Linux")
 }
 
 /// A directory the session may use: `--allow` grants reading and writing,
@@ -85,7 +121,6 @@ struct Allowed {
     writable: bool,
 }
 
-#[cfg_attr(not(any(unix, test)), allow(dead_code))]
 fn parse_allowed(args: &[String]) -> Vec<Allowed> {
     let mut allowed = Vec::new();
     let mut i = 0;
@@ -109,33 +144,84 @@ fn parse_allowed(args: &[String]) -> Vec<Allowed> {
     allowed
 }
 
-#[cfg_attr(not(any(unix, test)), allow(dead_code))]
-fn normalize_path(path: &Path) -> PathBuf {
-    use std::path::Component;
-    let mut out = PathBuf::new();
-    for c in path.components() {
-        match c {
-            Component::ParentDir => {
-                out.pop();
-            }
-            Component::CurDir => {}
-            other => out.push(other),
+/// The part of `path` inside the granted directory `root`, if `path` lies
+/// in it and names its location directly: only plain components, no `.`,
+/// `..` or repeated root.
+fn relative_to<'a>(path: &'a Path, root: &Path) -> Option<&'a Path> {
+    let rest = path.strip_prefix(root).ok()?;
+    rest.components()
+        .all(|c| matches!(c, Component::Normal(_)))
+        .then_some(rest)
+}
+
+/// A granted directory, held open for the life of the portal.
+#[cfg(target_os = "linux")]
+struct Root {
+    path: PathBuf,
+    dir: rustix::fd::OwnedFd,
+    writable: bool,
+}
+
+#[cfg(target_os = "linux")]
+impl Root {
+    fn open(grant: Allowed) -> Result<Self, (PathBuf, std::io::Error)> {
+        use rustix::fs::{Mode, OFlags};
+        match rustix::fs::open(
+            &grant.root,
+            OFlags::RDONLY | OFlags::DIRECTORY | OFlags::CLOEXEC,
+            Mode::empty(),
+        ) {
+            Ok(dir) => Ok(Self {
+                path: grant.root,
+                dir,
+                writable: grant.writable,
+            }),
+            Err(e) => Err((grant.root, e.into())),
         }
     }
-    out
 }
 
-/// Whether `path` lies in an allowed directory, and for a write, in one
-/// granted read-write.
-fn is_allowed(path: &Path, allowed: &[Allowed], write: bool) -> bool {
-    let norm = normalize_path(path);
-    allowed
+/// The granted directory holding `path` and the path inside it, for an
+/// operation that writes when `write` is set.
+#[cfg(target_os = "linux")]
+fn locate<'a, 'p>(
+    roots: &'a [Root],
+    path: &'p str,
+    write: bool,
+) -> Result<(&'a Root, &'p Path), Response> {
+    let requested = Path::new(path);
+    roots
         .iter()
-        .any(|a| norm.starts_with(&a.root) && (a.writable || !write))
+        .filter(|root| root.writable || !write)
+        .find_map(|root| relative_to(requested, &root.path).map(|rest| (root, rest)))
+        .ok_or_else(|| Response::err(format!("access denied: {path}")))
 }
 
-#[cfg(unix)]
-fn handle_connection(stream: UnixStream, allowed: &[Allowed]) {
+/// Opens `rest` inside `root`, never leaving it.
+#[cfg(target_os = "linux")]
+fn open_beneath(
+    root: &Root,
+    rest: &Path,
+    flags: rustix::fs::OFlags,
+) -> std::io::Result<rustix::fd::OwnedFd> {
+    use rustix::fs::{Mode, OFlags, ResolveFlags};
+    let rest = if rest.as_os_str().is_empty() {
+        Path::new(".")
+    } else {
+        rest
+    };
+    rustix::fs::openat2(
+        &root.dir,
+        rest,
+        flags | OFlags::CLOEXEC | OFlags::NOCTTY,
+        Mode::empty(),
+        ResolveFlags::BENEATH | ResolveFlags::NO_MAGICLINKS,
+    )
+    .map_err(std::io::Error::from)
+}
+
+#[cfg(target_os = "linux")]
+fn handle_connection(stream: std::os::unix::net::UnixStream, roots: &[Root]) {
     let mut writer = match stream.try_clone() {
         Ok(s) => s,
         Err(e) => {
@@ -143,22 +229,30 @@ fn handle_connection(stream: UnixStream, allowed: &[Allowed]) {
             return;
         }
     };
-    let reader = BufReader::new(stream);
-
-    for line in reader.lines() {
-        let line = match line {
-            Ok(l) => l,
-            Err(_) => break,
-        };
-        if line.is_empty() {
+    let mut reader = BufReader::new(stream);
+    let mut line = Vec::new();
+    loop {
+        line.clear();
+        match (&mut reader)
+            .take(MAX_LINE as u64 + 1)
+            .read_until(b'\n', &mut line)
+        {
+            Ok(0) | Err(_) => break,
+            Ok(_) => {}
+        }
+        if line.len() > MAX_LINE {
+            let _ = writer.write_all(b"{\"error\":\"request too long\"}\n");
+            break;
+        }
+        let text = String::from_utf8_lossy(&line);
+        let text = text.trim_end_matches(['\n', '\r']);
+        if text.is_empty() {
             continue;
         }
-
-        let response = match serde_json::from_str::<Request>(&line) {
-            Ok(req) => handle_request(req, allowed),
+        let response = match serde_json::from_str::<Request>(text) {
+            Ok(req) => handle_request(req, roots),
             Err(e) => Response::err(format!("bad request: {e}")),
         };
-
         let mut out = serde_json::to_string(&response)
             .unwrap_or_else(|_| r#"{"error":"serialize"}"#.to_string());
         out.push('\n');
@@ -168,112 +262,156 @@ fn handle_connection(stream: UnixStream, allowed: &[Allowed]) {
     }
 }
 
-#[cfg_attr(not(any(unix, test)), allow(dead_code))]
-fn handle_request(req: Request, allowed: &[Allowed]) -> Response {
-    match req {
+#[cfg(target_os = "linux")]
+fn handle_request(req: Request, roots: &[Root]) -> Response {
+    let result = match req {
         Request::Read { path } => {
-            let p = PathBuf::from(&path);
-            if !is_allowed(&p, allowed, false) {
-                return Response::err(format!("access denied: {path}"));
-            }
-            match std::fs::read(&p) {
-                Ok(data) => Response::OkData {
-                    data_b64: base64::Engine::encode(
-                        &base64::engine::general_purpose::STANDARD,
-                        &data,
-                    ),
-                },
-                Err(e) => Response::err(e),
-            }
+            locate(roots, &path, false).and_then(|(root, rest)| read(root, rest))
         }
-        Request::Write { path, data_b64 } => {
-            let p = PathBuf::from(&path);
-            if !is_allowed(&p, allowed, true) {
-                return Response::err(format!("access denied: {path}"));
-            }
+        Request::Write { path, data_b64 } => locate(roots, &path, true).and_then(|(root, rest)| {
             let data =
-                match base64::Engine::decode(&base64::engine::general_purpose::STANDARD, &data_b64)
-                {
-                    Ok(d) => d,
-                    Err(e) => return Response::err(format!("bad base64: {e}")),
-                };
-            if let Some(Err(e)) = p.parent().map(std::fs::create_dir_all) {
-                return Response::err(e);
-            }
-            match std::fs::write(&p, &data) {
-                Ok(()) => Response::Ok,
-                Err(e) => Response::err(e),
-            }
-        }
+                base64::Engine::decode(&base64::engine::general_purpose::STANDARD, &data_b64)
+                    .map_err(|e| Response::err(format!("bad base64: {e}")))?;
+            write(root, rest, &data)
+        }),
         Request::List { path } => {
-            let p = PathBuf::from(&path);
-            if !is_allowed(&p, allowed, false) {
-                return Response::err(format!("access denied: {path}"));
-            }
-            match std::fs::read_dir(&p) {
-                Ok(entries) => {
-                    let mut names = Vec::new();
-                    for entry in entries.flatten() {
-                        if let Some(name) = entry.file_name().to_str() {
-                            names.push(name.to_string());
-                        }
-                    }
-                    names.sort();
-                    Response::OkEntries { entries: names }
-                }
-                Err(e) => Response::err(e),
-            }
+            locate(roots, &path, false).and_then(|(root, rest)| list(root, rest))
         }
-    }
+    };
+    result.unwrap_or_else(|response| response)
 }
 
-#[cfg(test)]
+#[cfg(target_os = "linux")]
+fn read(root: &Root, rest: &Path) -> Result<Response, Response> {
+    use rustix::fs::{FileType, OFlags};
+    let fd = open_beneath(root, rest, OFlags::RDONLY | OFlags::NONBLOCK).map_err(Response::err)?;
+    let stat = rustix::fs::fstat(&fd).map_err(Response::err)?;
+    if FileType::from_raw_mode(stat.st_mode) != FileType::RegularFile {
+        return Err(Response::err("not a regular file"));
+    }
+    let mut data = Vec::new();
+    std::fs::File::from(fd)
+        .take(MAX_FILE as u64 + 1)
+        .read_to_end(&mut data)
+        .map_err(Response::err)?;
+    if data.len() > MAX_FILE {
+        return Err(Response::err(format!("file larger than {MAX_FILE} bytes")));
+    }
+    Ok(Response::OkData {
+        data_b64: base64::Engine::encode(&base64::engine::general_purpose::STANDARD, &data),
+    })
+}
+
+#[cfg(target_os = "linux")]
+fn list(root: &Root, rest: &Path) -> Result<Response, Response> {
+    use rustix::fs::OFlags;
+    let fd = open_beneath(root, rest, OFlags::RDONLY | OFlags::DIRECTORY).map_err(Response::err)?;
+    let mut entries = rustix::fs::Dir::read_from(&fd).map_err(Response::err)?;
+    let mut names = Vec::new();
+    while let Some(entry) = entries.read() {
+        let entry = entry.map_err(Response::err)?;
+        let Ok(name) = entry.file_name().to_str() else {
+            continue;
+        };
+        if name == "." || name == ".." {
+            continue;
+        }
+        if names.len() == MAX_ENTRIES {
+            return Err(Response::err(format!("more than {MAX_ENTRIES} entries")));
+        }
+        names.push(name.to_owned());
+    }
+    names.sort();
+    Ok(Response::OkEntries { entries: names })
+}
+
+/// Replaces the file `rest` in `root` with `data`: the data is written to a
+/// new file in the same directory, flushed and renamed over the name, so
+/// the file holds either the old or the new content.
+#[cfg(target_os = "linux")]
+fn write(root: &Root, rest: &Path, data: &[u8]) -> Result<Response, Response> {
+    use rustix::fs::{Mode, OFlags};
+    if data.len() > MAX_FILE {
+        return Err(Response::err(format!("file larger than {MAX_FILE} bytes")));
+    }
+    let name = rest
+        .file_name()
+        .ok_or_else(|| Response::err("a write needs a file name"))?;
+    let parent = open_beneath(
+        root,
+        rest.parent().unwrap_or(Path::new("")),
+        OFlags::RDONLY | OFlags::DIRECTORY,
+    )
+    .map_err(Response::err)?;
+    let temporary = format!(
+        ".weft-portal-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.as_nanos())
+    );
+    let file = rustix::fs::openat(
+        &parent,
+        temporary.as_str(),
+        OFlags::WRONLY | OFlags::CREATE | OFlags::EXCL | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+        Mode::from_raw_mode(0o600),
+    )
+    .map_err(Response::err)?;
+    let mut file = std::fs::File::from(file);
+    let written = file
+        .write_all(data)
+        .and_then(|()| file.sync_all())
+        .and_then(|()| {
+            rustix::fs::renameat(&parent, temporary.as_str(), &parent, name)
+                .map_err(std::io::Error::from)
+        });
+    if let Err(e) = written {
+        let _ = rustix::fs::unlinkat(&parent, temporary.as_str(), rustix::fs::AtFlags::empty());
+        return Err(Response::err(e));
+    }
+    let _ = rustix::fs::fsync(&parent);
+    Ok(Response::Ok)
+}
+
+#[cfg(all(test, target_os = "linux"))]
 mod tests {
     use super::*;
+    use std::fs;
 
-    fn rw(root: impl Into<PathBuf>) -> Allowed {
-        Allowed {
-            root: root.into(),
-            writable: true,
+    fn grant(root: &Path, writable: bool) -> Vec<Root> {
+        vec![
+            Root::open(Allowed {
+                root: root.to_path_buf(),
+                writable,
+            })
+            .unwrap(),
+        ]
+    }
+
+    fn temp(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("wfp_{name}_{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(dir.join("granted")).unwrap();
+        dir
+    }
+
+    fn path(p: &Path) -> String {
+        p.to_string_lossy().into_owned()
+    }
+
+    fn denied(resp: &Response) -> bool {
+        matches!(resp, Response::Err { .. })
+    }
+
+    fn read_req(p: &Path) -> Request {
+        Request::Read { path: path(p) }
+    }
+
+    fn write_req(p: &Path, data: &[u8]) -> Request {
+        Request::Write {
+            path: path(p),
+            data_b64: base64::Engine::encode(&base64::engine::general_purpose::STANDARD, data),
         }
-    }
-
-    fn ro(root: impl Into<PathBuf>) -> Allowed {
-        Allowed {
-            root: root.into(),
-            writable: false,
-        }
-    }
-
-    #[test]
-    fn allowed_path_accepted() {
-        let allowed = vec![rw("/tmp/weft-test-allowed")];
-        assert!(is_allowed(
-            Path::new("/tmp/weft-test-allowed/file.txt"),
-            &allowed,
-            false
-        ));
-    }
-
-    #[test]
-    fn disallowed_path_rejected() {
-        let allowed = vec![rw("/tmp/weft-test-allowed")];
-        assert!(!is_allowed(Path::new("/etc/passwd"), &allowed, false));
-    }
-
-    #[test]
-    fn dotdot_traversal_blocked() {
-        let allowed = vec![rw("/tmp/weft-test-allowed")];
-        assert!(!is_allowed(
-            Path::new("/tmp/weft-test-allowed/../etc/passwd"),
-            &allowed,
-            false
-        ));
-    }
-
-    #[test]
-    fn empty_allowlist_rejects_all() {
-        assert!(!is_allowed(Path::new("/tmp/anything"), &[], false));
     }
 
     #[test]
@@ -281,133 +419,190 @@ mod tests {
         let args: Vec<String> = vec![
             "--allow".into(),
             "/tmp/a".into(),
-            "--allow".into(),
-            "/tmp/b".into(),
+            "--allow-read".into(),
+            "/tmp/c".into(),
         ];
-        let result = parse_allowed(&args);
-        assert_eq!(result, vec![rw("/tmp/a"), rw("/tmp/b")]);
-        let args: Vec<String> = vec!["--allow-read".into(), "/tmp/c".into()];
-        assert_eq!(parse_allowed(&args), vec![ro("/tmp/c")]);
+        assert_eq!(
+            parse_allowed(&args),
+            vec![
+                Allowed {
+                    root: "/tmp/a".into(),
+                    writable: true
+                },
+                Allowed {
+                    root: "/tmp/c".into(),
+                    writable: false
+                },
+            ]
+        );
     }
 
     #[test]
-    fn handle_request_read_denied() {
-        let resp = handle_request(
-            Request::Read {
-                path: "/etc/shadow".into(),
-            },
-            &[rw("/tmp/safe")],
+    fn paths_must_name_a_place_inside_a_granted_directory_directly() {
+        let root = Path::new("/srv/granted");
+        assert_eq!(
+            relative_to(Path::new("/srv/granted/a/b"), root),
+            Some(Path::new("a/b"))
         );
-        let json = serde_json::to_string(&resp).unwrap();
-        assert!(json.contains("access denied"));
-    }
-
-    #[test]
-    fn handle_request_read_roundtrip() {
-        use std::fs;
-        let dir = std::env::temp_dir().join(format!("wfp_test_{}", std::process::id()));
-        let _ = fs::create_dir_all(&dir);
-        let file = dir.join("hello.txt");
-        fs::write(&file, b"hello world").unwrap();
-
-        let allowed = vec![rw(dir.clone())];
-        let resp = handle_request(
-            Request::Read {
-                path: file.to_string_lossy().into(),
-            },
-            &allowed,
+        assert_eq!(
+            relative_to(Path::new("/srv/granted"), root),
+            Some(Path::new(""))
         );
-        let json = serde_json::to_string(&resp).unwrap();
-        assert!(json.contains("data_b64"));
-
-        if let Response::OkData { data_b64 } = resp {
-            let decoded =
-                base64::Engine::decode(&base64::engine::general_purpose::STANDARD, &data_b64)
-                    .unwrap();
-            assert_eq!(decoded, b"hello world");
-        } else {
-            panic!("expected OkData");
+        for outside in [
+            "/srv/grantedx/a",
+            "/srv/granted/../x",
+            "/srv/granted/a/../../x",
+            "/etc",
+        ] {
+            assert_eq!(relative_to(Path::new(outside), root), None, "{outside}");
         }
-
-        let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]
-    fn handle_request_list() {
-        use std::fs;
-        let dir = std::env::temp_dir().join(format!("wfp_list_{}", std::process::id()));
-        let _ = fs::create_dir_all(&dir);
-        fs::write(dir.join("b.txt"), b"").unwrap();
-        fs::write(dir.join("a.txt"), b"").unwrap();
-
-        let allowed = vec![rw(dir.clone())];
-        let resp = handle_request(
+    fn reads_writes_and_lists_inside_the_directory() {
+        let dir = temp("roundtrip");
+        let granted = dir.join("granted");
+        let roots = grant(&granted, true);
+        assert!(matches!(
+            handle_request(write_req(&granted.join("b.txt"), b"hello"), &roots),
+            Response::Ok
+        ));
+        fs::write(granted.join("a.txt"), b"").unwrap();
+        match handle_request(read_req(&granted.join("b.txt")), &roots) {
+            Response::OkData { data_b64 } => assert_eq!(
+                base64::Engine::decode(&base64::engine::general_purpose::STANDARD, data_b64)
+                    .unwrap(),
+                b"hello"
+            ),
+            _ => panic!("expected data"),
+        }
+        match handle_request(
             Request::List {
-                path: dir.to_string_lossy().into(),
+                path: path(&granted),
             },
-            &allowed,
-        );
-        if let Response::OkEntries { entries } = resp {
-            assert_eq!(entries, vec!["a.txt", "b.txt"]);
-        } else {
-            panic!("expected OkEntries");
+            &roots,
+        ) {
+            Response::OkEntries { entries } => assert_eq!(entries, ["a.txt", "b.txt"]),
+            _ => panic!("expected entries"),
         }
-
         let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]
-    fn handle_request_write_creates_parent_dirs() {
-        use std::fs;
-        let dir = std::env::temp_dir().join(format!("wfp_write_{}", std::process::id()));
-        let _ = fs::remove_dir_all(&dir);
-        let nested = dir.join("sub").join("deep").join("file.txt");
-        let data = base64::Engine::encode(
-            &base64::engine::general_purpose::STANDARD,
-            b"nested content",
-        );
-        let allowed = vec![rw(dir.clone())];
-        let resp = handle_request(
-            Request::Write {
-                path: nested.to_string_lossy().into(),
-                data_b64: data,
-            },
-            &allowed,
-        );
-        assert!(matches!(resp, Response::Ok), "expected Ok response");
-        assert_eq!(fs::read(&nested).unwrap(), b"nested content");
+    fn links_cannot_lead_out_of_the_directory() {
+        let dir = temp("links");
+        let granted = dir.join("granted");
+        fs::write(dir.join("secret.txt"), b"secret").unwrap();
+        fs::create_dir(granted.join("sub")).unwrap();
+        std::os::unix::fs::symlink("/", granted.join("root")).unwrap();
+        std::os::unix::fs::symlink("../secret.txt", granted.join("up")).unwrap();
+        std::os::unix::fs::symlink(&dir, granted.join("parent")).unwrap();
+        let roots = grant(&granted, true);
+        for escape in [
+            granted.join("root/etc/passwd"),
+            granted.join("up"),
+            granted.join("parent/secret.txt"),
+            // The check this replaced normalised `link/..` away and then
+            // followed the link.
+            granted.join("root/../secret.txt"),
+        ] {
+            assert!(
+                denied(&handle_request(read_req(&escape), &roots)),
+                "{}",
+                escape.display()
+            );
+            if escape != granted.join("up") {
+                assert!(
+                    denied(&handle_request(write_req(&escape, b"x"), &roots)),
+                    "{}",
+                    escape.display()
+                );
+            }
+        }
+        // A write to a name that is a link replaces the link, inside the
+        // directory, rather than writing where it points.
+        assert!(matches!(
+            handle_request(write_req(&granted.join("up"), b"x"), &roots),
+            Response::Ok
+        ));
+        assert!(fs::symlink_metadata(granted.join("up")).unwrap().is_file());
+        assert_eq!(fs::read(dir.join("secret.txt")).unwrap(), b"secret");
+        // A link that stays inside is followed.
+        std::os::unix::fs::symlink("sub", granted.join("inside")).unwrap();
+        assert!(matches!(
+            handle_request(write_req(&granted.join("inside/f"), b"ok"), &roots),
+            Response::Ok
+        ));
+        assert_eq!(fs::read(granted.join("sub/f")).unwrap(), b"ok");
         let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]
     fn read_only_directories_refuse_writes() {
-        use std::fs;
-        let dir = std::env::temp_dir().join(format!("wfp_ro_{}", std::process::id()));
+        let dir = temp("ro");
+        let granted = dir.join("granted");
+        fs::write(granted.join("kept.txt"), b"original").unwrap();
+        let roots = grant(&granted, false);
+        assert!(denied(&handle_request(
+            write_req(&granted.join("kept.txt"), b"x"),
+            &roots
+        )));
+        assert_eq!(fs::read(granted.join("kept.txt")).unwrap(), b"original");
+        assert!(matches!(
+            handle_request(read_req(&granted.join("kept.txt")), &roots),
+            Response::OkData { .. }
+        ));
         let _ = fs::remove_dir_all(&dir);
-        fs::create_dir_all(&dir).unwrap();
-        fs::write(dir.join("kept.txt"), b"original").unwrap();
-        let allowed = vec![ro(dir.clone())];
-        let data = base64::Engine::encode(&base64::engine::general_purpose::STANDARD, b"x");
-        let resp = handle_request(
-            Request::Write {
-                path: dir.join("kept.txt").to_string_lossy().into(),
-                data_b64: data,
-            },
-            &allowed,
-        );
-        assert!(
-            serde_json::to_string(&resp)
-                .unwrap()
-                .contains("access denied")
-        );
-        assert_eq!(fs::read(dir.join("kept.txt")).unwrap(), b"original");
-        let resp = handle_request(
-            Request::Read {
-                path: dir.join("kept.txt").to_string_lossy().into(),
-            },
-            &allowed,
-        );
-        assert!(matches!(resp, Response::OkData { .. }));
+    }
+
+    #[test]
+    fn writes_create_no_directories_and_leave_no_temporary_files() {
+        let dir = temp("nodirs");
+        let granted = dir.join("granted");
+        let roots = grant(&granted, true);
+        assert!(denied(&handle_request(
+            write_req(&granted.join("missing/f"), b"x"),
+            &roots
+        )));
+        assert!(!granted.join("missing").exists());
+        assert!(denied(&handle_request(write_req(&granted, b"x"), &roots)));
+        let left: Vec<_> = fs::read_dir(&granted).unwrap().flatten().collect();
+        assert!(left.is_empty(), "{left:?}");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn oversized_files_are_refused() {
+        let dir = temp("size");
+        let granted = dir.join("granted");
+        fs::File::create(granted.join("big"))
+            .unwrap()
+            .set_len(MAX_FILE as u64 + 1)
+            .unwrap();
+        let roots = grant(&granted, true);
+        assert!(denied(&handle_request(
+            read_req(&granted.join("big")),
+            &roots
+        )));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn overlong_requests_end_the_connection() {
+        let dir = temp("line");
+        let granted = dir.join("granted");
+        let roots = grant(&granted, true);
+        let (client, server) = std::os::unix::net::UnixStream::pair().unwrap();
+        let serve = std::thread::spawn(move || handle_connection(server, &roots));
+        let mut writer = client.try_clone().unwrap();
+        let sent = std::thread::spawn(move || {
+            let _ = writer.write_all(&vec![b'x'; MAX_LINE + 2]);
+        });
+        let mut reply = String::new();
+        BufReader::new(client).read_line(&mut reply).unwrap();
+        serve.join().unwrap();
+        let _ = sent.join();
+        assert!(reply.contains("request too long"), "{reply}");
         let _ = fs::remove_dir_all(&dir);
     }
 }
