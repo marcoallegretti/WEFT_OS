@@ -6590,7 +6590,7 @@ dependencies = [
 [[package]]
 name = "servo"
 version = "0.0.1"
-source = "git+https://github.com/marcoallegretti/servo?rev=f0bb1aaf981b65c8dddc848bb647045d4c777d11#f0bb1aaf981b65c8dddc848bb647045d4c777d11"
+source = "git+https://github.com/marcoallegretti/servo?rev=e5d9a518ebddb5ebd6af404d1fd4e00ea0f77163#e5d9a518ebddb5ebd6af404d1fd4e00ea0f77163"
 dependencies = [
  "accesskit",
  "bitflags 2.11.0",
@@ -6651,7 +6651,7 @@ dependencies = [
 [[package]]
 name = "servo-allocator"
 version = "0.0.1"
-source = "git+https://github.com/marcoallegretti/servo?rev=f0bb1aaf981b65c8dddc848bb647045d4c777d11#f0bb1aaf981b65c8dddc848bb647045d4c777d11"
+source = "git+https://github.com/marcoallegretti/servo?rev=e5d9a518ebddb5ebd6af404d1fd4e00ea0f77163#e5d9a518ebddb5ebd6af404d1fd4e00ea0f77163"
 dependencies = [
  "libc",
  "tikv-jemalloc-sys",
@@ -6662,7 +6662,7 @@ dependencies = [
 [[package]]
 name = "servo-background-hang-monitor"
 version = "0.0.1"
-source = "git+https://github.com/marcoallegretti/servo?rev=f0bb1aaf981b65c8dddc848bb647045d4c777d11#f0bb1aaf981b65c8dddc848bb647045d4c777d11"
+source = "git+https://github.com/marcoallegretti/servo?rev=e5d9a518ebddb5ebd6af404d1fd4e00ea0f77163#e5d9a518ebddb5ebd6af404d1fd4e00ea0f77163"
 dependencies = [
  "backtrace",
  "crossbeam-channel",
@@ -6677,7 +6677,7 @@ dependencies = [
 [[package]]
 name = "servo-background-hang-monitor-api"
 version = "0.0.1"
-source = "git+https://github.com/marcoallegretti/servo?rev=f0bb1aaf981b65c8dddc848bb647045d4c777d11#f0bb1aaf981b65c8dddc848bb647045d4c777d11"
+source = "git+https://github.com/marcoallegretti/servo?rev=e5d9a518ebddb5ebd6af404d1fd4e00ea0f77163#e5d9a518ebddb5ebd6af404d1fd4e00ea0f77163"
 dependencies = [
  "serde",
  "servo-base",
@@ -6686,7 +6686,7 @@ dependencies = [
 [[package]]
 name = "servo-base"
 version = "0.0.1"
-source = "git+https://github.com/marcoallegretti/servo?rev=f0bb1aaf981b65c8dddc848bb647045d4c777d11#f0bb1aaf981b65c8dddc848bb647045d4c777d11"
+source = "git+https://github.com/marcoallegretti/servo?rev=e5d9a518ebddb5ebd6af404d1fd4e00ea0f77163#e5d9a518ebddb5ebd6af404d1fd4e00ea0f77163"
 dependencies = [
  "accesskit",
  "crossbeam-channel",
@@ -6711,7 +6711,7 @@ dependencies = [
 [[package]]
 name = "servo-canvas"
 version = "0.0.1"
-source = "git+https://github.com/marcoallegretti/servo?rev=f0bb1aaf981b65c8dddc848bb647045d4c777d11#f0bb1aaf981b65c8dddc848bb647045d4c777d11"
+source = "git+https://github.com/marcoallegretti/servo?rev=e5d9a518ebddb5ebd6af404d1fd4e00ea0f77163#e5d9a518ebddb5ebd6af404d1fd4e00ea0f77163"
 dependencies = [
  "bytemuck",
  "crossbeam-channel",
@@ -6736,7 +6736,7 @@ dependencies = [
 [[package]]
 name = "servo-canvas-traits"
 version = "0.0.1"
-source = "git+https://github.com/marcoallegretti/servo?rev=f0bb1aaf981b65c8dddc848bb647045d4c777d11#f0bb1aaf981b65c8dddc848bb647045d4c777d11"
+source = "git+https://github.com/marcoallegretti/servo?rev=e5d9a518ebddb5ebd6af404d1fd4e00ea0f77163#e5d9a518ebddb5ebd6af404d1fd4e00ea0f77163"
 dependencies = [
  "crossbeam-channel",
  "euclid",
@@ -6758,7 +6758,7 @@ dependencies = [
 [[package]]
 name = "servo-config"
 version = "0.0.1"
-source = "git+https://github.com/marcoallegretti/servo?rev=f0bb1aaf981b65c8dddc848bb647045d4c777d11#f0bb1aaf981b65c8dddc848bb647045d4c777d11"
+source = "git+https://github.com/marcoallegretti/servo?rev=e5d9a518ebddb5ebd6af404d1fd4e00ea0f77163#e5d9a518ebddb5ebd6af404d1fd4e00ea0f77163"
 dependencies = [
  "serde",
  "serde_json",
@@ -6770,7 +6770,7 @@ dependencies = [
 [[package]]
 name = "servo-config-macro"
 version = "0.0.1"
-source = "git+https://github.com/marcoallegretti/servo?rev=f0bb1aaf981b65c8dddc848bb647045d4c777d11#f0bb1aaf981b65c8dddc848bb647045d4c777d11"
+source = "git+https://github.com/marcoallegretti/servo?rev=e5d9a518ebddb5ebd6af404d1fd4e00ea0f77163#e5d9a518ebddb5ebd6af404d1fd4e00ea0f77163"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -6781,7 +6781,7 @@ dependencies = [
 [[package]]
 name = "servo-constellation"
 version = "0.0.1"
-source = "git+https://github.com/marcoallegretti/servo?rev=f0bb1aaf981b65c8dddc848bb647045d4c777d11#f0bb1aaf981b65c8dddc848bb647045d4c777d11"
+source = "git+https://github.com/marcoallegretti/servo?rev=e5d9a518ebddb5ebd6af404d1fd4e00ea0f77163#e5d9a518ebddb5ebd6af404d1fd4e00ea0f77163"
 dependencies = [
  "backtrace",
  "content-security-policy",
@@ -6828,7 +6828,7 @@ dependencies = [
 [[package]]
 name = "servo-constellation-traits"
 version = "0.0.1"
-source = "git+https://github.com/marcoallegretti/servo?rev=f0bb1aaf981b65c8dddc848bb647045d4c777d11#f0bb1aaf981b65c8dddc848bb647045d4c777d11"
+source = "git+https://github.com/marcoallegretti/servo?rev=e5d9a518ebddb5ebd6af404d1fd4e00ea0f77163#e5d9a518ebddb5ebd6af404d1fd4e00ea0f77163"
 dependencies = [
  "content-security-policy",
  "encoding_rs",
@@ -6863,7 +6863,7 @@ dependencies = [
 [[package]]
 name = "servo-deny-public-fields"
 version = "0.0.1"
-source = "git+https://github.com/marcoallegretti/servo?rev=f0bb1aaf981b65c8dddc848bb647045d4c777d11#f0bb1aaf981b65c8dddc848bb647045d4c777d11"
+source = "git+https://github.com/marcoallegretti/servo?rev=e5d9a518ebddb5ebd6af404d1fd4e00ea0f77163#e5d9a518ebddb5ebd6af404d1fd4e00ea0f77163"
 dependencies = [
  "syn",
  "synstructure",
@@ -6872,7 +6872,7 @@ dependencies = [
 [[package]]
 name = "servo-devtools"
 version = "0.0.1"
-source = "git+https://github.com/marcoallegretti/servo?rev=f0bb1aaf981b65c8dddc848bb647045d4c777d11#f0bb1aaf981b65c8dddc848bb647045d4c777d11"
+source = "git+https://github.com/marcoallegretti/servo?rev=e5d9a518ebddb5ebd6af404d1fd4e00ea0f77163#e5d9a518ebddb5ebd6af404d1fd4e00ea0f77163"
 dependencies = [
  "atomic_refcell",
  "base64 0.22.1",
@@ -6901,7 +6901,7 @@ dependencies = [
 [[package]]
 name = "servo-devtools-traits"
 version = "0.0.1"
-source = "git+https://github.com/marcoallegretti/servo?rev=f0bb1aaf981b65c8dddc848bb647045d4c777d11#f0bb1aaf981b65c8dddc848bb647045d4c777d11"
+source = "git+https://github.com/marcoallegretti/servo?rev=e5d9a518ebddb5ebd6af404d1fd4e00ea0f77163#e5d9a518ebddb5ebd6af404d1fd4e00ea0f77163"
 dependencies = [
  "bitflags 2.11.0",
  "http 1.4.0",
@@ -6920,7 +6920,7 @@ dependencies = [
 [[package]]
 name = "servo-dom-struct"
 version = "0.0.1"
-source = "git+https://github.com/marcoallegretti/servo?rev=f0bb1aaf981b65c8dddc848bb647045d4c777d11#f0bb1aaf981b65c8dddc848bb647045d4c777d11"
+source = "git+https://github.com/marcoallegretti/servo?rev=e5d9a518ebddb5ebd6af404d1fd4e00ea0f77163#e5d9a518ebddb5ebd6af404d1fd4e00ea0f77163"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -6930,7 +6930,7 @@ dependencies = [
 [[package]]
 name = "servo-embedder-traits"
 version = "0.0.1"
-source = "git+https://github.com/marcoallegretti/servo?rev=f0bb1aaf981b65c8dddc848bb647045d4c777d11#f0bb1aaf981b65c8dddc848bb647045d4c777d11"
+source = "git+https://github.com/marcoallegretti/servo?rev=e5d9a518ebddb5ebd6af404d1fd4e00ea0f77163#e5d9a518ebddb5ebd6af404d1fd4e00ea0f77163"
 dependencies = [
  "accesskit",
  "bitflags 2.11.0",
@@ -6963,7 +6963,7 @@ dependencies = [
 [[package]]
 name = "servo-fonts"
 version = "0.0.1"
-source = "git+https://github.com/marcoallegretti/servo?rev=f0bb1aaf981b65c8dddc848bb647045d4c777d11#f0bb1aaf981b65c8dddc848bb647045d4c777d11"
+source = "git+https://github.com/marcoallegretti/servo?rev=e5d9a518ebddb5ebd6af404d1fd4e00ea0f77163#e5d9a518ebddb5ebd6af404d1fd4e00ea0f77163"
 dependencies = [
  "app_units",
  "bitflags 2.11.0",
@@ -7016,7 +7016,7 @@ dependencies = [
 [[package]]
 name = "servo-fonts-traits"
 version = "0.0.1"
-source = "git+https://github.com/marcoallegretti/servo?rev=f0bb1aaf981b65c8dddc848bb647045d4c777d11#f0bb1aaf981b65c8dddc848bb647045d4c777d11"
+source = "git+https://github.com/marcoallegretti/servo?rev=e5d9a518ebddb5ebd6af404d1fd4e00ea0f77163#e5d9a518ebddb5ebd6af404d1fd4e00ea0f77163"
 dependencies = [
  "atomic_refcell",
  "dwrote",
@@ -7039,7 +7039,7 @@ dependencies = [
 [[package]]
 name = "servo-geometry"
 version = "0.0.1"
-source = "git+https://github.com/marcoallegretti/servo?rev=f0bb1aaf981b65c8dddc848bb647045d4c777d11#f0bb1aaf981b65c8dddc848bb647045d4c777d11"
+source = "git+https://github.com/marcoallegretti/servo?rev=e5d9a518ebddb5ebd6af404d1fd4e00ea0f77163#e5d9a518ebddb5ebd6af404d1fd4e00ea0f77163"
 dependencies = [
  "app_units",
  "euclid",
@@ -7052,7 +7052,7 @@ dependencies = [
 [[package]]
 name = "servo-hyper-serde"
 version = "0.13.2"
-source = "git+https://github.com/marcoallegretti/servo?rev=f0bb1aaf981b65c8dddc848bb647045d4c777d11#f0bb1aaf981b65c8dddc848bb647045d4c777d11"
+source = "git+https://github.com/marcoallegretti/servo?rev=e5d9a518ebddb5ebd6af404d1fd4e00ea0f77163#e5d9a518ebddb5ebd6af404d1fd4e00ea0f77163"
 dependencies = [
  "cookie 0.18.1",
  "headers 0.4.1",
@@ -7066,7 +7066,7 @@ dependencies = [
 [[package]]
 name = "servo-jstraceable-derive"
 version = "0.0.1"
-source = "git+https://github.com/marcoallegretti/servo?rev=f0bb1aaf981b65c8dddc848bb647045d4c777d11#f0bb1aaf981b65c8dddc848bb647045d4c777d11"
+source = "git+https://github.com/marcoallegretti/servo?rev=e5d9a518ebddb5ebd6af404d1fd4e00ea0f77163#e5d9a518ebddb5ebd6af404d1fd4e00ea0f77163"
 dependencies = [
  "proc-macro2",
  "syn",
@@ -7076,7 +7076,7 @@ dependencies = [
 [[package]]
 name = "servo-layout"
 version = "0.0.1"
-source = "git+https://github.com/marcoallegretti/servo?rev=f0bb1aaf981b65c8dddc848bb647045d4c777d11#f0bb1aaf981b65c8dddc848bb647045d4c777d11"
+source = "git+https://github.com/marcoallegretti/servo?rev=e5d9a518ebddb5ebd6af404d1fd4e00ea0f77163#e5d9a518ebddb5ebd6af404d1fd4e00ea0f77163"
 dependencies = [
  "accesskit",
  "app_units",
@@ -7130,7 +7130,7 @@ dependencies = [
 [[package]]
 name = "servo-layout-api"
 version = "0.0.1"
-source = "git+https://github.com/marcoallegretti/servo?rev=f0bb1aaf981b65c8dddc848bb647045d4c777d11#f0bb1aaf981b65c8dddc848bb647045d4c777d11"
+source = "git+https://github.com/marcoallegretti/servo?rev=e5d9a518ebddb5ebd6af404d1fd4e00ea0f77163#e5d9a518ebddb5ebd6af404d1fd4e00ea0f77163"
 dependencies = [
  "app_units",
  "atomic_refcell",
@@ -7164,7 +7164,7 @@ dependencies = [
 [[package]]
 name = "servo-malloc-size-of"
 version = "0.0.1"
-source = "git+https://github.com/marcoallegretti/servo?rev=f0bb1aaf981b65c8dddc848bb647045d4c777d11#f0bb1aaf981b65c8dddc848bb647045d4c777d11"
+source = "git+https://github.com/marcoallegretti/servo?rev=e5d9a518ebddb5ebd6af404d1fd4e00ea0f77163#e5d9a518ebddb5ebd6af404d1fd4e00ea0f77163"
 dependencies = [
  "accountable-refcell",
  "app_units",
@@ -7204,7 +7204,7 @@ dependencies = [
 [[package]]
 name = "servo-media"
 version = "0.0.1"
-source = "git+https://github.com/marcoallegretti/servo?rev=f0bb1aaf981b65c8dddc848bb647045d4c777d11#f0bb1aaf981b65c8dddc848bb647045d4c777d11"
+source = "git+https://github.com/marcoallegretti/servo?rev=e5d9a518ebddb5ebd6af404d1fd4e00ea0f77163#e5d9a518ebddb5ebd6af404d1fd4e00ea0f77163"
 dependencies = [
  "once_cell",
  "servo-media-audio",
@@ -7217,7 +7217,7 @@ dependencies = [
 [[package]]
 name = "servo-media-audio"
 version = "0.0.1"
-source = "git+https://github.com/marcoallegretti/servo?rev=f0bb1aaf981b65c8dddc848bb647045d4c777d11#f0bb1aaf981b65c8dddc848bb647045d4c777d11"
+source = "git+https://github.com/marcoallegretti/servo?rev=e5d9a518ebddb5ebd6af404d1fd4e00ea0f77163#e5d9a518ebddb5ebd6af404d1fd4e00ea0f77163"
 dependencies = [
  "byte-slice-cast",
  "euclid",
@@ -7240,7 +7240,7 @@ dependencies = [
 [[package]]
 name = "servo-media-derive"
 version = "0.0.1"
-source = "git+https://github.com/marcoallegretti/servo?rev=f0bb1aaf981b65c8dddc848bb647045d4c777d11#f0bb1aaf981b65c8dddc848bb647045d4c777d11"
+source = "git+https://github.com/marcoallegretti/servo?rev=e5d9a518ebddb5ebd6af404d1fd4e00ea0f77163#e5d9a518ebddb5ebd6af404d1fd4e00ea0f77163"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -7250,7 +7250,7 @@ dependencies = [
 [[package]]
 name = "servo-media-dummy"
 version = "0.0.1"
-source = "git+https://github.com/marcoallegretti/servo?rev=f0bb1aaf981b65c8dddc848bb647045d4c777d11#f0bb1aaf981b65c8dddc848bb647045d4c777d11"
+source = "git+https://github.com/marcoallegretti/servo?rev=e5d9a518ebddb5ebd6af404d1fd4e00ea0f77163#e5d9a518ebddb5ebd6af404d1fd4e00ea0f77163"
 dependencies = [
  "ipc-channel",
  "servo-media",
@@ -7264,7 +7264,7 @@ dependencies = [
 [[package]]
 name = "servo-media-player"
 version = "0.0.1"
-source = "git+https://github.com/marcoallegretti/servo?rev=f0bb1aaf981b65c8dddc848bb647045d4c777d11#f0bb1aaf981b65c8dddc848bb647045d4c777d11"
+source = "git+https://github.com/marcoallegretti/servo?rev=e5d9a518ebddb5ebd6af404d1fd4e00ea0f77163#e5d9a518ebddb5ebd6af404d1fd4e00ea0f77163"
 dependencies = [
  "ipc-channel",
  "malloc_size_of_derive",
@@ -7278,7 +7278,7 @@ dependencies = [
 [[package]]
 name = "servo-media-streams"
 version = "0.0.1"
-source = "git+https://github.com/marcoallegretti/servo?rev=f0bb1aaf981b65c8dddc848bb647045d4c777d11#f0bb1aaf981b65c8dddc848bb647045d4c777d11"
+source = "git+https://github.com/marcoallegretti/servo?rev=e5d9a518ebddb5ebd6af404d1fd4e00ea0f77163#e5d9a518ebddb5ebd6af404d1fd4e00ea0f77163"
 dependencies = [
  "malloc_size_of_derive",
  "servo-malloc-size-of",
@@ -7288,7 +7288,7 @@ dependencies = [
 [[package]]
 name = "servo-media-thread"
 version = "0.0.1"
-source = "git+https://github.com/marcoallegretti/servo?rev=f0bb1aaf981b65c8dddc848bb647045d4c777d11#f0bb1aaf981b65c8dddc848bb647045d4c777d11"
+source = "git+https://github.com/marcoallegretti/servo?rev=e5d9a518ebddb5ebd6af404d1fd4e00ea0f77163#e5d9a518ebddb5ebd6af404d1fd4e00ea0f77163"
 dependencies = [
  "euclid",
  "ipc-channel",
@@ -7306,7 +7306,7 @@ dependencies = [
 [[package]]
 name = "servo-media-traits"
 version = "0.0.1"
-source = "git+https://github.com/marcoallegretti/servo?rev=f0bb1aaf981b65c8dddc848bb647045d4c777d11#f0bb1aaf981b65c8dddc848bb647045d4c777d11"
+source = "git+https://github.com/marcoallegretti/servo?rev=e5d9a518ebddb5ebd6af404d1fd4e00ea0f77163#e5d9a518ebddb5ebd6af404d1fd4e00ea0f77163"
 dependencies = [
  "malloc_size_of_derive",
  "servo-malloc-size-of",
@@ -7315,7 +7315,7 @@ dependencies = [
 [[package]]
 name = "servo-media-webrtc"
 version = "0.0.1"
-source = "git+https://github.com/marcoallegretti/servo?rev=f0bb1aaf981b65c8dddc848bb647045d4c777d11#f0bb1aaf981b65c8dddc848bb647045d4c777d11"
+source = "git+https://github.com/marcoallegretti/servo?rev=e5d9a518ebddb5ebd6af404d1fd4e00ea0f77163#e5d9a518ebddb5ebd6af404d1fd4e00ea0f77163"
 dependencies = [
  "log",
  "servo-media-streams",
@@ -7325,7 +7325,7 @@ dependencies = [
 [[package]]
 name = "servo-metrics"
 version = "0.0.1"
-source = "git+https://github.com/marcoallegretti/servo?rev=f0bb1aaf981b65c8dddc848bb647045d4c777d11#f0bb1aaf981b65c8dddc848bb647045d4c777d11"
+source = "git+https://github.com/marcoallegretti/servo?rev=e5d9a518ebddb5ebd6af404d1fd4e00ea0f77163#e5d9a518ebddb5ebd6af404d1fd4e00ea0f77163"
 dependencies = [
  "malloc_size_of_derive",
  "servo-base",
@@ -7340,7 +7340,7 @@ dependencies = [
 [[package]]
 name = "servo-net"
 version = "0.0.1"
-source = "git+https://github.com/marcoallegretti/servo?rev=f0bb1aaf981b65c8dddc848bb647045d4c777d11#f0bb1aaf981b65c8dddc848bb647045d4c777d11"
+source = "git+https://github.com/marcoallegretti/servo?rev=e5d9a518ebddb5ebd6af404d1fd4e00ea0f77163#e5d9a518ebddb5ebd6af404d1fd4e00ea0f77163"
 dependencies = [
  "async-compression",
  "async-recursion",
@@ -7409,7 +7409,7 @@ dependencies = [
 [[package]]
 name = "servo-net-traits"
 version = "0.0.1"
-source = "git+https://github.com/marcoallegretti/servo?rev=f0bb1aaf981b65c8dddc848bb647045d4c777d11#f0bb1aaf981b65c8dddc848bb647045d4c777d11"
+source = "git+https://github.com/marcoallegretti/servo?rev=e5d9a518ebddb5ebd6af404d1fd4e00ea0f77163#e5d9a518ebddb5ebd6af404d1fd4e00ea0f77163"
 dependencies = [
  "content-security-policy",
  "cookie 0.18.1",
@@ -7449,7 +7449,7 @@ dependencies = [
 [[package]]
 name = "servo-paint"
 version = "0.0.1"
-source = "git+https://github.com/marcoallegretti/servo?rev=f0bb1aaf981b65c8dddc848bb647045d4c777d11#f0bb1aaf981b65c8dddc848bb647045d4c777d11"
+source = "git+https://github.com/marcoallegretti/servo?rev=e5d9a518ebddb5ebd6af404d1fd4e00ea0f77163#e5d9a518ebddb5ebd6af404d1fd4e00ea0f77163"
 dependencies = [
  "bitflags 2.11.0",
  "crossbeam-channel",
@@ -7486,7 +7486,7 @@ dependencies = [
 [[package]]
 name = "servo-paint-api"
 version = "0.0.1"
-source = "git+https://github.com/marcoallegretti/servo?rev=f0bb1aaf981b65c8dddc848bb647045d4c777d11#f0bb1aaf981b65c8dddc848bb647045d4c777d11"
+source = "git+https://github.com/marcoallegretti/servo?rev=e5d9a518ebddb5ebd6af404d1fd4e00ea0f77163#e5d9a518ebddb5ebd6af404d1fd4e00ea0f77163"
 dependencies = [
  "bitflags 2.11.0",
  "crossbeam-channel",
@@ -7522,7 +7522,7 @@ dependencies = [
 [[package]]
 name = "servo-pixels"
 version = "0.0.1"
-source = "git+https://github.com/marcoallegretti/servo?rev=f0bb1aaf981b65c8dddc848bb647045d4c777d11#f0bb1aaf981b65c8dddc848bb647045d4c777d11"
+source = "git+https://github.com/marcoallegretti/servo?rev=e5d9a518ebddb5ebd6af404d1fd4e00ea0f77163#e5d9a518ebddb5ebd6af404d1fd4e00ea0f77163"
 dependencies = [
  "euclid",
  "image",
@@ -7537,7 +7537,7 @@ dependencies = [
 [[package]]
 name = "servo-profile"
 version = "0.0.1"
-source = "git+https://github.com/marcoallegretti/servo?rev=f0bb1aaf981b65c8dddc848bb647045d4c777d11#f0bb1aaf981b65c8dddc848bb647045d4c777d11"
+source = "git+https://github.com/marcoallegretti/servo?rev=e5d9a518ebddb5ebd6af404d1fd4e00ea0f77163#e5d9a518ebddb5ebd6af404d1fd4e00ea0f77163"
 dependencies = [
  "libc",
  "log",
@@ -7556,7 +7556,7 @@ dependencies = [
 [[package]]
 name = "servo-profile-traits"
 version = "0.0.1"
-source = "git+https://github.com/marcoallegretti/servo?rev=f0bb1aaf981b65c8dddc848bb647045d4c777d11#f0bb1aaf981b65c8dddc848bb647045d4c777d11"
+source = "git+https://github.com/marcoallegretti/servo?rev=e5d9a518ebddb5ebd6af404d1fd4e00ea0f77163#e5d9a518ebddb5ebd6af404d1fd4e00ea0f77163"
 dependencies = [
  "crossbeam-channel",
  "ipc-channel",
@@ -7573,7 +7573,7 @@ dependencies = [
 [[package]]
 name = "servo-script"
 version = "0.0.1"
-source = "git+https://github.com/marcoallegretti/servo?rev=f0bb1aaf981b65c8dddc848bb647045d4c777d11#f0bb1aaf981b65c8dddc848bb647045d4c777d11"
+source = "git+https://github.com/marcoallegretti/servo?rev=e5d9a518ebddb5ebd6af404d1fd4e00ea0f77163#e5d9a518ebddb5ebd6af404d1fd4e00ea0f77163"
 dependencies = [
  "aes",
  "aes-gcm",
@@ -7712,7 +7712,7 @@ dependencies = [
 [[package]]
 name = "servo-script-bindings"
 version = "0.0.1"
-source = "git+https://github.com/marcoallegretti/servo?rev=f0bb1aaf981b65c8dddc848bb647045d4c777d11#f0bb1aaf981b65c8dddc848bb647045d4c777d11"
+source = "git+https://github.com/marcoallegretti/servo?rev=e5d9a518ebddb5ebd6af404d1fd4e00ea0f77163#e5d9a518ebddb5ebd6af404d1fd4e00ea0f77163"
 dependencies = [
  "bitflags 2.11.0",
  "crossbeam-channel",
@@ -7750,7 +7750,7 @@ dependencies = [
 [[package]]
 name = "servo-script-traits"
 version = "0.0.1"
-source = "git+https://github.com/marcoallegretti/servo?rev=f0bb1aaf981b65c8dddc848bb647045d4c777d11#f0bb1aaf981b65c8dddc848bb647045d4c777d11"
+source = "git+https://github.com/marcoallegretti/servo?rev=e5d9a518ebddb5ebd6af404d1fd4e00ea0f77163#e5d9a518ebddb5ebd6af404d1fd4e00ea0f77163"
 dependencies = [
  "accesskit",
  "content-security-policy",
@@ -7787,7 +7787,7 @@ dependencies = [
 [[package]]
 name = "servo-storage"
 version = "0.0.1"
-source = "git+https://github.com/marcoallegretti/servo?rev=f0bb1aaf981b65c8dddc848bb647045d4c777d11#f0bb1aaf981b65c8dddc848bb647045d4c777d11"
+source = "git+https://github.com/marcoallegretti/servo?rev=e5d9a518ebddb5ebd6af404d1fd4e00ea0f77163#e5d9a518ebddb5ebd6af404d1fd4e00ea0f77163"
 dependencies = [
  "libc",
  "log",
@@ -7817,7 +7817,7 @@ dependencies = [
 [[package]]
 name = "servo-storage-traits"
 version = "0.0.1"
-source = "git+https://github.com/marcoallegretti/servo?rev=f0bb1aaf981b65c8dddc848bb647045d4c777d11#f0bb1aaf981b65c8dddc848bb647045d4c777d11"
+source = "git+https://github.com/marcoallegretti/servo?rev=e5d9a518ebddb5ebd6af404d1fd4e00ea0f77163#e5d9a518ebddb5ebd6af404d1fd4e00ea0f77163"
 dependencies = [
  "malloc_size_of_derive",
  "serde",
@@ -7831,7 +7831,7 @@ dependencies = [
 [[package]]
 name = "servo-timers"
 version = "0.0.1"
-source = "git+https://github.com/marcoallegretti/servo?rev=f0bb1aaf981b65c8dddc848bb647045d4c777d11#f0bb1aaf981b65c8dddc848bb647045d4c777d11"
+source = "git+https://github.com/marcoallegretti/servo?rev=e5d9a518ebddb5ebd6af404d1fd4e00ea0f77163#e5d9a518ebddb5ebd6af404d1fd4e00ea0f77163"
 dependencies = [
  "crossbeam-channel",
  "malloc_size_of_derive",
@@ -7841,7 +7841,7 @@ dependencies = [
 [[package]]
 name = "servo-tracing"
 version = "0.0.1"
-source = "git+https://github.com/marcoallegretti/servo?rev=f0bb1aaf981b65c8dddc848bb647045d4c777d11#f0bb1aaf981b65c8dddc848bb647045d4c777d11"
+source = "git+https://github.com/marcoallegretti/servo?rev=e5d9a518ebddb5ebd6af404d1fd4e00ea0f77163#e5d9a518ebddb5ebd6af404d1fd4e00ea0f77163"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -7851,7 +7851,7 @@ dependencies = [
 [[package]]
 name = "servo-url"
 version = "0.0.1"
-source = "git+https://github.com/marcoallegretti/servo?rev=f0bb1aaf981b65c8dddc848bb647045d4c777d11#f0bb1aaf981b65c8dddc848bb647045d4c777d11"
+source = "git+https://github.com/marcoallegretti/servo?rev=e5d9a518ebddb5ebd6af404d1fd4e00ea0f77163#e5d9a518ebddb5ebd6af404d1fd4e00ea0f77163"
 dependencies = [
  "encoding_rs",
  "malloc_size_of_derive",
@@ -7865,7 +7865,7 @@ dependencies = [
 [[package]]
 name = "servo-webgl"
 version = "0.0.1"
-source = "git+https://github.com/marcoallegretti/servo?rev=f0bb1aaf981b65c8dddc848bb647045d4c777d11#f0bb1aaf981b65c8dddc848bb647045d4c777d11"
+source = "git+https://github.com/marcoallegretti/servo?rev=e5d9a518ebddb5ebd6af404d1fd4e00ea0f77163#e5d9a518ebddb5ebd6af404d1fd4e00ea0f77163"
 dependencies = [
  "bitflags 2.11.0",
  "byteorder",
@@ -7889,7 +7889,7 @@ dependencies = [
 [[package]]
 name = "servo-webgpu"
 version = "0.0.1"
-source = "git+https://github.com/marcoallegretti/servo?rev=f0bb1aaf981b65c8dddc848bb647045d4c777d11#f0bb1aaf981b65c8dddc848bb647045d4c777d11"
+source = "git+https://github.com/marcoallegretti/servo?rev=e5d9a518ebddb5ebd6af404d1fd4e00ea0f77163#e5d9a518ebddb5ebd6af404d1fd4e00ea0f77163"
 dependencies = [
  "arrayvec",
  "euclid",
@@ -7908,7 +7908,7 @@ dependencies = [
 [[package]]
 name = "servo-webgpu-traits"
 version = "0.0.1"
-source = "git+https://github.com/marcoallegretti/servo?rev=f0bb1aaf981b65c8dddc848bb647045d4c777d11#f0bb1aaf981b65c8dddc848bb647045d4c777d11"
+source = "git+https://github.com/marcoallegretti/servo?rev=e5d9a518ebddb5ebd6af404d1fd4e00ea0f77163#e5d9a518ebddb5ebd6af404d1fd4e00ea0f77163"
 dependencies = [
  "arrayvec",
  "malloc_size_of_derive",
@@ -7924,7 +7924,7 @@ dependencies = [
 [[package]]
 name = "servo-webxr"
 version = "0.0.1"
-source = "git+https://github.com/marcoallegretti/servo?rev=f0bb1aaf981b65c8dddc848bb647045d4c777d11#f0bb1aaf981b65c8dddc848bb647045d4c777d11"
+source = "git+https://github.com/marcoallegretti/servo?rev=e5d9a518ebddb5ebd6af404d1fd4e00ea0f77163#e5d9a518ebddb5ebd6af404d1fd4e00ea0f77163"
 dependencies = [
  "crossbeam-channel",
  "euclid",
@@ -7943,7 +7943,7 @@ dependencies = [
 [[package]]
 name = "servo-webxr-api"
 version = "0.0.1"
-source = "git+https://github.com/marcoallegretti/servo?rev=f0bb1aaf981b65c8dddc848bb647045d4c777d11#f0bb1aaf981b65c8dddc848bb647045d4c777d11"
+source = "git+https://github.com/marcoallegretti/servo?rev=e5d9a518ebddb5ebd6af404d1fd4e00ea0f77163#e5d9a518ebddb5ebd6af404d1fd4e00ea0f77163"
 dependencies = [
  "euclid",
  "ipc-channel",
@@ -7959,7 +7959,7 @@ dependencies = [
 [[package]]
 name = "servo-xpath"
 version = "0.0.1"
-source = "git+https://github.com/marcoallegretti/servo?rev=f0bb1aaf981b65c8dddc848bb647045d4c777d11#f0bb1aaf981b65c8dddc848bb647045d4c777d11"
+source = "git+https://github.com/marcoallegretti/servo?rev=e5d9a518ebddb5ebd6af404d1fd4e00ea0f77163#e5d9a518ebddb5ebd6af404d1fd4e00ea0f77163"
 dependencies = [
  "log",
  "malloc_size_of_derive",

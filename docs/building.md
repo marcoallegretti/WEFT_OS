@@ -63,7 +63,9 @@ python3 tests/frame/check_frame.py --host app --slow-style 3
 
 `--host app` also requires the page on screen within two seconds of
 `weft-app-shell` printing `READY`; `--slow-style` delays a stylesheet that
-reveals the page so premature readiness becomes visible.
+reveals the page so premature readiness becomes visible. The stylesheet is a
+file next to the page that the harness keeps from being opened with a file
+lease, so the delay must stay below `/proc/sys/fs/lease-break-time`.
 
 Logs and the last capture are written to `target/frame-check`.
 
@@ -85,6 +87,7 @@ same nested desktop and drive the demo apps with real keyboard input:
 python3 tests/frame/check_counter.py   # Counter round trip through the session bridge
 python3 tests/frame/check_notes.py     # Notes stores exactly what is typed, refuses stale saves
 python3 tests/frame/check_app_data.py  # Notes data from the earlier layout is moved and kept
+python3 tests/frame/check_confinement.py  # an app page reaches only its UI files and its session bridge
 ```
 
 ## Demo apps (wasm32-wasip2)

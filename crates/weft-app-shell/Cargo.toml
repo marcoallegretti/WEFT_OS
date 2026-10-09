@@ -27,7 +27,7 @@ toml = { version = "0.8", optional = true }
 
 [dependencies.servo]
 git = "https://github.com/marcoallegretti/servo"
-rev = "f0bb1aaf981b65c8dddc848bb647045d4c777d11"
+rev = "e5d9a518ebddb5ebd6af404d1fd4e00ea0f77163"
 optional = true
 default-features = false
 

@@ -13,16 +13,19 @@ weft-app-shell for it. The host must print READY, and the page must be on
 screen within a short grace period after READY, because the compositor shows
 a presented frame slightly later. READY printed within that grace before the
 page is presented is therefore not detected. `--slow-style SECONDS` makes
-early readiness observable: the page stays hidden until a stylesheet that a
-local HTTP server delivers after the delay reveals it, so a host that reports
+early readiness observable: the page stays hidden until a stylesheet next to it
+reveals it, and the harness holds a file lease that keeps the stylesheet from
+being opened until the delay has passed, so a host that reports
 READY before the document has loaded shows no page within the grace period.
 
 Requires Xvfb, xwd and ImageMagick's convert; see session.py.
 """
 
 import argparse
-import http.server
+import fcntl
+import os
 import shutil
+import signal
 import sys
 import threading
 import time
@@ -101,31 +104,42 @@ def install_app(store, page):
     return store
 
 
-def slow_style_server(delay):
-    """Serve a stylesheet that reveals the page after `delay` seconds."""
-    class Handler(http.server.BaseHTTPRequestHandler):
-        def do_GET(self):
-            time.sleep(delay)
-            body = b"body { visibility: visible; }"
-            self.send_response(200)
-            self.send_header("Content-Type", "text/css")
-            self.send_header("Content-Length", str(len(body)))
-            self.end_headers()
-            self.wfile.write(body)
+def slow_style(directory, delay):
+    """Create `directory/reveal.css`, a stylesheet revealing the page, that
+    cannot be opened until `delay` seconds after the host first tries to. A
+    write lease makes another process's open() wait until the lease is
+    released, and the kernel signals the holder when an open() starts
+    waiting. The stylesheet is a local file next to the page, so an
+    application host confined to its UI directory may load it."""
+    sheet = directory / "reveal.css"
+    sheet.write_text("body { visibility: visible; }", encoding="utf-8")
+    lease = os.open(sheet, os.O_WRONLY)
+    held = threading.Event()
 
-        def log_message(self, *args):
-            pass
+    def release():
+        fcntl.fcntl(lease, fcntl.F_SETLEASE, fcntl.F_UNLCK)
+        os.close(lease)
 
-    server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
-    threading.Thread(target=server.serve_forever, daemon=True).start()
-    return server
+    def opening(_signal, _frame):
+        if not held.is_set():
+            held.set()
+            timer = threading.Timer(delay, release)
+            timer.daemon = True
+            timer.start()
+
+    signal.signal(signal.SIGIO, opening)
+    try:
+        fcntl.fcntl(lease, fcntl.F_SETLEASE, fcntl.F_WRLCK)
+    except OSError as error:
+        os.close(lease)
+        raise SessionError(f"cannot hold back {sheet} with a file lease: {error}") from error
 
 
-def hidden_until_styled(page, destination, port):
+def hidden_until_styled(page, destination):
     """Copy `page`, hiding its body until the delayed stylesheet loads."""
     html = page.read_text(encoding="utf-8")
-    link = (f'<style>body {{ visibility: hidden; }}</style>\n'
-            f'<link rel="stylesheet" href="http://127.0.0.1:{port}/reveal.css">\n</head>')
+    link = ('<style>body { visibility: hidden; }</style>\n'
+            '<link rel="stylesheet" href="reveal.css">\n</head>')
     if "</head>" not in html:
         raise ValueError(f"{page} has no </head>")
     destination.write_text(html.replace("</head>", link, 1), encoding="utf-8")
@@ -149,6 +163,11 @@ def main(argv=None):
     parser.add_argument("--output", type=Path, default=ROOT / "target/frame-check",
                         help="directory for logs and the captured screenshot")
     args = parser.parse_args(argv)
+    if args.slow_style:
+        # The kernel revokes a lease that is held longer than this.
+        limit = int(Path("/proc/sys/fs/lease-break-time").read_text())
+        if not 0 < args.slow_style < limit:
+            parser.error(f"--slow-style must be between 0 and {limit} seconds")
     if args.shell is None:
         name = "weft-servo-shell" if args.host == "system" else "weft-app-shell"
         args.shell = ROOT / "target/debug" / name
@@ -158,28 +177,26 @@ def main(argv=None):
         print("missing: " + ", ".join(missing), file=sys.stderr)
         return 2
 
-    style_server = None
     try:
         with Desktop(args.compositor, args.output, outputs=["frame.ppm"]) as desktop:
             page = args.page
             if args.slow_style:
-                style_server = slow_style_server(args.slow_style)
-                page = hidden_until_styled(args.page, desktop.runtime / "page.html",
-                                           style_server.server_address[1])
+                page = hidden_until_styled(args.page, desktop.runtime / "page.html")
             if args.host == "system":
+                if args.slow_style:
+                    slow_style(desktop.runtime, args.slow_style)
                 shell = desktop.launch_client(
                     "shell", [args.shell], {"WEFT_SYSTEM_UI_HTML": str(page.resolve())})
             else:
                 store = install_app(desktop.runtime / "store", page)
+                if args.slow_style:
+                    slow_style(store / APP_ID / "ui", args.slow_style)
                 shell = desktop.launch_client(
                     "shell", [args.shell, APP_ID, "1"], {"WEFT_APP_STORE": str(store)})
             problems, screenshot = watch(desktop, shell, args)
     except SessionError as error:
         print(error, file=sys.stderr)
         return 1
-    finally:
-        if style_server is not None:
-            style_server.shutdown()
 
     if screenshot is not None:
         (args.output / "frame.ppm").write_bytes(screenshot)
