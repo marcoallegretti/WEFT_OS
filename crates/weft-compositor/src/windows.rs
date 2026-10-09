@@ -123,17 +123,25 @@ impl WeftCompositorState {
         }
     }
 
-    /// Maps a new toplevel. A session's first window comes to the front with
-    /// keyboard focus; its later windows, and windows of clients outside
-    /// any session after the first, are shown without taking focus, so a
-    /// client cannot take keystrokes meant for another application by
-    /// creating windows. A panel is fitted and kept beneath.
+    /// Maps a new toplevel. The first window a session maps in its lifetime
+    /// comes to the front with keyboard focus; its later windows, including
+    /// recreated ones, are shown without taking focus, so a session cannot
+    /// take keystrokes meant for another application by creating windows.
+    /// A client outside any session (one connected through the display
+    /// socket) takes focus only while no other such window is mapped. A
+    /// panel is fitted and kept beneath.
     pub fn map_new_window(&mut self, window: Window) {
         let session = window_session(&window);
-        let first = !self
-            .space
-            .elements()
-            .any(|other| window_session(other) == session);
+        let first = match session {
+            Some(session_id) => self
+                .appd_ipc
+                .as_mut()
+                .is_some_and(|ipc| ipc.take_focus_on_map(session_id)),
+            None => !self
+                .space
+                .elements()
+                .any(|other| window_session(other).is_none()),
+        };
         self.space.map_element(window.clone(), (0, 0), false);
         if self.is_panel(&window) {
             self.fit_panels();
