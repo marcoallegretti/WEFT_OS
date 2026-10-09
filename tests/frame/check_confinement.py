@@ -13,7 +13,8 @@ The page probes, and paints one band per probe:
 - an image from a local HTTP server fails to load;
 - a no-cors fetch from that server is rejected;
 - a WebSocket to a local server that completes the handshake fails;
-- a no-cors fetch from a worker is rejected;
+- a worker does not fetch from that server (Servo does not start workers
+  for file: pages, which also keeps them from fetching);
 - an about:srcdoc frame has no navigator.servo, which could change engine
   preferences.
 
@@ -137,7 +138,6 @@ def make_package(store, http_port, ws_port, other_dir):
             .replace("@WS@", f"ws://127.0.0.1:{ws_port}/")
             .replace("@OTHER_URL@", other.as_uri()))
     (package / "ui/index.html").write_text(page)
-    shutil.copy(fixture / "worker.js", package / "ui/worker.js")
     (package / "ui/own.png").write_bytes(png())
     (package / "outside.png").write_bytes(png())
     other.write_bytes(png())
@@ -177,12 +177,16 @@ def run(args, desktop, store, other_dir):
             if all(c == GREEN for c in colours.values()) or time.monotonic() > deadline:
                 break
             time.sleep(0.5)
+        time.sleep(1)  # let requests the page sent after the last band arrive
+        problems = []
         failed = [name for name, c in colours.items() if c != GREEN]
         if failed:
-            raise AssertionError(f"probes not as required: {failed} ({colours})")
+            problems.append(f"probes not as required: {failed}")
         if Counting.requests or connections:
-            raise AssertionError(f"requests left the renderer: HTTP {Counting.requests}, "
-                                 f"{len(connections)} WebSocket")
+            problems.append(f"requests left the renderer: HTTP {sorted(Counting.requests)}, "
+                            f"{len(connections)} WebSocket")
+        if problems:
+            raise AssertionError("; ".join(problems))
     finally:
         stop.set()
         server.shutdown()

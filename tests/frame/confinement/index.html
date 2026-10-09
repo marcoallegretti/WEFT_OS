@@ -11,6 +11,16 @@
   div { flex: 1; background: #808080; }
   iframe { position: absolute; width: 1px; height: 1px; border: 0; }
 </style>
+<script>
+// A srcdoc frame holds this page's content and must not reach the engine's
+// privileged navigator.servo interface; it reports what it sees.
+var srcdocReport = null;
+addEventListener('message', function (event) {
+  if (typeof event.data === 'string' && event.data.indexOf('servo:') === 0) {
+    srcdocReport = event.data;
+  }
+});
+</script>
 </head>
 <body>
 <div id="own-image"></div>
@@ -24,6 +34,14 @@
 <div id="worker-fetch"></div>
 <div id="srcdoc-internals"></div>
 <span>probe</span>
+<script type="text/plain" id="worker-source">
+// Reports whether a fetch to the URL it is sent leaves the worker.
+onmessage = function (event) {
+  fetch(event.data, { mode: 'no-cors' }).then(
+    function () { postMessage('fetched'); },
+    function () { postMessage('refused'); });
+};
+</script>
 <iframe srcdoc="<img src='@HTTP@srcdoc.png'><script>parent.postMessage('servo:' + typeof navigator.servo, '*');</script>"></iframe>
 <script>
 // One band per probe: green when the outcome matches the policy, red when it
@@ -36,6 +54,7 @@
 var HTTP = '@HTTP@';
 var WS = '@WS@';
 var OTHER = '@OTHER_URL@';
+var WORKER = document.getElementById('worker-source').textContent;
 
 function mark(id, ok) {
   document.getElementById(id).style.background = ok ? '#00c000' : '#e00000';
@@ -65,21 +84,21 @@ try {
 }
 
 try {
-  var worker = new Worker('worker.js');
+  // A worker must never fetch past the policy. Servo currently refuses
+  // worker scripts for file: pages, blob: ones included, so the worker does
+  // not start; that also keeps it from fetching.
+  var worker = new Worker(URL.createObjectURL(new Blob([WORKER], { type: 'text/javascript' })));
   worker.onmessage = function (event) { mark('worker-fetch', event.data === 'refused'); };
-  worker.onerror = function () { mark('worker-fetch', false); };
+  worker.onerror = function () { mark('worker-fetch', true); };
   worker.postMessage(HTTP + 'worker');
 } catch (e) {
-  mark('worker-fetch', false);
+  mark('worker-fetch', true);
 }
 
-// A srcdoc frame holds this page's content and must not reach the engine's
-// privileged navigator.servo interface.
-addEventListener('message', function (event) {
-  if (typeof event.data === 'string' && event.data.indexOf('servo:') === 0) {
-    mark('srcdoc-internals', event.data === 'servo:undefined');
-  }
-});
+(function srcdoc() {
+  if (srcdocReport === null) { setTimeout(srcdoc, 50); return; }
+  mark('srcdoc-internals', srcdocReport === 'servo:undefined');
+})();
 
 try { navigator.sendBeacon(HTTP + 'beacon', 'probe'); } catch (e) {}
 
