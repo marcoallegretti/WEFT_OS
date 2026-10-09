@@ -217,11 +217,13 @@ async fn run() -> anyhow::Result<()> {
         let _ = sd_notify::notify(false, &[sd_notify::NotifyState::Ready]);
     }
 
-    if let Some(app_ids) = load_session() {
-        // Restoring runs beside the request loops, so waiting for the
-        // compositor delays neither clients nor shutdown.
+    // Restoring runs beside the request loops, so waiting for the
+    // compositor delays neither clients nor shutdown. Until it finishes,
+    // the restored list is what a shutdown saves.
+    let restore = load_session().map(|app_ids| {
+        let saved = app_ids.clone();
         let registry = Arc::clone(&registry);
-        tokio::spawn(async move {
+        let task = tokio::spawn(async move {
             // Apps need the compositor connection; give it a moment.
             let compositor = registry.lock().await.compositor_tx.clone();
             if let Some(compositor) = compositor {
@@ -242,7 +244,8 @@ async fn run() -> anyhow::Result<()> {
                 .await;
             }
         });
-    }
+        (task, saved)
+    });
 
     #[cfg(unix)]
     let mut sigterm = {
@@ -288,7 +291,14 @@ async fn run() -> anyhow::Result<()> {
         }
     }
 
-    save_session(registry.lock().await.running_app_ids()).await;
+    let app_ids = match restore {
+        Some((task, saved)) if !task.is_finished() => {
+            task.abort();
+            saved
+        }
+        _ => registry.lock().await.running_app_ids(),
+    };
+    save_session(app_ids).await;
     registry.lock().await.shutdown_all();
     tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;
     let _ = std::fs::remove_file(&socket_path);
