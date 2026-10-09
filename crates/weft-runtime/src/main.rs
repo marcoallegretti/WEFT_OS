@@ -507,6 +507,14 @@ fn package_store_roots() -> Vec<PathBuf> {
 mod tests {
     use super::*;
 
+    /// Serialises the tests that read or change WEFT_APP_STORE; the test
+    /// harness runs tests on parallel threads that share the environment.
+    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    fn env_lock() -> std::sync::MutexGuard<'static, ()> {
+        ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner())
+    }
+
     #[cfg(not(feature = "wasmtime-runtime"))]
     #[test]
     fn engine_disabled_build_refuses_to_run_components() {
@@ -517,7 +525,14 @@ mod tests {
 
     #[test]
     fn package_store_roots_includes_system_path() {
+        let _env = env_lock();
+        let prior = std::env::var_os("WEFT_APP_STORE");
+        // SAFETY: env_lock serialises every test that touches the environment.
+        unsafe { std::env::remove_var("WEFT_APP_STORE") };
         let roots = package_store_roots();
+        if let Some(v) = prior {
+            unsafe { std::env::set_var("WEFT_APP_STORE", v) };
+        }
         assert!(
             roots
                 .iter()
@@ -527,6 +542,7 @@ mod tests {
 
     #[test]
     fn package_store_roots_uses_weft_app_store_when_set() {
+        let _env = env_lock();
         // SAFETY: test binary is single-threaded at this point.
         unsafe { std::env::set_var("WEFT_APP_STORE", "/custom/store") };
         let roots = package_store_roots();
@@ -536,6 +552,7 @@ mod tests {
 
     #[test]
     fn resolve_package_finds_installed_package() {
+        let _env = env_lock();
         use std::fs;
         let store =
             std::env::temp_dir().join(format!("weft_runtime_resolve_{}", std::process::id()));
@@ -566,6 +583,7 @@ mod tests {
 
     #[test]
     fn resolve_package_errors_on_unknown_id() {
+        let _env = env_lock();
         let store =
             std::env::temp_dir().join(format!("weft_runtime_resolve_empty_{}", std::process::id()));
         let _ = std::fs::create_dir_all(&store);
