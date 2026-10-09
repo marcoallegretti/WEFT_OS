@@ -634,6 +634,11 @@ fn scan_installed_apps() -> Vec<AppInfo> {
             let Ok(m) = weft_ipc_types::manifest::Manifest::read(&entry.path()) else {
                 continue;
             };
+            // Only a directory named after the ID its manifest declares is an
+            // installed package; staging copies and stray directories are not.
+            if entry.file_name().to_str() != Some(m.package.id.as_str()) {
+                continue;
+            }
             if seen.insert(m.package.id.clone()) {
                 apps.push(AppInfo {
                     app_id: m.package.id,

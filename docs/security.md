@@ -18,11 +18,17 @@ Each app session runs as a separate OS process (`weft-runtime`). When systemd is
 
 Apps access the filesystem only through WASI preopened directories. Each capability maps to a specific host path preopened at a fixed guest path. The `weft-file-portal` process applies the same directory grants and access modes, but checks paths lexically: it blocks `..` traversal, not symbolic links. Components cannot currently reach its socket, since the runtime grants them no socket access.
 
-## Package Signing
+## Package Signing and Trust
 
-Packages are signed with Ed25519 (`ed25519-dalek`). The signature covers the SHA-256 hash of `wapp.toml` and `app.wasm`. `weft-pack verify` checks the signature before installation.
+Packages are signed with Ed25519 over their content digest: the SHA-256 of an inventory listing every file in the package except the root `signature.sig`, one `<path>\t<sha-256>` line per file sorted by path. Every file is covered, including the UI. Packages may hold only directories and regular files; a symbolic link or special file makes `weft-pack check`, `sign`, `verify` and `install` refuse the package. The committed demo signatures verify under this rule.
 
-For verified read-only package storage, `weft-pack build-image` produces an EROFS image protected with dm-verity. Mounting requires the setuid `weft-mount-helper` which calls `veritysetup`.
+`weft-pack install` admits a package only when its signature verifies with a key in the trust store: `*.pub` files (64 hex digits) in `$XDG_CONFIG_HOME/weft/trusted-keys` and `/etc/weft/trusted-keys`, or only in `$WEFT_TRUSTED_KEYS` when that is set. A malformed key file is an error, not skipped. An unsigned or untrusted package is refused unless the developer passes `--dev`, which installs it as development content. The package is copied into the store first and checked on that copy, which is then renamed into place, so the bytes that are verified are the bytes that are installed.
+
+The first installation of an app ID records its owner in `$XDG_DATA_HOME/weft/owners/<id>`: the publisher key, or development. Every later installation of that ID must have the same owner, so neither another trusted publisher nor a development build can take over an ID, and with it the app's data. The record survives uninstall while the app's data remains; uninstalling with no data left frees the ID. The demo key in `examples/keys` is a test fixture, not a signing authority.
+
+Not yet covered: `weft-appd` does not check signatures or owners at launch, so the installed directory is trusted as installed; key revocation, rotation and ownership transfer have no workflow; and capabilities are granted at launch without asking the user, independently of the signature.
+
+For verified read-only package storage, `weft-pack build-image` produces an EROFS image protected with dm-verity. Mounting requires the setuid `weft-mount-helper` which calls `veritysetup`. The image's root hash is not yet authenticated (see `architecture.md`).
 
 ## Seccomp
 
