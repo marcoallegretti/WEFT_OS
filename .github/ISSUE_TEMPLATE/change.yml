@@ -1,0 +1,63 @@
+name: Defect or change
+description: Report a concrete defect or propose an ordinary change within accepted architecture.
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Use a title that states the defect or the behavior that should hold. Search existing issues
+        and pull requests first. Use the Decision form for a material change of product direction,
+        public compatibility, trust boundaries, support scope or data policy.
+  - type: textarea
+    id: observed
+    attributes:
+      label: Observed
+      description: What happens now, and who or what is affected (user journey, caller, contract, test harness, contributor).
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected
+      description: What should hold instead. Cite the implemented contract or the BLUEPRINT.md section, and say which one applies.
+    validations:
+      required: true
+  - type: textarea
+    id: evidence
+    attributes:
+      label: Evidence
+      description: Commit, environment (host, compositor backend, GPU or VM), enabled features, exact reproduction steps and actual output, with file and line references.
+    validations:
+      required: true
+  - type: textarea
+    id: owner
+    attributes:
+      label: Owner and boundary
+      description: The owning component (compositor, servo-shell, app-shell, appd, runtime, package tooling, portal, deployment) and any public contract touched (wapp.toml, WIT, shell protocol, IPC types).
+    validations:
+      required: true
+  - type: textarea
+    id: impact
+    attributes:
+      label: Why it matters now
+      description: The concrete present impact. A hypothetical future need or a stylistic preference is not enough.
+    validations:
+      required: true
+  - type: textarea
+    id: acceptance
+    attributes:
+      label: Acceptance criterion
+      description: One independently checkable condition that resolves this issue. Keep unrelated work out of scope.
+    validations:
+      required: true
+  - type: textarea
+    id: proof
+    attributes:
+      label: Expected proof
+      description: The test, component or integration fixture, pixel check or measurement that fails today and will pass afterwards, and the environment it needs. Compilation and mocks do not prove rendering, input, isolation or persistence.
+    validations:
+      required: true
+  - type: textarea
+    id: scope
+    attributes:
+      label: Scope and related work
+      description: Related issues, pull requests or blueprint findings, and explicit non-goals.

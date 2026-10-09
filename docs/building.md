@@ -2,7 +2,7 @@
 
 ## Prerequisites
 
-Linux (x86_64 or aarch64). Building on Windows is supported for workspace validation only; runtime components require Linux kernel interfaces.
+Linux (x86_64 or aarch64). WEFT OS is built and validated on Linux only; runtime components require Linux kernel interfaces.
 
 System packages (openSUSE):
 
@@ -94,7 +94,7 @@ cargo build --release
 cargo build -p weft-runtime --features wasmtime-runtime,net-fetch
 ```
 
-Without `--features wasmtime-runtime`, the runtime prints READY and exits (stub mode, used in CI on platforms without Linux system dependencies).
+Without `--features wasmtime-runtime`, the runtime compiles for type, lint and unit checks (the portable CI configuration) but exits with an error when asked to run a component; it never reports readiness.
 
 ## Signing packages
 
@@ -122,8 +122,9 @@ See `infra/nixos/weft-packages.nix` for the package derivations. Its `outputHash
 
 ## CI
 
-Three jobs run on every push to `main` and on pull requests:
+Four jobs run on every push to `main` and on pull requests:
 
-- `cross-platform` — fmt, clippy, tests on Ubuntu and Windows (excludes Wayland crates)
+- `portable` — fmt, clippy, tests for the crates that need no Linux system libraries (excludes Wayland crates)
 - `linux-only` — clippy and tests for `weft-compositor`, `weft-servo-shell`, `weft-app-shell`
 - `servo-embed-linux` — `cargo check --features servo-embed` for servo-shell and app-shell
+- `contributor-toolkit` — `python .agents/scripts/verify.py toolkit`
