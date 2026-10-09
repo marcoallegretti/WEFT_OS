@@ -122,8 +122,9 @@ See `infra/nixos/weft-packages.nix` for the package derivations. Its `outputHash
 
 ## CI
 
-Three jobs run on every push to `main` and on pull requests:
+Four jobs run on every push to `main` and on pull requests:
 
 - `portable` — fmt, clippy, tests for the crates that need no Linux system libraries (excludes Wayland crates)
 - `linux-only` — clippy and tests for `weft-compositor`, `weft-servo-shell`, `weft-app-shell`
 - `servo-embed-linux` — `cargo check --features servo-embed` for servo-shell and app-shell
+- `contributor-toolkit` — `python .agents/scripts/verify.py toolkit`

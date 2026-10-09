@@ -105,3 +105,16 @@ jobs:
           cargo check
           -p weft-app-shell
           --features servo-embed
+
+  # Contributor contract, toolkit documents and verification runner.
+  contributor-toolkit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: install toolkit check dependencies
+        run: python -m pip install -r .agents/scripts/requirements.txt
+      - name: check contributor toolkit
+        run: python .agents/scripts/verify.py toolkit

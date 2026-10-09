@@ -1,4 +1,5 @@
 /target/
+__pycache__/
 /.windsurf/
 /docu_dev/
 
@@ -6,3 +7,4 @@
 /infra/vm/*.qcow2
 
 Thumbs.db
+
