@@ -86,7 +86,11 @@ rustup target add wasm32-wasip2
 cd examples/org.weft.demo.counter
 cargo build --release
 # output: target/wasm32-wasip2/release/app.wasm
+cp target/wasm32-wasip2/release/app.wasm app.wasm
+rm -rf target
 ```
+
+The signature covers every file in the package directory, so remove the crate's `target` directory before signing it again (see *Signing packages*). The demo keys in `examples/keys` are test fixtures, not a signing authority.
 
 ## weft-runtime with Wasmtime
 

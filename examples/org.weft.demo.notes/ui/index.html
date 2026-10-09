@@ -103,58 +103,84 @@
 
 <script>
 (function () {
+  // The component stores the text exactly as typed. Messages are JSON; each
+  // save names the revision it was edited from and is acknowledged by its
+  // sequence number, so a reply never replaces text typed after it was sent.
   var editor = document.getElementById('editor');
   var statusEl = document.getElementById('status');
   var charEl = document.getElementById('charcount');
+  var saveButton = document.getElementById('save');
   var saved = '';
+  var rev = null;
+  var seq = 0;
+  var pending = null;
 
   function setStatus(msg) { statusEl.textContent = msg; }
+  function countChars() { charEl.textContent = editor.value.length + ' chars'; }
+  function send(message) { window.weftIpc.send(JSON.stringify(message)); }
 
-  editor.addEventListener('input', function () {
-    charEl.textContent = editor.value.length + ' chars';
-  });
+  editor.addEventListener('input', countChars);
 
-  document.getElementById('save').addEventListener('click', function () {
-    if (!window.weftIpc) return;
-    var text = editor.value.replace(/\n/g, '\\n');
-    window.weftIpc.send('save:' + text);
+  saveButton.addEventListener('click', function () {
+    if (!window.weftIpc || rev === null || pending) return;
+    seq += 1;
+    pending = { seq: seq, text: editor.value };
+    send({ op: 'save', seq: seq, base: rev, text: pending.text });
+    saveButton.disabled = true;
     setStatus('saving…');
   });
 
+  // Discard reloads the stored notes, replacing unsaved edits.
   document.getElementById('discard').addEventListener('click', function () {
+    if (!window.weftIpc || pending) return;
     editor.value = saved;
-    charEl.textContent = saved.length + ' chars';
-    setStatus('discarded');
-    setTimeout(function () { setStatus(''); }, 1500);
+    countChars();
+    rev = null;
+    send({ op: 'load' });
+    setStatus('reloading…');
   });
 
   document.addEventListener('keydown', function (e) {
     if ((e.ctrlKey || e.metaKey) && e.key === 's') {
       e.preventDefault();
-      document.getElementById('save').click();
+      saveButton.click();
     }
   });
 
+  function onMessage(raw) {
+    var msg;
+    try { msg = JSON.parse(raw); } catch (_) { return; }
+    if (msg.op === 'loaded') {
+      // Edits made while the load was in flight are kept.
+      if (editor.value === saved) {
+        editor.value = msg.text;
+        countChars();
+      }
+      saved = msg.text;
+      rev = msg.rev;
+      setStatus('');
+    } else if (msg.op === 'saved' && pending && msg.seq === pending.seq) {
+      saved = pending.text;
+      rev = msg.rev;
+      pending = null;
+      saveButton.disabled = false;
+      setStatus('saved');
+      setTimeout(function () { if (!pending) setStatus(''); }, 1500);
+    } else if (msg.op === 'error') {
+      if (pending && msg.seq === pending.seq) {
+        pending = null;
+        saveButton.disabled = false;
+      }
+      setStatus(msg.conflict
+        ? 'not saved: changed in another window. Copy your text, then Discard to reload.'
+        : 'error: ' + msg.message);
+    }
+  }
+
   function setupIpc() {
     if (!window.weftIpc) { setTimeout(setupIpc, 50); return; }
-    window.weftIpc.onmessage = function (raw) {
-      try {
-        var msg = typeof raw === 'string' ? JSON.parse(raw) : raw;
-        if (typeof msg.error === 'string') {
-          setStatus('error: ' + msg.error);
-          return;
-        }
-        if (typeof msg.text === 'string') {
-          var text = msg.text.replace(/\\n/g, '\n');
-          editor.value = text;
-          saved = text;
-          charEl.textContent = text.length + ' chars';
-          setStatus('');
-        }
-      } catch (_) {}
-    };
-    setStatus('');
-    window.weftIpc.send('load');
+    window.weftIpc.onmessage = onMessage;
+    send({ op: 'load' });
   }
 
   setupIpc();
