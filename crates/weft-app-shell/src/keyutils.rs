@@ -1,5 +1,3 @@
-#![cfg(feature = "servo-embed")]
-
 use servo::{Code, Key, KeyState, KeyboardEvent, Location, Modifiers};
 use winit::event::ElementState;
 use winit::keyboard::{Key as WinitKey, KeyLocation, ModifiersState, NamedKey, PhysicalKey};
@@ -14,10 +12,11 @@ pub fn keyboard_event_from_winit(
     };
 
     let key = match &event.logical_key {
+        WinitKey::Named(NamedKey::Space) => Key::Character(" ".to_string()),
         WinitKey::Named(n) => Key::Named(named_key(*n)),
-        WinitKey::Character(c) => Key::Character(c.to_string().into()),
-        WinitKey::Unidentified(_) => Key::Unidentified,
-        WinitKey::Dead(c) => Key::Dead(*c),
+        WinitKey::Character(c) => Key::Character(c.to_string()),
+        WinitKey::Unidentified(_) => Key::Named(servo::NamedKey::Unidentified),
+        WinitKey::Dead(_) => Key::Named(servo::NamedKey::Dead),
     };
 
     let code = match event.physical_key {
@@ -46,15 +45,7 @@ pub fn keyboard_event_from_winit(
         mods |= Modifiers::META;
     }
 
-    KeyboardEvent {
-        state,
-        key,
-        code,
-        location,
-        modifiers: mods,
-        repeat: event.repeat,
-        is_composing: false,
-    }
+    KeyboardEvent::new_without_event(state, key, code, location, mods, event.repeat, false)
 }
 
 fn named_key(n: NamedKey) -> servo::NamedKey {
@@ -74,7 +65,6 @@ fn named_key(n: NamedKey) -> servo::NamedKey {
         NamedKey::SymbolLock => S::SymbolLock,
         NamedKey::Enter => S::Enter,
         NamedKey::Tab => S::Tab,
-        NamedKey::Space => S::Space,
         NamedKey::ArrowDown => S::ArrowDown,
         NamedKey::ArrowLeft => S::ArrowLeft,
         NamedKey::ArrowRight => S::ArrowRight,

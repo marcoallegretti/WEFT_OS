@@ -57,10 +57,6 @@ fn embed_app(app_id: &str, session_id: u64, ws_port: u16) -> anyhow::Result<()> 
     #[cfg(not(feature = "servo-embed"))]
     {
         let _ = (app_id, session_id, ws_port);
-        println!("READY");
-        use std::io::Write;
-        let _ = std::io::stdout().flush();
-        std::thread::park();
-        Ok(())
+        anyhow::bail!("weft-app-shell was built without the servo-embed feature and cannot render")
     }
 }

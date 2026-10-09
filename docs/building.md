@@ -34,7 +34,7 @@ cargo build -p weft-servo-shell
 cargo build -p weft-app-shell
 ```
 
-Without `--features servo-embed`, the servo-shell and app-shell stubs compile and print READY without running an actual WebView. This is the default and the CI baseline.
+Without `--features servo-embed`, the servo-shell and app-shell binaries compile for type and lint checks but exit with an error at startup; they never report readiness. This is the default and the CI baseline.
 
 ## Servo embedding (optional, slow)
 
@@ -43,7 +43,29 @@ cargo build -p weft-servo-shell --features servo-embed
 cargo build -p weft-app-shell --features servo-embed
 ```
 
-This fetches and compiles the Servo fork (`github.com/marcoallegretti/servo`, branch `servo-weft`). Expect 30–60 minutes on a clean build. Servo's dependencies include SpiderMonkey (C++), which requires `clang` and `python3`.
+This fetches and compiles the Servo and Stylo forks at the revisions recorded in `Cargo.lock` (see `crates/weft-servo-shell/SERVO_PIN.md`). Expect 30–60 minutes on a clean build. Servo's dependencies include SpiderMonkey (C++), which requires `clang` and `python3`.
+
+## Frame check
+
+`tests/frame/check_frame.py` runs `weft-compositor` nested on Xvfb with the
+winit backend, starts a Servo host showing `tests/frame/reference.html`, and
+checks the presented pixels. It needs `Xvfb`, `xwd`, ImageMagick's `convert`
+and a Mesa OpenGL driver (llvmpipe is sufficient).
+
+```sh
+cargo build -p weft-compositor
+cargo build -p weft-servo-shell -p weft-app-shell \
+  --features weft-servo-shell/servo-embed,weft-app-shell/servo-embed
+python3 tests/frame/check_frame.py --host system
+python3 tests/frame/check_frame.py --host app
+python3 tests/frame/check_frame.py --host app --slow-style 3
+```
+
+`--host app` also requires the page on screen within two seconds of
+`weft-app-shell` printing `READY`; `--slow-style` delays a stylesheet that
+reveals the page so premature readiness becomes visible.
+
+Logs and the last capture are written to `target/frame-check`.
 
 ## Demo apps (wasm32-wasip2)
 
@@ -86,7 +108,7 @@ Run with QEMU:
 bash infra/vm/run.sh
 ```
 
-See `infra/nixos/weft-packages.nix` for the package derivations. The `outputHashes` entry for the Servo git dependency must be filled in before the `servo-embed` packages will build under Nix.
+See `infra/nixos/weft-packages.nix` for the package derivations. Its `outputHashes` hold one hash per git source in `Cargo.lock` (the Servo and Stylo forks); every package vendors them, so they must match the pinned revisions for any Nix package to build. The Nix shell packages do not yet enable `servo-embed`.
 
 ## CI
 
