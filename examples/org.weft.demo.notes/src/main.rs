@@ -11,8 +11,13 @@ use serde_json::{Value, json};
 use weft::app::{ipc, notify};
 
 const NOTES_PATH: &str = "/data/notes.txt";
-const STAGING_PATH: &str = "/data/.notes.txt.saving";
-/// Largest note accepted, in bytes; app messages are limited to 64 KiB.
+/// Held while a save checks the revision and replaces the file, so saves
+/// from two Notes windows cannot interleave.
+const LOCK_PATH: &str = "/data/.notes.lock";
+/// A lock older than this was left by a session that ended mid-save.
+const STALE_LOCK: std::time::Duration = std::time::Duration::from_secs(10);
+/// Largest note accepted, in bytes; the page also keeps each request under
+/// the 64 KiB app message limit.
 const MAX_NOTES: usize = 60 * 1024;
 
 /// A revision names the exact stored bytes. A save must name the revision
@@ -45,6 +50,64 @@ fn load() -> Value {
     }
 }
 
+/// Exclusive access to the notes file for one save.
+struct SaveLock;
+
+impl SaveLock {
+    fn acquire() -> Result<Self, String> {
+        for _ in 0..50 {
+            match std::fs::OpenOptions::new().write(true).create_new(true).open(LOCK_PATH) {
+                Ok(_) => return Ok(SaveLock),
+                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+                    let stale = std::fs::metadata(LOCK_PATH)
+                        .and_then(|m| m.modified())
+                        .ok()
+                        .and_then(|t| t.elapsed().ok())
+                        .is_some_and(|age| age > STALE_LOCK);
+                    if stale {
+                        let _ = std::fs::remove_file(LOCK_PATH);
+                    } else {
+                        std::thread::sleep(std::time::Duration::from_millis(20));
+                    }
+                }
+                Err(e) => return Err(format!("cannot lock notes: {e}")),
+            }
+        }
+        Err("notes are being saved by another window; try again".to_owned())
+    }
+}
+
+impl Drop for SaveLock {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(LOCK_PATH);
+    }
+}
+
+/// Writes `text` to a staging file unique to this save, syncs it and renames
+/// it over the notes, so the stored notes are always either the previous or
+/// the new text in full.
+fn replace_notes(text: &str) -> std::io::Result<()> {
+    use std::io::Write;
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or_default();
+    let staging = format!("/data/.notes.txt.{nanos}.saving");
+    let written = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&staging)
+        .and_then(|mut file| {
+            file.write_all(text.as_bytes())?;
+            file.sync_all()
+        })
+        .and_then(|()| std::fs::rename(&staging, NOTES_PATH));
+    if written.is_err() {
+        let _ = std::fs::remove_file(&staging);
+    }
+    written
+}
+
 fn save(seq: &Value, base: &str, text: &str) -> Value {
     let error = |conflict: bool, message: String| {
         json!({ "op": "error", "seq": seq, "conflict": conflict, "message": message })
@@ -52,6 +115,10 @@ fn save(seq: &Value, base: &str, text: &str) -> Value {
     if text.len() > MAX_NOTES {
         return error(false, format!("notes are limited to {MAX_NOTES} bytes"));
     }
+    let _lock = match SaveLock::acquire() {
+        Ok(lock) => lock,
+        Err(message) => return error(false, message),
+    };
     let current = match stored() {
         Ok(bytes) => revision(&bytes),
         Err(message) => return error(false, message),
@@ -59,29 +126,27 @@ fn save(seq: &Value, base: &str, text: &str) -> Value {
     if current != base {
         return error(true, "the notes were changed elsewhere".to_owned());
     }
-    // Written beside the file and renamed over it, so the stored notes are
-    // always either the previous or the new text in full.
-    let written = std::fs::write(STAGING_PATH, text.as_bytes())
-        .and_then(|()| std::fs::rename(STAGING_PATH, NOTES_PATH));
-    match written {
+    match replace_notes(text) {
         Ok(()) => json!({ "op": "saved", "seq": seq, "rev": revision(text.as_bytes()) }),
-        Err(e) => {
-            let _ = std::fs::remove_file(STAGING_PATH);
-            error(false, format!("cannot save notes: {e}"))
-        }
+        Err(e) => error(false, format!("cannot save notes: {e}")),
     }
 }
 
-fn handle(raw: &str) -> Option<Value> {
-    let request: Value = serde_json::from_str(raw).ok()?;
-    match request.get("op")?.as_str()? {
-        "load" => Some(load()),
-        "save" => {
-            let base = request.get("base")?.as_str()?;
-            let text = request.get("text")?.as_str()?;
-            Some(save(request.get("seq").unwrap_or(&Value::Null), base, text))
-        }
-        _ => None,
+/// Every request gets a reply, so the page never waits on one that was not
+/// understood.
+fn handle(raw: &str) -> Value {
+    let Ok(request) = serde_json::from_str::<Value>(raw) else {
+        return json!({ "op": "error", "message": "request is not valid JSON" });
+    };
+    let seq = request.get("seq").cloned().unwrap_or(Value::Null);
+    let field = |name: &str| request.get(name).and_then(Value::as_str);
+    match field("op") {
+        Some("load") => load(),
+        Some("save") => match (field("base"), field("text")) {
+            (Some(base), Some(text)) => save(&seq, base, text),
+            _ => json!({ "op": "error", "seq": seq, "message": "malformed save request" }),
+        },
+        _ => json!({ "op": "error", "seq": seq, "message": "unknown request" }),
     }
 }
 
@@ -90,9 +155,7 @@ fn main() {
 
     loop {
         if let Some(raw) = ipc::recv() {
-            if let Some(reply) = handle(&raw) {
-                let _ = ipc::send(&reply.to_string());
-            }
+            let _ = ipc::send(&handle(&raw).to_string());
         } else {
             std::thread::sleep(std::time::Duration::from_millis(10));
         }

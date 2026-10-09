@@ -8,16 +8,22 @@ sequence, quotes, a tab and non-ASCII characters, launches
 1. Typing at the end and pressing Ctrl+S must store the seeded text plus
    the typed text, byte for byte; a load or save that rewrote `\\n`, quotes
    or tabs fails.
-2. Text typed right after Ctrl+S, while the save is in flight, must still be
-   in the editor afterwards: a second Ctrl+S stores it too.
+2. Text typed while a save is in flight (the runtime is paused with SIGSTOP
+   between Ctrl+S and the reply) must still be in the editor afterwards: a
+   second Ctrl+S stores it too.
 3. After the file is changed on disk (as by another Notes window), a save
    must be refused and the other window's text kept.
+4. Discard reloads the stored text. Keys typed while that reload is in
+   flight (runtime paused again) must be ignored, so a following save stores
+   the reloaded text plus only what was typed afterwards.
 
 Requires Xvfb, xwd, ImageMagick's convert and xdotool.
 """
 
 import argparse
+import os
 import shutil
+import signal
 import subprocess
 import sys
 import tempfile
@@ -30,6 +36,19 @@ from session import ROOT, Desktop, SessionError, missing_tools  # noqa: E402
 
 APP_ID = "org.weft.demo.notes"
 SEED = 'path C:\\new\\table "quoted"\tcaf\u00e9 \u2603'
+
+
+# The Discard button in the 800x600 Notes window at the desktop's origin.
+DISCARD = ("663", "68")
+
+
+def runtime_pid():
+    """The process ID of the Notes session's weft-runtime."""
+    found = subprocess.run(["pgrep", "-n", "-f", f"weft-runtime {APP_ID}"],
+                           capture_output=True, text=True)
+    if found.returncode != 0:
+        raise AssertionError("no weft-runtime process for Notes")
+    return int(found.stdout.split()[0])
 
 
 def wait_for_file(path, expected, timeout=15):
@@ -76,10 +95,17 @@ def run(args, desktop, home, xdotool):
     act("click", "1")
     act("key", "ctrl+End")
 
+    runtime = runtime_pid()
+
     act("type", "--delay", "40", ' +\\t "x"')
-    act("key", "ctrl+s")
     expected = SEED + ' +\\t "x"'
-    act("type", "--delay", "40", " more")
+    os.kill(runtime, signal.SIGSTOP)
+    try:
+        act("key", "ctrl+s")
+        act("type", "--delay", "40", " more")
+        time.sleep(2)
+    finally:
+        os.kill(runtime, signal.SIGCONT)
     wait_for_file(notes, expected)
     time.sleep(1)
     act("key", "ctrl+s")
@@ -93,8 +119,26 @@ def run(args, desktop, home, xdotool):
     time.sleep(3)
     if notes.read_text(encoding="utf-8") != other:
         raise AssertionError("a save replaced notes changed elsewhere")
-    if list(notes.parent.glob(".*saving")):
-        raise AssertionError("a staging file was left behind")
+
+    os.kill(runtime, signal.SIGSTOP)
+    try:
+        act("mousemove", "--sync", *DISCARD)
+        act("click", "1")
+        act("mousemove", "--sync", "100", "300")
+        act("click", "1")
+        act("type", "--delay", "40", "zz")
+        # Let the page handle the keys while the reload is still unanswered.
+        time.sleep(2)
+    finally:
+        os.kill(runtime, signal.SIGCONT)
+    time.sleep(2)
+    act("key", "ctrl+End")
+    act("type", "--delay", "40", "!")
+    act("key", "ctrl+s")
+    wait_for_file(notes, other + "!")
+    leftovers = [p.name for p in notes.parent.iterdir() if p.name != "notes.txt"]
+    if leftovers:
+        raise AssertionError(f"files left beside the notes: {leftovers}")
 
 
 def main(argv=None):

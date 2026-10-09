@@ -106,6 +106,10 @@
   // The component stores the text exactly as typed. Messages are JSON; each
   // save names the revision it was edited from and is acknowledged by its
   // sequence number, so a reply never replaces text typed after it was sent.
+  // The editor is read-only until it holds the stored text, so nothing typed
+  // before a load completes can be saved over notes the user never saw.
+  var MAX_MESSAGE = 65536; // weft-appd's limit for one app message, in bytes
+  var REPLY_TIMEOUT = 10000;
   var editor = document.getElementById('editor');
   var statusEl = document.getElementById('status');
   var charEl = document.getElementById('charcount');
@@ -114,19 +118,46 @@
   var rev = null;
   var seq = 0;
   var pending = null;
+  var encoder = new TextEncoder();
 
   function setStatus(msg) { statusEl.textContent = msg; }
   function countChars() { charEl.textContent = editor.value.length + ' chars'; }
   function send(message) { window.weftIpc.send(JSON.stringify(message)); }
+  function setLoaded(loaded) {
+    editor.readOnly = !loaded;
+    saveButton.disabled = !loaded || pending !== null;
+  }
 
   editor.addEventListener('input', countChars);
 
+  function finishSave() {
+    if (pending) clearTimeout(pending.timer);
+    pending = null;
+    setLoaded(rev !== null);
+  }
+
   saveButton.addEventListener('click', function () {
-    if (!window.weftIpc || rev === null || pending) return;
+    if (!window.weftIpc || pending) return;
+    if (rev === null) {
+      setStatus('the notes have not loaded; use Discard to reload them');
+      return;
+    }
+    var request = { op: 'save', seq: seq + 1, base: rev, text: editor.value };
+    if (encoder.encode(JSON.stringify(request)).length > MAX_MESSAGE) {
+      setStatus('not saved: the notes are too long');
+      return;
+    }
     seq += 1;
-    pending = { seq: seq, text: editor.value };
-    send({ op: 'save', seq: seq, base: rev, text: pending.text });
-    saveButton.disabled = true;
+    pending = {
+      seq: seq,
+      text: request.text,
+      timer: setTimeout(function () {
+        finishSave();
+        setStatus('not saved: no reply; try again');
+      }, REPLY_TIMEOUT),
+    };
+    setLoaded(true);
+    send(request);
     setStatus('saving…');
   });
 
@@ -136,12 +167,13 @@
     editor.value = saved;
     countChars();
     rev = null;
+    setLoaded(false);
     send({ op: 'load' });
     setStatus('reloading…');
   });
 
   document.addEventListener('keydown', function (e) {
-    if ((e.ctrlKey || e.metaKey) && e.key === 's') {
+    if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 's') {
       e.preventDefault();
       saveButton.click();
     }
@@ -151,26 +183,19 @@
     var msg;
     try { msg = JSON.parse(raw); } catch (_) { return; }
     if (msg.op === 'loaded') {
-      // Edits made while the load was in flight are kept.
-      if (editor.value === saved) {
-        editor.value = msg.text;
-        countChars();
-      }
+      editor.value = msg.text;
+      countChars();
       saved = msg.text;
       rev = msg.rev;
+      setLoaded(true);
       setStatus('');
     } else if (msg.op === 'saved' && pending && msg.seq === pending.seq) {
       saved = pending.text;
       rev = msg.rev;
-      pending = null;
-      saveButton.disabled = false;
-      setStatus('saved');
-      setTimeout(function () { if (!pending) setStatus(''); }, 1500);
+      finishSave();
+      setStatus(editor.value === saved ? 'saved' : 'saved; newer changes are not saved yet');
     } else if (msg.op === 'error') {
-      if (pending && msg.seq === pending.seq) {
-        pending = null;
-        saveButton.disabled = false;
-      }
+      if (pending && msg.seq === pending.seq) finishSave();
       setStatus(msg.conflict
         ? 'not saved: changed in another window. Copy your text, then Discard to reload.'
         : 'error: ' + msg.message);
@@ -183,6 +208,7 @@
     send({ op: 'load' });
   }
 
+  setLoaded(false);
   setupIpc();
 })();
 </script>

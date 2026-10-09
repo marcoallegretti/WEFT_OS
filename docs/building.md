@@ -77,9 +77,19 @@ page reacts to clicks on either side of a boundary and to the `a` and
 python3 tests/frame/check_input.py
 ```
 
+The application checks run `weft-appd` with `weft-runtime` (built with
+`wasmtime-runtime`) and `weft-app-shell` (built with `servo-embed`) on the
+same nested desktop and drive the demo apps with real keyboard input:
+
+```sh
+python3 tests/frame/check_counter.py   # Counter round trip through the session bridge
+python3 tests/frame/check_notes.py     # Notes stores exactly what is typed, refuses stale saves
+python3 tests/frame/check_app_data.py  # Notes data from the earlier layout is moved and kept
+```
+
 ## Demo apps (wasm32-wasip2)
 
-Each demo is a standalone crate in `examples/`. Pre-built `app.wasm` binaries are committed. To rebuild:
+Each demo is a standalone crate in `examples/`. Pre-built `app.wasm` binaries are committed; they are reproducible with the toolchain pinned in `rust-toolchain.toml`. To rebuild:
 
 ```sh
 rustup target add wasm32-wasip2
@@ -90,7 +100,11 @@ cp target/wasm32-wasip2/release/app.wasm app.wasm
 rm -rf target
 ```
 
-The signature covers every file in the package directory, so remove the crate's `target` directory before signing it again (see *Signing packages*). The demo keys in `examples/keys` are test fixtures, not a signing authority.
+The signature covers every file in the package directory, so remove the crate's `target` directory before signing it again. The demo packages are signed with the test key in `examples/keys`, which is a fixture, not a signing authority:
+
+```sh
+weft-pack sign examples/org.weft.demo.notes --key examples/keys/weft-sign.key
+```
 
 ## weft-runtime with Wasmtime
 
