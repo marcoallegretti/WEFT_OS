@@ -716,18 +716,35 @@ mod tests {
     }
 
     /// Records `id` as development content in a data home private to this
-    /// test process, which XDG_DATA_HOME then points at. Callers hold
-    /// env_lock.
+    /// test process, which XDG_DATA_HOME then points at, with an empty trust
+    /// store so the host's keys never affect a test. Data homes left by
+    /// earlier test processes are removed. Callers hold env_lock.
     fn record_development(id: &str) {
-        let data_home =
-            std::env::temp_dir().join(format!("weft-appd-tests-data-{}", std::process::id()));
+        let name = format!("weft-appd-tests-data-{}", std::process::id());
+        if let Ok(entries) = std::fs::read_dir(std::env::temp_dir()) {
+            for entry in entries.flatten() {
+                let stale = entry
+                    .file_name()
+                    .to_str()
+                    .is_some_and(|n| n.starts_with("weft-appd-tests-data-") && n != name);
+                if stale {
+                    let _ = std::fs::remove_dir_all(entry.path());
+                }
+            }
+        }
+        let data_home = std::env::temp_dir().join(name);
+        let keys = data_home.join("trusted-keys");
+        std::fs::create_dir_all(&keys).unwrap();
         let record = weft_ipc_types::trust::owner_record_path(&data_home, id);
         if !record.exists() {
             weft_ipc_types::trust::write_owner(&record, weft_ipc_types::trust::Owner::Development)
                 .unwrap();
         }
         // SAFETY: callers hold env_lock, which serialises environment changes.
-        unsafe { std::env::set_var("XDG_DATA_HOME", &data_home) };
+        unsafe {
+            std::env::set_var("XDG_DATA_HOME", &data_home);
+            std::env::set_var("WEFT_TRUSTED_KEYS", &keys);
+        }
     }
 
     fn make_registry() -> Registry {

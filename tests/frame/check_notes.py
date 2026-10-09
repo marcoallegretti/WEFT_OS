@@ -69,6 +69,12 @@ def run(args, desktop, home, xdotool):
     notes = data_home / "weft/app-data" / APP_ID / "notes.txt"
     notes.parent.mkdir(parents=True)
     notes.write_text(SEED, encoding="utf-8")
+    # The seeded data belongs to the demo publisher, as installing the signed
+    # package with weft-pack would have recorded.
+    owner = data_home / "weft/owners" / APP_ID
+    owner.parent.mkdir(parents=True)
+    key = (ROOT / "examples/keys/weft-sign.pub").read_text().strip()
+    owner.write_text(f"verified {key}\n")
 
     t = Path(args.target)
     desktop.launch_client("appd", [t / "weft-appd"], {

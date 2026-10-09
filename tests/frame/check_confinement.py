@@ -146,7 +146,7 @@ def make_package(store, http_port, ws_port, other_dir):
     # planted directly and recorded as development content, which runs
     # unverified: the renderer's own confinement is what this check probes.
     record = store / "home/share/weft/owners" / APP_ID
-    record.parent.mkdir(parents=True)
+    record.parent.mkdir(parents=True, exist_ok=True)
     record.write_text("development\n")
 
 

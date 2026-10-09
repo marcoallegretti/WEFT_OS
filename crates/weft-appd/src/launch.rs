@@ -7,15 +7,17 @@
 //! Before anything starts, the package must still be what its owner
 //! installed: a package recorded as a publisher's must carry that
 //! publisher's valid signature over its current content, and a package with
-//! no record must be signed by a trusted key. Development content, recorded
-//! as such by `weft-pack install --dev`, runs unverified.
+//! no record must be signed by a trusted key, which is then recorded as its
+//! owner. Development content, recorded as such by `weft-pack install
+//! --dev`, runs unverified.
 
 use std::path::{Path, PathBuf};
 
 use weft_ipc_types::manifest::{MANIFEST_FILE, Manifest, ManifestError, entry_path};
 use weft_ipc_types::package::{ImageFiles, is_valid_app_id};
 use weft_ipc_types::trust::{
-    Owner, TrustError, TrustStore, content_digest, owner_record_path, read_owner, read_signature,
+    Inventory, Owner, PublisherKey, TrustError, TrustStore, lock_owner, owner_record_path,
+    read_owner, read_signature, write_owner,
 };
 
 use crate::grants::Refusal;
@@ -94,9 +96,14 @@ fn from_root(app_id: &str, root: PathBuf, image: Option<Mount>) -> Result<Launch
             ),
         ));
     }
-    let manifest = Manifest::read(&root).map_err(|e| match e {
-        ManifestError::Io(..) => Refusal::new(500, e.to_string()),
-        ManifestError::Parse(..) => Refusal::new(403, e.to_string()),
+    // The manifest is read once; the same bytes are parsed and checked
+    // against the signed inventory, so the capabilities and entries a
+    // session gets are the ones the owner signed.
+    let manifest_path = root.join(MANIFEST_FILE);
+    let manifest_bytes = std::fs::read(&manifest_path)
+        .map_err(|e| Refusal::new(500, format!("cannot read {}: {e}", manifest_path.display())))?;
+    let manifest = Manifest::parse(&manifest_path, &manifest_bytes).map_err(|e| match e {
+        ManifestError::Io(..) | ManifestError::Parse(..) => Refusal::new(403, e.to_string()),
     })?;
     if manifest.package.id != app_id {
         return Err(Refusal::new(
@@ -108,7 +115,7 @@ fn from_root(app_id: &str, root: PathBuf, image: Option<Mount>) -> Result<Launch
             ),
         ));
     }
-    verify_owner(app_id, &root)?;
+    verify_owner(app_id, &root, &manifest_bytes)?;
     let entry = |field: &str, value: &str| {
         entry_path(&root, value).map_err(|e| Refusal::new(403, format!("{field}: {e}")))
     };
@@ -125,9 +132,16 @@ fn from_root(app_id: &str, root: PathBuf, image: Option<Mount>) -> Result<Launch
     })
 }
 
-/// Checks that the package at `root` is what its owner installed.
-fn verify_owner(app_id: &str, root: &Path) -> Result<(), Refusal> {
-    let refused = |e: TrustError| match e {
+/// Checks that the package at `root`, whose manifest was read as
+/// `manifest_bytes`, is what its owner installed. A trusted package with no
+/// owner record is recorded as its signer's on its first launch, so its app
+/// data stays with that publisher; existing app data with no recorded owner
+/// is not handed to whichever publisher launches first.
+fn verify_owner(app_id: &str, root: &Path, manifest_bytes: &[u8]) -> Result<(), Refusal> {
+    // Errors in the host's trust store or owner records are the host's, not
+    // the package's.
+    let host = |e: TrustError| Refusal::new(500, e.to_string());
+    let package = |e: TrustError| match e {
         TrustError::Io(..) => Refusal::new(500, e.to_string()),
         _ => Refusal::new(403, e.to_string()),
     };
@@ -137,43 +151,90 @@ fn verify_owner(app_id: &str, root: &Path) -> Result<(), Refusal> {
             "cannot locate the data home holding package owner records",
         )
     })?;
-    let owner = read_owner(&owner_record_path(&data_home, app_id)).map_err(refused)?;
-    let trusted = TrustStore::load(&TrustStore::directories()).map_err(refused)?;
-    match owner {
-        Some(Owner::Development) => Ok(()),
-        Some(Owner::Verified(key)) => {
-            // The key must still be trusted, and its signature must cover
-            // the package's current content.
-            let signature = read_signature(root).map_err(refused)?;
-            let digest = content_digest(root).map_err(refused)?;
-            let valid = trusted.keys().contains(&key)
-                && signature.is_some_and(|sig| key.signed(&digest, &sig));
-            if valid {
-                Ok(())
-            } else {
-                Err(Refusal::new(
-                    403,
-                    format!(
-                        "{} is not signed by its owner, publisher {}, or that key is no longer \
-                         trusted; the package was changed or its key was withdrawn",
-                        root.display(),
-                        key.to_hex()
-                    ),
-                ))
-            }
-        }
-        None => match trusted.signer(root).map_err(refused)? {
-            Some(_) => Ok(()),
-            None => Err(Refusal::new(
+    let record = owner_record_path(&data_home, app_id);
+    let owner = read_owner(&record).map_err(host)?;
+    if owner == Some(Owner::Development) {
+        return Ok(());
+    }
+    let trusted = TrustStore::load(&TrustStore::directories()).map_err(host)?;
+    let inventory = Inventory::read(root).map_err(package)?;
+    if !inventory.holds(MANIFEST_FILE, manifest_bytes) {
+        return Err(Refusal::new(
+            403,
+            format!("{} changed while it was checked", root.display()),
+        ));
+    }
+    let digest = inventory.digest();
+    let signature = read_signature(root).map_err(package)?;
+    let signer = signature.and_then(|sig| trusted.signer_of(&digest, &sig));
+    match (owner, signer) {
+        (Some(Owner::Verified(key)), Some(signer)) if key == signer => Ok(()),
+        (Some(Owner::Verified(key)), _) => Err(Refusal::new(
+            403,
+            format!(
+                "{} is not signed by its owner, publisher {}, or that key is no longer \
+                 trusted; the package was changed or its key was withdrawn",
+                root.display(),
+                key.to_hex()
+            ),
+        )),
+        (_, None) => Err(Refusal::new(
+            403,
+            format!(
+                "{} has no recorded owner and is not signed by a trusted key; install it \
+                 with weft-pack",
+                root.display()
+            ),
+        )),
+        (_, Some(signer)) => record_first_owner(app_id, &data_home, &record, signer),
+    }
+}
+
+/// Records `signer` as the owner of `app_id` on the first launch of a trusted
+/// package that has no owner record and no app data yet.
+fn record_first_owner(
+    app_id: &str,
+    data_home: &Path,
+    record: &Path,
+    signer: PublisherKey,
+) -> Result<(), Refusal> {
+    let host = |e: TrustError| Refusal::new(500, e.to_string());
+    let _lock = lock_owner(data_home, app_id).map_err(host)?;
+    match read_owner(record).map_err(host)? {
+        Some(Owner::Verified(key)) if key == signer => return Ok(()),
+        Some(existing) => {
+            return Err(Refusal::new(
                 403,
                 format!(
-                    "{} has no recorded owner and is not signed by a trusted key; install it \
-                     with weft-pack",
-                    root.display()
+                    "{app_id} belongs to {existing}, not publisher {}",
+                    signer.to_hex()
                 ),
-            )),
-        },
+            ));
+        }
+        None => {}
     }
+    let data = weft_ipc_types::package::app_data_dir(data_home, app_id);
+    match std::fs::symlink_metadata(&data) {
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => {
+            return Err(Refusal::new(
+                500,
+                format!("cannot inspect {}: {e}", data.display()),
+            ));
+        }
+        Ok(_) => {
+            return Err(Refusal::new(
+                403,
+                format!(
+                    "{} holds app data for {app_id} with no recorded owner; it is not given to \
+                     publisher {} without weft-pack install --claim-data",
+                    data.display(),
+                    signer.to_hex()
+                ),
+            ));
+        }
+    }
+    write_owner(record, Owner::Verified(signer)).map_err(host)
 }
 
 impl LaunchPackage {
@@ -369,12 +430,47 @@ mod tests {
         // Recorded as the publisher's, and with no record but a trusted
         // signature.
         let store = demo_store("signed", true);
-        let unrecorded = resolve(DEMO).map(|p| p.root);
-        record(&store, DEMO, Owner::Verified(demo_key()));
-        let recorded = resolve(DEMO).map(|p| p.root);
+        let first = resolve(DEMO).map(|p| p.root);
+        let owner = read_owner(&owner_record_path(&store.join("share"), DEMO)).unwrap();
+        let again = resolve(DEMO).map(|p| p.root);
         finish(&store);
-        assert_eq!(unrecorded.ok(), Some(store.join(DEMO)));
-        assert_eq!(recorded.ok(), Some(store.join(DEMO)));
+        assert_eq!(first.ok(), Some(store.join(DEMO)));
+        assert_eq!(owner, Some(Owner::Verified(demo_key())));
+        assert_eq!(again.ok(), Some(store.join(DEMO)));
+    }
+
+    #[test]
+    fn unowned_app_data_is_not_given_to_the_first_publisher() {
+        let _env = crate::tests::env_lock().blocking_lock();
+        let store = demo_store("unowned_data", true);
+        let data = weft_ipc_types::package::app_data_dir(&store.join("share"), DEMO);
+        std::fs::create_dir_all(&data).unwrap();
+        let refused = refusal(resolve(DEMO));
+        let owner = read_owner(&owner_record_path(&store.join("share"), DEMO)).unwrap();
+        finish(&store);
+        assert_eq!(refused.code, 403, "{}", refused.message);
+        assert!(
+            refused.message.contains("--claim-data"),
+            "{}",
+            refused.message
+        );
+        assert_eq!(owner, None);
+    }
+
+    #[test]
+    fn a_damaged_trust_store_or_record_is_a_host_error() {
+        let _env = crate::tests::env_lock().blocking_lock();
+        let store = demo_store("damaged", true);
+        std::fs::write(store.join("keys/broken.pub"), "not a key").unwrap();
+        let bad_key = refusal(resolve(DEMO));
+        std::fs::remove_file(store.join("keys/broken.pub")).unwrap();
+        let record = owner_record_path(&store.join("share"), DEMO);
+        std::fs::write(&record, "nonsense\n").unwrap();
+        let bad_record = refusal(resolve(DEMO));
+        finish(&store);
+        for refused in [bad_key, bad_record] {
+            assert_eq!(refused.code, 500, "{}", refused.message);
+        }
     }
 
     #[test]
