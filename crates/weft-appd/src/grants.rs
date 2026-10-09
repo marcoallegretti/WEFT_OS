@@ -56,8 +56,11 @@ impl Refusal {
 
 /// Where the host resources behind filesystem capabilities live.
 pub(crate) struct HostDirs {
-    /// Root under which each app's private data directory is created.
-    pub app_data_root: PathBuf,
+    /// The user's data home (`$XDG_DATA_HOME`); app data lives under it in
+    /// `weft/app-data/<id>`, apart from installed packages.
+    pub data_home: PathBuf,
+    /// The home directory, under which earlier versions kept app data.
+    pub home: PathBuf,
     /// The user's documents directory, if the platform configures one.
     pub documents: Option<PathBuf>,
 }
@@ -73,9 +76,12 @@ impl HostDirs {
             .map(PathBuf::from)
             .filter(|dir| dir.is_absolute())
             .unwrap_or_else(|| home.join(".config"));
+        let data_home = weft_ipc_types::package::data_home()
+            .ok_or_else(|| Refusal::new(500, "no data home: HOME is not set"))?;
         Ok(Self {
-            app_data_root: home.join(".local/share/weft/apps"),
+            data_home,
             documents: documents_dir(&home, &config),
+            home,
         })
     }
 }
@@ -139,7 +145,7 @@ pub(crate) fn derive(
     for capability in capabilities {
         match (&capability, &host) {
             (Capability::AppData(access), Some(host)) => {
-                let dir = host.app_data_root.join(app_id).join("data");
+                let dir = weft_ipc_types::package::app_data_dir(&host.data_home, app_id);
                 grant_dir(&mut grants, dir, "/data", *access)?;
             }
             (Capability::Documents(access), Some(host)) => {
@@ -158,14 +164,58 @@ pub(crate) fn derive(
             }
         }
     }
-    for dir in &grants.dirs {
-        if dir.guest == "/data" {
-            std::fs::create_dir_all(&dir.host).map_err(|e| {
-                Refusal::new(500, format!("cannot create {}: {e}", dir.host.display()))
-            })?;
-        }
+    if let (Some(dir), Some(host)) = (grants.dirs.iter().find(|d| d.guest == "/data"), &host) {
+        prepare_app_data(app_id, &dir.host, host)?;
     }
     Ok(grants)
+}
+
+/// Creates the app's data directory, first moving data an earlier version
+/// kept inside the package store. A conflict between the two locations
+/// refuses the launch (409) and leaves both untouched.
+fn prepare_app_data(app_id: &str, dir: &Path, host: &HostDirs) -> Result<(), Refusal> {
+    use weft_ipc_types::package::{Migration, legacy_app_data_dir, migrate_app_data};
+    let legacy = legacy_app_data_dir(&host.home, app_id);
+    match migrate_app_data(&legacy, dir) {
+        Ok(Migration::Moved) => {
+            tracing::info!(%app_id, from = %legacy.display(), to = %dir.display(), "app data moved");
+        }
+        Ok(Migration::NotNeeded) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+            return Err(Refusal::new(409, e.to_string()));
+        }
+        Err(e) => {
+            return Err(Refusal::new(
+                500,
+                format!("cannot move app data from {}: {e}", legacy.display()),
+            ));
+        }
+    }
+    create_private_dir(dir)
+        .map_err(|e| Refusal::new(500, format!("cannot create {}: {e}", dir.display())))
+}
+
+/// Creates `dir` and missing parents, and makes the directory itself
+/// accessible only to the user, including when it already existed or was
+/// moved from the earlier layout.
+fn create_private_dir(dir: &Path) -> std::io::Result<()> {
+    if let Some(parent) = dir.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let mut builder = std::fs::DirBuilder::new();
+    #[cfg(unix)]
+    std::os::unix::fs::DirBuilderExt::mode(&mut builder, 0o700);
+    match builder.create(dir) {
+        Ok(()) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists && dir.is_dir() => {}
+        Err(e) => return Err(e),
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700))?;
+    }
+    Ok(())
 }
 
 /// Adds a directory grant; declaring both modes for one directory grants the
@@ -237,7 +287,8 @@ mod tests {
         let root = root.to_path_buf();
         move || {
             Ok(HostDirs {
-                app_data_root: root.join("apps"),
+                data_home: root.join("share"),
+                home: root.join("home"),
                 documents,
             })
         }
@@ -276,7 +327,7 @@ mod tests {
         .unwrap();
         assert_eq!(read.dirs[0].access, Access::Read);
         assert!(read.dirs[0].preopen_arg().ends_with("::/data::ro"));
-        assert!(root.join("apps/org.example.app/data").is_dir());
+        assert!(root.join("share/weft/app-data/org.example.app").is_dir());
 
         let both = derive(
             "org.example.app",
@@ -320,7 +371,7 @@ mod tests {
                 derive("org.example.app", &caps(declared), host(&root, None)).unwrap_err();
             assert_eq!(refusal.code, 403, "{declared:?}");
         }
-        assert!(!root.join("apps").exists());
+        assert!(!root.join("share").exists());
     }
 
     #[test]
@@ -377,5 +428,72 @@ mod tests {
         .unwrap();
         assert_eq!(grants.dirs[0].guest, "/xdg/documents");
         assert_eq!(grants.dirs[0].access, Access::ReadWrite);
+    }
+
+    #[test]
+    fn earlier_app_data_is_moved_on_launch() {
+        let root = temp("migrate");
+        let legacy = root.join("home/.local/share/weft/apps/org.example.app/data");
+        std::fs::create_dir_all(&legacy).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&legacy, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        std::fs::write(legacy.join("notes.txt"), "kept").unwrap();
+        let grants = derive(
+            "org.example.app",
+            &caps(&["fs:rw:app-data"]),
+            host(&root, None),
+        )
+        .unwrap();
+        let data = root.join("share/weft/app-data/org.example.app");
+        assert_eq!(grants.dirs[0].host, data);
+        assert_eq!(
+            std::fs::read_to_string(data.join("notes.txt")).unwrap(),
+            "kept"
+        );
+        assert!(!legacy.exists());
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(&data).unwrap().permissions().mode();
+            assert_eq!(mode & 0o777, 0o700);
+        }
+    }
+
+    #[test]
+    fn conflicting_app_data_refuses_the_launch() {
+        let root = temp("conflict");
+        let legacy = root.join("home/.local/share/weft/apps/org.example.app/data");
+        let data = root.join("share/weft/app-data/org.example.app");
+        std::fs::create_dir_all(&legacy).unwrap();
+        std::fs::create_dir_all(&data).unwrap();
+        let refusal = derive(
+            "org.example.app",
+            &caps(&["fs:read:app-data"]),
+            host(&root, None),
+        )
+        .unwrap_err();
+        assert_eq!(refusal.code, 409);
+        assert!(legacy.is_dir() && data.is_dir());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn app_data_is_private() {
+        use std::os::unix::fs::PermissionsExt;
+        let root = temp("private");
+        derive(
+            "org.example.app",
+            &caps(&["fs:rw:app-data"]),
+            host(&root, None),
+        )
+        .unwrap();
+        let mode = std::fs::metadata(root.join("share/weft/app-data/org.example.app"))
+            .unwrap()
+            .permissions()
+            .mode();
+        assert_eq!(mode & 0o777, 0o700);
     }
 }
