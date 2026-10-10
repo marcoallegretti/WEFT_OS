@@ -134,6 +134,8 @@ pub fn run() -> anyhow::Result<()> {
     let socket_name = listening_socket.socket_name().to_os_string();
     unsafe { std::env::set_var("WAYLAND_DISPLAY", &socket_name) };
     tracing::info!(?socket_name, "Wayland socket open");
+    // Before readiness, so the units ordered after this one see it.
+    crate::session_env::publish_wayland_display(&socket_name);
 
     loop_handle
         .insert_source(listening_socket, |stream, _, state| {
