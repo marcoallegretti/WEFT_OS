@@ -10,7 +10,7 @@ path = "src/main.rs"
 
 [features]
 default = []
-wasmtime-runtime = ["dep:wasmtime", "dep:wasmtime-wasi", "dep:cap-std"]
+wasmtime-runtime = ["dep:wasmtime", "dep:wasmtime-wasi", "dep:cap-std", "dep:libc"]
 seccomp = ["dep:seccompiler", "dep:libc"]
 net-fetch = ["dep:ureq", "dep:url"]
 

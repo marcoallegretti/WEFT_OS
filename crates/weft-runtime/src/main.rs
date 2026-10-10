@@ -2,12 +2,25 @@ use std::path::PathBuf;
 
 use anyhow::Context;
 
+#[cfg(feature = "wasmtime-runtime")]
+mod desktop;
 mod grants;
+#[cfg(feature = "wasmtime-runtime")]
+mod ipc;
+#[cfg(feature = "wasmtime-runtime")]
+mod limits;
+
+/// The default limit on a component's linear memory, in MiB.
+const DEFAULT_MAX_MEMORY_MIB: usize = 256;
 
 use grants::{Grants, Preopen};
 
 fn main() -> anyhow::Result<()> {
+    // Standard output carries the readiness line to weft-appd, which keeps
+    // standard error as the process's log.
     tracing_subscriber::fmt()
+        .with_writer(std::io::stderr)
+        .with_ansi(std::io::IsTerminal::is_terminal(&std::io::stderr()))
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
                 .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
@@ -18,7 +31,8 @@ fn main() -> anyhow::Result<()> {
     if args.len() < 3 {
         anyhow::bail!(
             "usage: weft-runtime <app_id> <session_id> --module PATH \
-             [--preopen HOST::GUEST::ro|rw]... [--grant CAPABILITY]... [--ipc-socket PATH]"
+             [--preopen HOST::GUEST::ro|rw]... [--grant CAPABILITY]... [--ipc-socket PATH] \
+             [--max-memory-mib N]"
         );
     }
     let app_id = &args[1];
@@ -30,6 +44,7 @@ fn main() -> anyhow::Result<()> {
     let mut grants = Grants::default();
     let mut ipc_socket: Option<String> = None;
     let mut module: Option<PathBuf> = None;
+    let mut max_memory_mib = DEFAULT_MAX_MEMORY_MIB;
 
     let mut i = 3usize;
     while i < args.len() {
@@ -48,6 +63,17 @@ fn main() -> anyhow::Result<()> {
                 module = Some(PathBuf::from(
                     args.get(i).context("--module requires an argument")?,
                 ));
+            }
+            "--max-memory-mib" => {
+                i += 1;
+                let value = args
+                    .get(i)
+                    .context("--max-memory-mib requires an argument")?;
+                max_memory_mib = value
+                    .parse::<usize>()
+                    .ok()
+                    .filter(|&mib| mib > 0 && mib <= 1 << 20)
+                    .with_context(|| format!("invalid --max-memory-mib: {value}"))?;
             }
             "--ipc-socket" => {
                 i += 1;
@@ -72,7 +98,14 @@ fn main() -> anyhow::Result<()> {
     let wasm_path = module.context("--module is required")?;
 
     tracing::info!(session_id, %app_id, wasm = %wasm_path.display(), "executing module");
-    run_module(&wasm_path, &preopen, grants, ipc_socket.as_deref())?;
+    run_module(
+        app_id,
+        &wasm_path,
+        &preopen,
+        grants,
+        ipc_socket.as_deref(),
+        max_memory_mib << 20,
+    )?;
 
     tracing::info!(session_id, %app_id, "exiting");
     Ok(())
@@ -90,10 +123,12 @@ fn ready_line() -> String {
 
 #[cfg(not(feature = "wasmtime-runtime"))]
 fn run_module(
+    _app_id: &str,
     _wasm_path: &std::path::Path,
     _preopen: &[Preopen],
     _grants: Grants,
     _ipc_socket: Option<&str>,
+    _max_memory: usize,
 ) -> anyhow::Result<()> {
     anyhow::bail!(
         "weft-runtime was built without the wasmtime-runtime feature and cannot execute components"
@@ -102,10 +137,12 @@ fn run_module(
 
 #[cfg(feature = "wasmtime-runtime")]
 fn run_module(
+    app_id: &str,
     wasm_path: &std::path::Path,
     preopen: &[Preopen],
     grants: Grants,
     ipc_socket: Option<&str>,
+    max_memory: usize,
 ) -> anyhow::Result<()> {
     use std::sync::{Arc, Mutex};
     use wasmtime::{
@@ -118,63 +155,10 @@ fn run_module(
     };
     use weft_ipc_types::capability::Access;
 
-    struct IpcState {
-        socket: std::os::unix::net::UnixStream,
-        recv_buf: Vec<u8>,
-    }
-
-    impl IpcState {
-        fn connect(path: &str) -> Option<Self> {
-            let socket = std::os::unix::net::UnixStream::connect(path).ok()?;
-            socket.set_nonblocking(true).ok()?;
-            Some(Self {
-                socket,
-                recv_buf: Vec::new(),
-            })
-        }
-
-        fn send(&mut self, payload: &str) -> Result<(), String> {
-            use std::io::Write;
-            let _ = self.socket.set_nonblocking(false);
-            let mut line = payload.to_owned();
-            line.push('\n');
-            let result = self
-                .socket
-                .write_all(line.as_bytes())
-                .map_err(|e| e.to_string());
-            let _ = self.socket.set_nonblocking(true);
-            result
-        }
-
-        fn recv(&mut self) -> Option<String> {
-            use std::io::Read;
-            let mut chunk = [0u8; 4096];
-            loop {
-                match self.socket.read(&mut chunk) {
-                    Ok(0) => break,
-                    Ok(n) => self.recv_buf.extend_from_slice(&chunk[..n]),
-                    Err(e)
-                        if e.kind() == std::io::ErrorKind::WouldBlock
-                            || e.kind() == std::io::ErrorKind::TimedOut =>
-                    {
-                        break;
-                    }
-                    Err(_) => break,
-                }
-            }
-            if let Some(pos) = self.recv_buf.iter().position(|&b| b == b'\n') {
-                let raw: Vec<u8> = self.recv_buf.drain(..=pos).collect();
-                return String::from_utf8(raw)
-                    .ok()
-                    .map(|s| s.trim_end_matches('\n').trim_end_matches('\r').to_owned());
-            }
-            None
-        }
-    }
-
     struct State {
         ctx: WasiCtx,
         table: ResourceTable,
+        limits: limits::Limits,
     }
 
     impl IoView for State {
@@ -199,7 +183,7 @@ fn run_module(
     let grants = Arc::new(grants);
     let mut linker: Linker<State> = Linker::new(&engine);
     add_to_linker_sync(&mut linker).context("add WASI to linker")?;
-    let ipc_state: Arc<Mutex<Option<IpcState>>> = Arc::new(Mutex::new(None));
+    let ipc_state: Arc<Mutex<Option<ipc::IpcState>>> = Arc::new(Mutex::new(None));
 
     {
         let ipc_send = Arc::clone(&ipc_state);
@@ -223,6 +207,9 @@ fn run_module(
                 move |_: wasmtime::StoreContextMut<'_, State>,
                       (payload,): (String,)|
                       -> wasmtime::Result<(Result<(), String>,)> {
+                    if let Err(e) = ipc::check_payload(&payload) {
+                        return Ok((Err(e),));
+                    }
                     let mut guard = ipc_send.lock().unwrap_or_else(|p| p.into_inner());
                     match guard.as_mut() {
                         Some(ipc) => Ok((ipc.send(&payload),)),
@@ -263,6 +250,7 @@ fn run_module(
         .context("define weft:app/fetch#fetch")?;
 
     let notify_grants = Arc::clone(&grants);
+    let notify_app = app_id.to_owned();
     linker
         .instance("weft:app/notifications@0.1.0")
         .context("define weft:app/notifications instance")?
@@ -273,7 +261,7 @@ fn run_module(
                   -> wasmtime::Result<(Result<(), String>,)> {
                 let result = notify_grants
                     .notifications()
-                    .and_then(|()| host_notify(&title, &body, icon.as_deref()));
+                    .and_then(|()| desktop::notify(&notify_app, &title, &body, icon.as_deref()));
                 Ok((result,))
             },
         )
@@ -292,7 +280,7 @@ fn run_module(
                       -> wasmtime::Result<(Result<String, String>,)> {
                     Ok((read_grants
                         .clipboard_read()
-                        .and_then(|()| host_clipboard_read()),))
+                        .and_then(|()| desktop::clipboard_read()),))
                 },
             )
             .context("define weft:app/clipboard#read")?;
@@ -305,7 +293,7 @@ fn run_module(
                       -> wasmtime::Result<(Result<(), String>,)> {
                     Ok((write_grants
                         .clipboard_write()
-                        .and_then(|()| host_clipboard_write(&text)),))
+                        .and_then(|()| desktop::clipboard_write(&text)),))
                 },
             )
             .context("define weft:app/clipboard#write")?;
@@ -316,15 +304,14 @@ fn run_module(
 
     if let Some(socket_path) = ipc_socket {
         ctx_builder.env("WEFT_IPC_SOCKET", socket_path);
-        if let Some(ipc) = IpcState::connect(socket_path) {
+        if let Some(ipc) = ipc::IpcState::connect(socket_path) {
+            ipc.exit_on_hangup().context("watch the IPC connection")?;
             *ipc_state.lock().unwrap_or_else(|p| p.into_inner()) = Some(ipc);
         } else {
-            tracing::warn!("weft:app/ipc: could not connect to IPC socket {socket_path}");
+            // Without its connection the session cannot be reached or
+            // ended; the runtime would only be left behind.
+            anyhow::bail!("cannot connect to the IPC socket {socket_path}");
         }
-    }
-
-    if let Ok(portal_socket) = std::env::var("WEFT_FILE_PORTAL_SOCKET") {
-        ctx_builder.env("WEFT_FILE_PORTAL_SOCKET", &portal_socket);
     }
 
     for dir in preopen {
@@ -343,8 +330,10 @@ fn run_module(
         State {
             ctx,
             table: ResourceTable::new(),
+            limits: limits::Limits::new(max_memory),
         },
     );
+    store.limiter(|state| &mut state.limits);
 
     let command =
         Command::instantiate(&mut store, &component, &linker).context("instantiate component")?;
@@ -416,7 +405,14 @@ fn host_fetch(
         return Err(format!("unsupported URL scheme '{}'", parsed.scheme()));
     }
     let host = parsed.host_str().ok_or("URL has no host")?;
-    grants.fetch_host(host)?;
+    let reach = grants.fetch_host(host)?;
+    // Credentials are never taken from a URL; a component that needs them
+    // sends them in a header to the host it is granted.
+    if !parsed.username().is_empty() || parsed.password().is_some() {
+        return Err(
+            "URLs with credentials are not supported; send an Authorization header".to_owned(),
+        );
+    }
     // The method is written into the request line as given, so only known
     // methods are accepted.
     if !matches!(
@@ -437,6 +433,9 @@ fn host_fetch(
         }
     }
     let agent = ureq::AgentBuilder::new()
+        .resolver(GrantedResolver(reach))
+        // A proxy would be connected to instead of the checked address.
+        .try_proxy_from_env(false)
         .redirects(0)
         .timeout_connect(Duration::from_secs(10))
         .timeout(Duration::from_secs(30))
@@ -471,6 +470,33 @@ fn host_fetch(
     })
 }
 
+/// Resolves a fetch destination and keeps only the addresses its grant
+/// may reach; the connection is made to those addresses alone, so the
+/// check cannot be bypassed by a second, different DNS answer.
+#[cfg(all(feature = "wasmtime-runtime", feature = "net-fetch"))]
+struct GrantedResolver(grants::Reach);
+
+#[cfg(all(feature = "wasmtime-runtime", feature = "net-fetch"))]
+impl ureq::Resolver for GrantedResolver {
+    fn resolve(&self, netloc: &str) -> std::io::Result<Vec<std::net::SocketAddr>> {
+        use std::net::ToSocketAddrs;
+        let addresses: Vec<_> = netloc
+            .to_socket_addrs()?
+            .filter(|a| self.0 == grants::Reach::Declared || grants::is_public(a.ip()))
+            .collect();
+        if addresses.is_empty() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                format!(
+                    "{netloc} resolves only to addresses on this machine or a local network, \
+                     which only a grant naming that address covers"
+                ),
+            ));
+        }
+        Ok(addresses)
+    }
+}
+
 #[cfg(all(feature = "wasmtime-runtime", not(feature = "net-fetch")))]
 fn host_fetch(
     grants: &Grants,
@@ -481,55 +507,6 @@ fn host_fetch(
 ) -> FetchResult {
     grants.fetch_any()?;
     Err("this runtime was built without network fetch support".to_owned())
-}
-
-#[cfg(feature = "wasmtime-runtime")]
-fn host_clipboard_read() -> Result<String, String> {
-    let out = std::process::Command::new("wl-paste")
-        .arg("--no-newline")
-        .output()
-        .map_err(|e| e.to_string())?;
-    if out.status.success() {
-        String::from_utf8(out.stdout).map_err(|e| e.to_string())
-    } else {
-        Err(String::from_utf8_lossy(&out.stderr).trim().to_owned())
-    }
-}
-
-#[cfg(feature = "wasmtime-runtime")]
-fn host_clipboard_write(text: &str) -> Result<(), String> {
-    use std::io::Write;
-    let mut child = std::process::Command::new("wl-copy")
-        .stdin(std::process::Stdio::piped())
-        .spawn()
-        .map_err(|e| e.to_string())?;
-    if let Some(stdin) = child.stdin.as_mut() {
-        stdin
-            .write_all(text.as_bytes())
-            .map_err(|e| e.to_string())?;
-    }
-    let status = child.wait().map_err(|e| e.to_string())?;
-    if status.success() {
-        Ok(())
-    } else {
-        Err(format!("wl-copy exited with {status}"))
-    }
-}
-
-#[cfg(feature = "wasmtime-runtime")]
-fn host_notify(title: &str, body: &str, icon: Option<&str>) -> Result<(), String> {
-    let mut cmd = std::process::Command::new("notify-send");
-    if let Some(i) = icon {
-        cmd.arg("--icon").arg(i);
-    }
-    cmd.arg("--").arg(title).arg(body);
-    cmd.status().map_err(|e| e.to_string()).and_then(|s| {
-        if s.success() {
-            Ok(())
-        } else {
-            Err(format!("notify-send exited with {s}"))
-        }
-    })
 }
 
 #[cfg(feature = "seccomp")]
@@ -598,10 +575,12 @@ mod tests {
     #[test]
     fn engine_disabled_build_refuses_to_run_components() {
         let err = run_module(
+            "org.weft.test",
             std::path::Path::new("app.wasm"),
             &[],
             Grants::default(),
             None,
+            DEFAULT_MAX_MEMORY_MIB << 20,
         )
         .expect_err("a build without wasmtime-runtime must not report success");
         assert!(err.to_string().contains("wasmtime-runtime"));

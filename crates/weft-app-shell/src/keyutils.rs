@@ -57,7 +57,8 @@ fn named_key(n: NamedKey) -> servo::NamedKey {
         NamedKey::Control => S::Control,
         NamedKey::Fn => S::Fn,
         NamedKey::FnLock => S::FnLock,
-        NamedKey::Meta => S::Meta,
+        // winit names the Super keys Super; the DOM names them Meta.
+        NamedKey::Meta | NamedKey::Super => S::Meta,
         NamedKey::NumLock => S::NumLock,
         NamedKey::ScrollLock => S::ScrollLock,
         NamedKey::Shift => S::Shift,

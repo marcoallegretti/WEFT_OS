@@ -16,13 +16,21 @@ scenario passes a different set of `--grant` and `--preopen` arguments:
   denied;
 - a host-specific fetch grant: requests to that host return their real
   status (200, 404, and 302 without following the redirect to another
-  host); requests to another host, a forged `Host` header, a method that
-  injects a request line and a `file:` URL are refused;
-- a wildcard fetch grant: the other host is reachable.
+  host); requests to another host, credentials in the URL, a forged
+  `Host` header, a method that injects a request line and a `file:` URL
+  are refused;
+- a wildcard fetch grant, and a grant for the name `localhost`: the local
+  server is refused, since only an address named in a grant reaches this
+  machine or a local network; the connection is never made;
+- limits: an allocation beyond the default memory limit (256 MiB) fails
+  inside the component, and succeeds with `--max-memory-mib 512`; app
+  messages longer than 64 KiB or containing a line break are refused.
 
 It also checks that the runtime refuses, with a specific error, filesystem
 capabilities passed as `--grant`, unknown capabilities and preopens
-without an access mode.
+without an access mode, and that a runtime running the Counter demo, which
+waits for messages forever, answers over its IPC connection and exits once
+weft-appd's end of that connection closes.
 
 Requires cargo with the wasm32-wasip2 target.
 """
@@ -30,6 +38,7 @@ Requires cargo with the wasm32-wasip2 target.
 import argparse
 import http.server
 import shutil
+import socket
 import subprocess
 import sys
 import tempfile
@@ -37,13 +46,19 @@ import threading
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
+COUNTER = ROOT / "examples/org.weft.demo.counter/app.wasm"
 PROBE_DIR = ROOT / "tests/components/grants-probe"
 APP_ID = "org.weft.test.grants"
 NOT_GRANTED = "is not granted"
 
 
+# Paths the test server was asked for.
+REQUESTS = []
+
+
 class Handler(http.server.BaseHTTPRequestHandler):
     def do_GET(self):
+        REQUESTS.append(self.path)
         if self.path == "/ok":
             self.send_response(200)
         elif self.path == "/redirect":
@@ -75,7 +90,8 @@ class Runner:
             f"fetch-ok http://127.0.0.1:{port}/ok\n"
             f"fetch-missing http://127.0.0.1:{port}/missing\n"
             f"fetch-redirect http://127.0.0.1:{port}/redirect\n"
-            f"fetch-other-host http://localhost:{port}/ok\n")
+            f"fetch-other-host http://localhost:{port}/ok\n"
+            f"fetch-credentials http://user:secret@127.0.0.1:{port}/ok\n")
 
     def run(self, *arguments, expect_success=True):
         command = [str(self.runtime), APP_ID, "1", "--module", str(self.module),
@@ -140,22 +156,84 @@ def check(runner, data):
     expect(probes, "fetch-missing", True, contains="404")
     expect(probes, "fetch-redirect", True, contains="302")
     expect(probes, "fetch-other-host", False, contains=NOT_GRANTED)
+    expect(probes, "fetch-credentials", False, contains="credentials")
     expect(probes, "fetch-host-header", False, contains="set by the runtime")
     expect(probes, "fetch-bad-method", False, contains="unsupported HTTP method")
     expect(probes, "fetch-file-scheme", False, contains="unsupported URL scheme")
 
+    local = "local network"
+    REQUESTS.clear()
     _, probes = runner.run("--grant", "net:fetch:*")
-    expect(probes, "fetch-other-host", True, contains="200")
+    expect(probes, "fetch-other-host", False, contains=local)
+    expect(probes, "fetch-ok", False, contains=local)
+    _, probes = runner.run("--grant", "net:fetch:localhost")
+    expect(probes, "fetch-other-host", False, contains=local)
+    if REQUESTS:
+        raise AssertionError(f"refused fetches reached the server: {REQUESTS}")
+
+    _, probes = runner.run()
+    expect(probes, "memory-grow", False)
+    expect(probes, "ipc-newline", False, contains="line break")
+    expect(probes, "ipc-oversize", False, contains="exceeds")
+    _, probes = runner.run("--max-memory-mib", "512")
+    expect(probes, "memory-grow", True)
 
     for arguments, message in (
             (["--grant", "fs:rw:app-data"], "is not granted through --grant"),
             (["--preopen", f"{data}::/data"], "--preopen expects HOST::GUEST::ro|rw"),
             (["--preopen", f"{data}::/data::wx"], "--preopen mode must be ro or rw"),
-            (["--grant", "sys:everything"], "unknown capability 'sys:everything'")):
+            (["--grant", "sys:everything"], "unknown capability 'sys:everything'"),
+            (["--max-memory-mib", "0"], "invalid --max-memory-mib")):
         result, _ = runner.run(*arguments, expect_success=False)
         if result.returncode == 0 or message not in result.stderr:
             raise AssertionError(f"runtime did not refuse {' '.join(arguments)} with "
                                  f"{message!r}:\n{result.stderr}")
+
+
+def check_hangup(runtime, work):
+    path = work / "ipc.sock"
+    listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    listener.bind(str(path))
+    listener.listen(1)
+    listener.settimeout(30)
+    process = subprocess.Popen(
+        [str(runtime), "org.weft.demo.counter", "1", "--module", str(COUNTER),
+         "--ipc-socket", str(path)],
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+        env={"PATH": "/usr/bin:/bin", "RUST_LOG": "info"})
+    try:
+        try:
+            connection, _ = listener.accept()
+        except socket.timeout:
+            raise AssertionError("the runtime did not connect to its IPC socket")
+        connection.settimeout(30)
+        connection.sendall(b"increment\n")
+        reply = b""
+        while not reply.endswith(b"\n"):
+            try:
+                chunk = connection.recv(4096)
+            except socket.timeout:
+                raise AssertionError("the counter did not answer over IPC")
+            if not chunk:
+                break
+            reply += chunk
+        if reply != b'{"count":1}\n':
+            raise AssertionError(f"the counter did not answer over IPC: {reply!r}")
+        connection.close()
+        try:
+            process.wait(timeout=10)
+        except subprocess.TimeoutExpired:
+            raise AssertionError("the runtime kept running after its IPC connection closed")
+        log = process.stderr.read()
+        process.stdout.read()  # drained; the log is on standard error
+        if process.returncode != 0 or "IPC connection ended" not in log:
+            raise AssertionError(f"the runtime did not end with the connection: "
+                                 f"exit {process.returncode}")
+    finally:
+        if process.poll() is None:
+            process.kill()
+            process.wait()
+        listener.close()
 
 
 def main(argv=None):
@@ -179,6 +257,7 @@ def main(argv=None):
         data = work / "data"
         data.mkdir()
         check(runner, data)
+        check_hangup(args.runtime, work)
     except AssertionError as failure:
         print(f"grants check failed: {failure}", file=sys.stderr)
         return 1

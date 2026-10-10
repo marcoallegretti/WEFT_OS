@@ -6,6 +6,7 @@ mod input;
 mod protocols;
 mod session_env;
 mod state;
+mod windows;
 
 fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt()

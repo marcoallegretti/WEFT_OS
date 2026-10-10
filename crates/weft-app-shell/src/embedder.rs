@@ -68,6 +68,33 @@ struct FrameSignals {
     content: AtomicBool,
     /// The document has loaded and Servo reports its rendering is up to date.
     settled: AtomicBool,
+    /// The page closed itself with `window.close()`.
+    page_closed: AtomicBool,
+    /// The page's answer to the pending close request; see `CloseAnswer`.
+    close_answer: std::sync::atomic::AtomicU8,
+}
+
+/// The page's answer to a close request, as stored in `close_answer`.
+#[derive(Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
+enum CloseAnswer {
+    Pending = 0,
+    Close = 1,
+    Cancel = 2,
+}
+
+/// How long a page with the `ask` close policy has to answer a close
+/// request; a page that does not answer in time is closed.
+const CLOSE_ANSWER_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// Asks the page whether it may close: dispatches a cancelable `weftclose`
+/// event on the top-level window. The page cancels the close by calling
+/// `preventDefault()` and closes itself later with `window.close()`.
+const ASK_CLOSE_SCRIPT: &str = "window.dispatchEvent(new Event('weftclose', { cancelable: true }))";
+
+/// The application's declared close policy, from `WEFT_APP_CLOSE`.
+fn close_policy_asks() -> bool {
+    std::env::var("WEFT_APP_CLOSE").is_ok_and(|v| v == "ask")
 }
 
 struct WeftWebViewDelegate {
@@ -85,6 +112,12 @@ impl WebViewDelegate for WeftWebViewDelegate {
     fn notify_new_frame_ready(&self, _webview: servo::WebView) {
         self.signals.content.store(true, Ordering::Relaxed);
         self.signals.redraw.store(true, Ordering::Relaxed);
+    }
+
+    /// The application page called `window.close()`, which Servo allows for
+    /// a top-level document with a single history entry.
+    fn notify_closed(&self, _webview: servo::WebView) {
+        self.signals.page_closed.store(true, Ordering::Relaxed);
     }
 
     /// The webview carries the session's bridge, so it stays within the
@@ -368,6 +401,10 @@ struct App {
     modifiers: ModifiersState,
     cursor_pos: DevicePoint,
     shell_client: Option<crate::shell_client::ShellClient>,
+    /// Whether the page is asked before its window closes.
+    ask_before_close: bool,
+    /// When the pending close request is closed regardless of the page.
+    close_deadline: Option<std::time::Instant>,
 }
 
 impl App {
@@ -394,7 +431,68 @@ impl App {
             modifiers: ModifiersState::default(),
             cursor_pos: DevicePoint::origin(),
             shell_client: None,
+            ask_before_close: close_policy_asks(),
+            close_deadline: None,
         }
+    }
+
+    /// Handles a request to close the window. Under the `ask` policy the
+    /// page answers first; otherwise, or without a page, the app closes.
+    fn request_close(&mut self, event_loop: &ActiveEventLoop) {
+        if self.close_deadline.is_some() {
+            return;
+        }
+        let Some(webview) = self.webview.as_ref().filter(|_| self.ask_before_close) else {
+            self.shut_down();
+            event_loop.exit();
+            return;
+        };
+        self.signals
+            .close_answer
+            .store(CloseAnswer::Pending as u8, Ordering::Relaxed);
+        self.close_deadline = Some(std::time::Instant::now() + CLOSE_ANSWER_TIMEOUT);
+        let signals = Arc::clone(&self.signals);
+        webview.evaluate_javascript(ASK_CLOSE_SCRIPT, move |result| {
+            // dispatchEvent returns false when the page cancelled the event.
+            let answer = match result {
+                Ok(servo::JSValue::Boolean(false)) => CloseAnswer::Cancel,
+                Ok(_) => CloseAnswer::Close,
+                Err(e) => {
+                    tracing::warn!(?e, "the page could not be asked to close; closing");
+                    CloseAnswer::Close
+                }
+            };
+            signals.close_answer.store(answer as u8, Ordering::Relaxed);
+        });
+    }
+
+    /// Acts on the page's answer to a pending close request, or on its
+    /// absence once the answer is due. Returns whether the app is closing.
+    fn settle_close_request(&mut self) -> bool {
+        let Some(deadline) = self.close_deadline else {
+            return false;
+        };
+        let answer = self.signals.close_answer.load(Ordering::Relaxed);
+        if answer == CloseAnswer::Cancel as u8 {
+            self.close_deadline = None;
+            tracing::info!("the page cancelled the close");
+            // weft-appd learns that the session keeps running; the token
+            // keeps page output from forging this report.
+            if let Ok(token) = std::env::var("WEFT_READY_TOKEN") {
+                use std::io::Write;
+                println!("CLOSE_CANCELLED {token}");
+                let _ = std::io::stdout().flush();
+            }
+            return false;
+        }
+        if answer == CloseAnswer::Close as u8 {
+            return true;
+        }
+        if std::time::Instant::now() >= deadline {
+            tracing::warn!("the page did not answer the close request in time; closing");
+            return true;
+        }
+        false
     }
 
     /// Paints and presents once Servo has requested its first repaint.
@@ -431,6 +529,19 @@ impl App {
 }
 
 impl ApplicationHandler<ServoWake> for App {
+    /// Releases everything that holds Wayland objects of winit's display
+    /// (Servo, the rendering context, whose software and EGL paths keep
+    /// their own proxies on it, the shell protocol client and the window)
+    /// while that display is still connected; dropped after the event loop,
+    /// they would be destroyed on a display that is gone. A panic unwinding
+    /// out of a handler skips this.
+    fn exiting(&mut self, _event_loop: &ActiveEventLoop) {
+        self.shut_down();
+        self.rendering_context = None;
+        self.shell_client = None;
+        self.window = None;
+    }
+
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
         if self.window.is_some() {
             return;
@@ -533,6 +644,17 @@ impl ApplicationHandler<ServoWake> for App {
         if let Some(servo) = &self.servo {
             servo.spin_event_loop();
         }
+        // The page answers a close request while Servo spins.
+        if self.signals.page_closed.load(Ordering::Relaxed) || self.settle_close_request() {
+            self.shut_down();
+            event_loop.exit();
+            return;
+        }
+        // Wake for the close answer's deadline even when nothing else happens.
+        event_loop.set_control_flow(match self.close_deadline {
+            Some(deadline) => winit::event_loop::ControlFlow::WaitUntil(deadline),
+            None => winit::event_loop::ControlFlow::Wait,
+        });
         if self.signals.redraw.swap(false, Ordering::Relaxed)
             && let Some(w) = &self.window
         {
@@ -592,10 +714,7 @@ impl ApplicationHandler<ServoWake> for App {
                     )));
                 }
             }
-            WindowEvent::CloseRequested => {
-                self.shut_down();
-                event_loop.exit();
-            }
+            WindowEvent::CloseRequested => self.request_close(event_loop),
             _ => {}
         }
     }

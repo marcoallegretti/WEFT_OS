@@ -6,7 +6,7 @@ use smithay::{
         TouchEvent,
     },
     input::{
-        keyboard::FilterResult,
+        keyboard::{FilterResult, KeyboardTarget},
         pointer::{AxisFrame, ButtonEvent, MotionEvent},
     },
     utils::{Logical, Point, SERIAL_COUNTER},
@@ -42,20 +42,97 @@ pub fn process_input_event<B: InputBackend>(state: &mut WeftCompositorState, eve
     }
 }
 
+/// What the compositor does with a key instead of forwarding it.
+enum Shortcut {
+    /// Alt+F4: close the focused application window.
+    Close,
+    /// A Super key tap: show the shell.
+    Shell,
+    /// Nothing: a suppressed key.
+    None,
+}
+
 fn handle_keyboard<B: InputBackend>(state: &mut WeftCompositorState, event: B::KeyboardKeyEvent) {
+    use smithay::backend::input::KeyState;
+    use smithay::input::keyboard::keysyms;
+
     let serial = SERIAL_COUNTER.next_serial();
     let time = event.time_msec();
     let key_state = event.state();
+    let Some(keyboard) = state.seat.get_keyboard() else {
+        return;
+    };
 
-    if let Some(keyboard) = state.seat.get_keyboard() {
-        keyboard.input::<(), _>(
-            state,
-            event.key_code(),
-            key_state,
-            serial,
-            time,
-            |_state, _mods, _keysym| FilterResult::Forward,
-        );
+    // Alt+F4 and the Super keys belong to the compositor. Alt+F4 asks the
+    // focused application window to close. Super's key events are never
+    // delivered to an application: tapped alone, without another key or a
+    // button, it brings the shell's panel to the front with keyboard focus
+    // and is then delivered to the shell, which opens or closes its
+    // launcher. Held, it still sets the Super modifier for other keys.
+    let (filtered, mods_changed) = keyboard.input_intercept::<_, _>(
+        state,
+        event.key_code(),
+        key_state,
+        |state, mods, keysym| {
+            // A release is taken only when its press was, so no client
+            // sees half of a key.
+            let code = keysym.raw_code().raw();
+            let sym = keysym.modified_sym();
+            if key_state == KeyState::Pressed {
+                if mods.alt && sym == keysyms::KEY_F4.into() {
+                    state.super_tap = None;
+                    state.suppressed_keys.push(code);
+                    return FilterResult::Intercept(Shortcut::Close);
+                }
+                if sym == keysyms::KEY_Super_L.into() || sym == keysyms::KEY_Super_R.into() {
+                    state.super_tap = (!mods.ctrl && !mods.alt && !mods.shift).then_some(code);
+                    state.suppressed_keys.push(code);
+                    return FilterResult::Intercept(Shortcut::None);
+                }
+                state.super_tap = None;
+            } else if let Some(i) = state.suppressed_keys.iter().position(|&k| k == code) {
+                state.suppressed_keys.remove(i);
+                if state.super_tap.take() == Some(code) {
+                    return FilterResult::Intercept(Shortcut::Shell);
+                }
+                return FilterResult::Intercept(Shortcut::None);
+            }
+            FilterResult::Forward
+        },
+    );
+    let shortcut = match filtered {
+        FilterResult::Forward => {
+            keyboard.input_forward(
+                state,
+                event.key_code(),
+                key_state,
+                serial,
+                time,
+                mods_changed,
+            );
+            return;
+        }
+        FilterResult::Intercept(shortcut) => shortcut,
+    };
+    // The focused client follows the modifiers even when the key that
+    // changed them is taken, so none stays held there.
+    if mods_changed && let Some(focus) = keyboard.current_focus() {
+        let seat = state.seat.clone();
+        focus.modifiers(&seat, state, keyboard.modifier_state(), serial);
+    }
+    match shortcut {
+        Shortcut::Close => state.close_focused_window(),
+        Shortcut::Shell => {
+            if state.activate_panel() {
+                // The tap itself, for the shell; the keyboard's own state
+                // already saw it.
+                let code = event.key_code();
+                keyboard.input_forward(state, code, KeyState::Pressed, serial, time, false);
+                let release = SERIAL_COUNTER.next_serial();
+                keyboard.input_forward(state, code, KeyState::Released, release, time, false);
+            }
+        }
+        Shortcut::None => {}
     }
 }
 
@@ -122,10 +199,19 @@ fn handle_pointer_button<B: InputBackend>(
     let button = event.button_code();
     let button_state = event.state();
 
-    // On press: focus the surface under the pointer.
+    // On press: activate the window under the pointer, which raises an
+    // application window and focuses it. A held Super key is then no
+    // longer a tap.
     if button_state == ButtonState::Pressed {
+        state.super_tap = None;
         let pointer_location = state.pointer_location;
-        if let Some((surface, _loc)) = surface_under(state, pointer_location) {
+        let window = state
+            .space
+            .element_under(pointer_location)
+            .map(|(window, _)| window.clone());
+        if let Some(window) = window {
+            state.activate_window(&window);
+        } else if let Some((surface, _loc)) = surface_under(state, pointer_location) {
             if let Some(keyboard) = state.seat.get_keyboard() {
                 keyboard.set_focus(state, Some(surface), serial);
             }
@@ -193,6 +279,7 @@ fn handle_pointer_axis<B: InputBackend>(
 }
 
 fn handle_touch_down<B: InputBackend>(state: &mut WeftCompositorState, event: B::TouchDownEvent) {
+    state.super_tap = None;
     let serial = SERIAL_COUNTER.next_serial();
     let output = state.space.outputs().next().cloned();
     if let Some(output) = output {

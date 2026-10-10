@@ -91,6 +91,8 @@ jobs:
           --all-targets -- -D warnings
       - name: cargo build (weft-runtime with wasmtime-runtime and net-fetch)
         run: cargo build -p weft-runtime --features wasmtime-runtime,net-fetch
+      - name: cargo test (weft-runtime with wasmtime-runtime and net-fetch)
+        run: cargo test -p weft-runtime --features wasmtime-runtime,net-fetch
       - name: grants check
         run: python3 -B tests/runtime/check_grants.py
 

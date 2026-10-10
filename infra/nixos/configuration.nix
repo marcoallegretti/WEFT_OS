@@ -29,7 +29,7 @@
 
   hardware.graphics = {
     enable = true;
-    extraPackages = with pkgs; [ mesa.drivers virglrenderer ];
+    extraPackages = with pkgs; [ mesa virglrenderer ];
   };
 
   networking = {
