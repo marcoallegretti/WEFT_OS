@@ -346,10 +346,6 @@ pub(crate) async fn supervise(
     cmd.arg("--ipc-socket").arg(&ipc_socket_path);
     cmd.arg("--module").arg(&package.module);
 
-    if let Some((ref sock, _)) = portal {
-        cmd.env("WEFT_FILE_PORTAL_SOCKET", sock);
-    }
-
     for dir in &grants.dirs {
         cmd.arg("--preopen").arg(dir.preopen_arg());
     }

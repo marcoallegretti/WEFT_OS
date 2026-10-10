@@ -32,7 +32,7 @@ Package management CLI. Subcommands: `check` (validate wapp.toml, entries and pa
 
 ### weft-file-portal
 
-Per-session file proxy. Runs as a separate process with a path allowlist derived from the session's directory grants; read-only grants (`--allow-read`) refuse writes. Paths are checked lexically, so `..` is blocked but symbolic links are followed. Accepts JSON-lines requests over a Unix socket. Components cannot currently reach that socket, because the runtime grants them no socket access.
+Per-session file proxy. Runs as a separate process with the session's directory grants; read-only grants (`--allow-read`) refuse writes. Every operation is resolved beneath the granted directory's descriptor by the kernel (see security.md), with bounded file, listing and request sizes. Accepts JSON-lines requests over a Unix socket. Components cannot currently reach that socket, because the runtime grants them no socket access.
 
 ### weft-mount-helper
 
@@ -166,5 +166,4 @@ A package directory left empty by the move is removed. Nothing is moved, and `we
 | `WEFT_APPD_WS_PORT` | `7410` | WebSocket port for weft-appd |
 | `WEFT_EGL_RENDERING` | — | Set to `1` to use EGL rendering in Servo shell |
 | `WEFT_DISABLE_CGROUP` | — | Set to disable systemd-run cgroup wrapping |
-| `WEFT_FILE_PORTAL_SOCKET` | — | Path forwarded to app runtime for file portal |
 | `XDG_RUNTIME_DIR` | — | Standard XDG runtime dir (sockets written here) |
