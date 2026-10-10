@@ -85,7 +85,7 @@ same nested desktop and drive the demo apps with real keyboard input:
 
 ```sh
 python3 tests/frame/check_counter.py   # Counter round trip through the session bridge
-python3 tests/frame/check_notes.py     # Notes stores exactly what is typed, refuses stale saves
+python3 tests/frame/check_notes.py     # Notes stores exactly what is typed, refuses stale saves, asks before closing unsaved text
 python3 tests/frame/check_app_data.py  # Notes data from the earlier layout is moved and kept
 python3 tests/frame/check_confinement.py  # an app page reaches only its UI files and its session bridge
 python3 tests/frame/check_activation.py   # apps fill the work area above the taskbar; launch and ACTIVATE_APP raise and focus

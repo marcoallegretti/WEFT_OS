@@ -116,6 +116,8 @@ const READY_TIMEOUT: Duration = Duration::from_secs(30);
 /// runtime passes the guest only the variables it names and pages cannot read
 /// the host process environment.
 const READY_TOKEN_ENV: &str = "WEFT_READY_TOKEN";
+/// The application's close policy, `immediate` or `ask`, for the app shell.
+const CLOSE_POLICY_ENV: &str = "WEFT_APP_CLOSE";
 
 /// Environment variable carrying the session's application bridge credential
 /// to weft-app-shell.
@@ -222,6 +224,7 @@ fn spawn_app_shell(
         .arg("--ui")
         .arg(&package.ui_entry)
         .env(READY_TOKEN_ENV, token)
+        .env(CLOSE_POLICY_ENV, package.close.as_str())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
         .kill_on_drop(true)
@@ -260,12 +263,27 @@ fn spawn_file_portal(
     Some((socket, child))
 }
 
+/// A request to end a session, from `TERMINATE_APP`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Stop {
+    /// Close as a user close would; the application may decline.
+    Close,
+    /// Terminate without asking.
+    Force,
+}
+
+/// Repeated requests carry nothing new, so a few queued ones are enough.
+pub(crate) const STOP_QUEUE: usize = 2;
+pub(crate) type StopSender = tokio::sync::mpsc::Sender<Stop>;
+/// Ends when appd shuts down and drops the sender.
+pub(crate) type StopReceiver = tokio::sync::mpsc::Receiver<Stop>;
+
 pub(crate) async fn supervise(
     session_id: u64,
     mut package: LaunchPackage,
     grants: crate::grants::SessionGrants,
     registry: Registry,
-    abort_rx: tokio::sync::oneshot::Receiver<()>,
+    abort_rx: StopReceiver,
     compositor_tx: Option<CompositorSender>,
 ) -> anyhow::Result<()> {
     let mut abort_rx = abort_rx;
@@ -430,10 +448,22 @@ pub(crate) async fn supervise(
         Ok(reader) => reader,
         Err(reason) => return session.settle(&registry, &reason).await,
     };
-    tokio::spawn(drain_stdout(shell_stdout, session_id));
+    let (cancel_tx, mut cancelled) = tokio::sync::mpsc::channel(1);
+    tokio::spawn(watch_app_shell_stdout(
+        shell_stdout,
+        session_id,
+        token.clone(),
+        cancel_tx,
+    ));
 
     {
         let mut reg = registry.lock().await;
+        // A stop requested while starting can still be queued here, or lose
+        // the race with READY; the session is then stopped, not shown.
+        if matches!(reg.state(session_id), AppStateKind::Stopping) || abort_rx.try_recv().is_ok() {
+            drop(reg);
+            return session.settle(&registry, "startup aborted").await;
+        }
         reg.set_state(session_id, AppStateKind::Running);
         let _ = reg.broadcast().send(Response::AppReady {
             session_id,
@@ -442,23 +472,82 @@ pub(crate) async fn supervise(
     }
     tracing::info!(session_id, %app_id, "app ready");
 
-    let reason = tokio::select! {
-        status = session.runtime.as_mut().expect("runtime spawned").wait() => {
-            format!("runtime exited ({status:?})")
-        }
-        status = session.app_shell.as_mut().expect("app shell spawned").wait() => {
-            format!("app shell exited ({status:?})")
-        }
-        requested = &mut abort_rx => match requested {
-            Ok(()) => session.close(session_id).await,
-            // The sender is dropped only when appd shuts down.
-            Err(_) => "appd is shutting down".to_owned(),
-        },
-        _ = session.relay.as_mut().expect("relay opened").ended() => {
-            "component closed its IPC connection".to_owned()
+    // Whether the user asked the application to close, so that a clean exit
+    // afterwards, also one the application makes after declining, is a
+    // close on request.
+    let mut close_asked = false;
+    let reason = loop {
+        tokio::select! {
+            status = session.runtime.as_mut().expect("runtime spawned").wait() => {
+                break format!("runtime exited ({status:?})");
+            }
+            status = session.app_shell.as_mut().expect("app shell spawned").wait() => {
+                break match status {
+                    Ok(status) if close_asked && status.success() => {
+                        format!("closed on request; app shell exited ({status:?})")
+                    }
+                    status => format!("app shell exited ({status:?})"),
+                };
+            }
+            stop = abort_rx.recv() => match stop {
+                Some(Stop::Force) => break "terminated by force".to_owned(),
+                Some(Stop::Close) => {
+                    close_asked = true;
+                    match session.close(session_id, &mut cancelled, &mut abort_rx).await {
+                        Close::Settle(reason) => break reason,
+                        // The application keeps running, as its close
+                        // policy allows; its window comes to the front so
+                        // the user sees why. A later request asks again.
+                        Close::Cancelled => {
+                            tracing::info!(session_id, "the application declined the close");
+                            session.focus(session_id);
+                        }
+                    }
+                }
+                // The senders are dropped only when appd shuts down.
+                None => break "appd is shutting down".to_owned(),
+            },
+            _ = session.relay.as_mut().expect("relay opened").ended() => {
+                break "component closed its IPC connection".to_owned();
+            }
         }
     };
     session.settle(&registry, &reason).await
+}
+
+/// How a close request ended.
+enum Close {
+    /// The session ends, for this reason.
+    Settle(String),
+    /// The application declined the close and keeps running.
+    Cancelled,
+}
+
+/// The app shell's report that its page declined a close, followed by the
+/// session's readiness token so page output cannot fake it.
+const CLOSE_CANCELLED: &str = "CLOSE_CANCELLED";
+
+/// Passes the app shell's close reports on to the supervisor and logs
+/// everything else it prints.
+async fn watch_app_shell_stdout(
+    mut reader: BufReader<tokio::process::ChildStdout>,
+    session_id: u64,
+    token: String,
+    cancelled: tokio::sync::mpsc::Sender<()>,
+) {
+    while let Ok(Some(line)) = read_child_line(&mut reader).await {
+        // Earlier output without a trailing newline can precede the
+        // report, as it can precede READY; the token alone establishes it.
+        if line.rsplit_once(' ').is_some_and(|(head, t)| {
+            head.ends_with(CLOSE_CANCELLED) && crate::ws::tokens_match(&token, t)
+        }) {
+            // One pending report is enough; the supervisor drops stale ones
+            // before it asks again.
+            let _ = cancelled.try_send(());
+        } else {
+            tracing::debug!(session_id, stdout = %line, "child stdout");
+        }
+    }
 }
 
 /// How long an application may take to close after being asked, for
@@ -526,7 +615,18 @@ impl OwnedSession {
     /// its windows to close and the app shell gets `CLOSE_TIMEOUT` to exit by
     /// itself. Returns the terminal reason; settling terminates whatever is
     /// still running.
-    async fn close(&mut self, session_id: u64) -> String {
+    async fn close(
+        &mut self,
+        session_id: u64,
+        cancelled: &mut tokio::sync::mpsc::Receiver<()>,
+        stops: &mut StopReceiver,
+    ) -> Close {
+        // A report already read from an earlier close, for example one the
+        // user started in the compositor, does not answer this one. One
+        // still in the pipe can: the session then reads as declined while
+        // the app shell is still asking, and the app shell's own answer
+        // timeout still closes a page that does not answer.
+        while cancelled.try_recv().is_ok() {}
         let asked = self.client_attached
             && self.compositor_tx.as_ref().is_some_and(|tx| {
                 tx.is_connected()
@@ -535,40 +635,77 @@ impl OwnedSession {
                         .is_ok()
             });
         if !asked {
-            return "terminate requested; the compositor could not ask the app to close".to_owned();
+            return Close::Settle(
+                "terminate requested; the compositor could not ask the app to close".to_owned(),
+            );
         }
         let (Some(app_shell), Some(runtime), Some(relay)) = (
             self.app_shell.as_mut(),
             self.runtime.as_mut(),
             self.relay.as_mut(),
         ) else {
-            return "terminate requested".to_owned();
+            return Close::Settle("terminate requested".to_owned());
         };
         let wait = async {
-            tokio::select! {
-                status = app_shell.wait() => match status {
-                    Ok(status) if status.success() => {
-                        format!("closed on request; app shell exited ({status:?})")
+            loop {
+                tokio::select! {
+                    status = app_shell.wait() => break Close::Settle(match status {
+                        Ok(status) if status.success() => {
+                            format!("closed on request; app shell exited ({status:?})")
+                        }
+                        status => format!("app shell failed while closing ({status:?})"),
+                    }),
+                    status = runtime.wait() => {
+                        break Close::Settle(format!("runtime exited while closing ({status:?})"));
                     }
-                    status => format!("app shell failed while closing ({status:?})"),
-                },
-                status = runtime.wait() => format!("runtime exited while closing ({status:?})"),
-                _ = relay.ended() => "component closed its IPC connection while closing".to_owned(),
+                    _ = relay.ended() => break Close::Settle(
+                        "component closed its IPC connection while closing".to_owned(),
+                    ),
+                    Some(()) = cancelled.recv() => break Close::Cancelled,
+                    stop = stops.recv() => match stop {
+                        // Asking again while the application answers changes
+                        // nothing.
+                        Some(Stop::Close) => {}
+                        Some(Stop::Force) => {
+                            break Close::Settle("terminated by force while closing".to_owned());
+                        }
+                        None => break Close::Settle("appd is shutting down".to_owned()),
+                    },
+                }
             }
         };
         tokio::time::timeout(CLOSE_TIMEOUT, wait)
             .await
             .unwrap_or_else(|_| {
-                format!(
+                Close::Settle(format!(
                     "close requested; the app shell did not exit within {} s and was terminated",
                     CLOSE_TIMEOUT.as_secs()
-                )
+                ))
             })
+    }
+
+    /// Brings the session's window to the front with keyboard focus.
+    fn focus(&self, session_id: u64) {
+        if self.client_attached
+            && let Some(tx) = &self.compositor_tx
+        {
+            let _ = tx.try_send(AppdToCompositor::AppFocusRequest { session_id }.into());
+        }
     }
 
     async fn settle(self, registry: &Registry, reason: &str) -> anyhow::Result<()> {
         let session_id = self.session_id;
         tracing::info!(session_id, reason, "stopping session");
+        {
+            let mut reg = registry.lock().await;
+            if !matches!(reg.state(session_id), AppStateKind::Stopping) {
+                reg.set_state(session_id, AppStateKind::Stopping);
+                let _ = reg.broadcast().send(Response::AppState {
+                    session_id,
+                    state: AppStateKind::Stopping,
+                });
+            }
+        }
         kill_child(self.app_shell).await;
         kill_child(self.runtime).await;
         if self.client_attached
@@ -615,7 +752,7 @@ async fn kill_child(child: Option<tokio::process::Child>) {
 async fn wait_for_child_ready(
     stdout: tokio::process::ChildStdout,
     token: &str,
-    abort_rx: &mut tokio::sync::oneshot::Receiver<()>,
+    abort_rx: &mut StopReceiver,
 ) -> Result<BufReader<tokio::process::ChildStdout>, String> {
     tokio::select! {
         r = tokio::time::timeout(READY_TIMEOUT, wait_for_ready(stdout, token)) => match r {
@@ -623,7 +760,8 @@ async fn wait_for_child_ready(
             Ok(Err(e)) => Err(format!("did not become ready: {e}")),
             Err(_) => Err(format!("not ready after {}s", READY_TIMEOUT.as_secs())),
         },
-        _ = abort_rx => Err("startup aborted".to_owned()),
+        // Any stop request, or appd shutting down, ends a startup.
+        _ = abort_rx.recv() => Err("startup aborted".to_owned()),
     }
 }
 

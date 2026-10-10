@@ -35,7 +35,7 @@ struct SessionRegistry {
     next_id: u64,
     sessions: std::collections::HashMap<u64, SessionEntry>,
     broadcast: tokio::sync::broadcast::Sender<Response>,
-    abort_senders: std::collections::HashMap<u64, tokio::sync::oneshot::Sender<()>>,
+    abort_senders: std::collections::HashMap<u64, runtime::StopSender>,
     compositor_tx: Option<compositor_client::CompositorSender>,
     ipc_senders: std::collections::HashMap<u64, tokio::sync::mpsc::Sender<String>>,
 }
@@ -109,26 +109,46 @@ impl SessionRegistry {
         })
     }
 
-    /// Asks a session to stop: a running session is closed as a user close
-    /// would close it, a starting one is stopped at once. The session stays
-    /// registered, Stopping, until its supervisor settles it.
-    fn terminate(&mut self, session_id: u64) -> bool {
-        match self.abort_senders.remove(&session_id) {
-            Some(sender) => {
-                let _ = sender.send(());
-                self.set_state(session_id, AppStateKind::Stopping);
-                true
+    /// Asks a session to stop and returns the state to report, or `None`
+    /// when there is no such session. A running session is asked to close
+    /// as a user close would, and stays running while the application
+    /// answers; a forced stop or a session still starting is stopped at
+    /// once and is Stopping until its supervisor settles it.
+    fn terminate(&mut self, session_id: u64, force: bool) -> Option<AppStateKind> {
+        let state = self.state(session_id);
+        match self.abort_senders.get(&session_id) {
+            // Already ending; a forced request still ends it without waiting.
+            Some(sender) if matches!(state, AppStateKind::Stopping) => {
+                if force {
+                    let _ = sender.try_send(runtime::Stop::Force);
+                }
+                Some(AppStateKind::Stopping)
             }
-            // A session already closing keeps closing; it stays registered
-            // until its supervisor settles it.
-            None if matches!(self.state(session_id), AppStateKind::Stopping) => true,
+            Some(sender) => {
+                // A close is queued only into an empty queue, so a forced
+                // request always finds room; one already queued says the
+                // same as a repeat.
+                if force {
+                    let _ = sender.try_send(runtime::Stop::Force);
+                } else if sender.capacity() == runtime::STOP_QUEUE {
+                    let _ = sender.try_send(runtime::Stop::Close);
+                }
+                if !force && matches!(state, AppStateKind::Running) {
+                    return Some(AppStateKind::Running);
+                }
+                self.set_state(session_id, AppStateKind::Stopping);
+                Some(AppStateKind::Stopping)
+            }
             // A session no supervisor runs has nothing to settle.
-            None => self.sessions.remove(&session_id).is_some(),
+            None => self
+                .sessions
+                .remove(&session_id)
+                .map(|_| AppStateKind::Stopped),
         }
     }
 
-    pub(crate) fn register_abort(&mut self, session_id: u64) -> tokio::sync::oneshot::Receiver<()> {
-        let (tx, rx) = tokio::sync::oneshot::channel();
+    pub(crate) fn register_abort(&mut self, session_id: u64) -> runtime::StopReceiver {
+        let (tx, rx) = tokio::sync::mpsc::channel(runtime::STOP_QUEUE);
         self.abort_senders.insert(session_id, tx);
         rx
     }
@@ -154,7 +174,7 @@ impl SessionRegistry {
             .collect()
     }
 
-    fn state(&self, session_id: u64) -> AppStateKind {
+    pub(crate) fn state(&self, session_id: u64) -> AppStateKind {
         self.sessions
             .get(&session_id)
             .map(|e| e.state.clone())
@@ -566,30 +586,30 @@ pub(crate) async fn dispatch(req: Request, registry: &Registry) -> Response {
             });
             Response::LaunchAck { session_id, app_id }
         }
-        Request::TerminateApp { session_id } => {
-            let found = {
+        Request::TerminateApp { session_id, force } => {
+            let state = {
                 let mut reg = registry.lock().await;
-                let found = reg.terminate(session_id);
-                if found && matches!(reg.state(session_id), AppStateKind::Stopping) {
-                    // Every client, not only the requester, shows the close.
+                let before = reg.state(session_id);
+                let state = reg.terminate(session_id, force);
+                if matches!(state, Some(AppStateKind::Stopping))
+                    && !matches!(before, AppStateKind::Stopping)
+                {
                     let _ = reg.broadcast().send(Response::AppState {
                         session_id,
                         state: AppStateKind::Stopping,
                     });
                 }
-                found
+                state
             };
-            if found {
-                tracing::info!(session_id, "stop requested");
-                Response::AppState {
-                    session_id,
-                    state: AppStateKind::Stopping,
+            match state {
+                Some(state) => {
+                    tracing::info!(session_id, force, "stop requested");
+                    Response::AppState { session_id, state }
                 }
-            } else {
-                Response::Error {
+                None => Response::Error {
                     code: 1,
                     message: format!("session {session_id} not found"),
-                }
+                },
             }
         }
         Request::ActivateApp { session_id } => {
@@ -1104,7 +1124,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn dispatch_terminate_known_returns_stopping() {
+    async fn dispatch_terminate_forgets_a_stopped_session() {
         let _env = env_lock().lock().await;
         let reg = make_registry();
         let ack = dispatch(
@@ -1119,22 +1139,43 @@ mod tests {
             Response::LaunchAck { session_id, .. } => session_id,
             _ => panic!("expected LaunchAck"),
         };
-        // The reply says the session is stopping; Stopped is broadcast once
-        // its supervisor has settled it.
-        let resp = dispatch(Request::TerminateApp { session_id }, &reg).await;
+        // Without a configured runtime the session stopped at once; a
+        // terminate forgets it.
+        let resp = dispatch(
+            Request::TerminateApp {
+                session_id,
+                force: false,
+            },
+            &reg,
+        )
+        .await;
+        assert!(
+            matches!(
+                resp,
+                Response::AppState {
+                    state: AppStateKind::Stopped,
+                    ..
+                }
+            ),
+            "{resp:?}"
+        );
         assert!(matches!(
-            resp,
-            Response::AppState {
-                state: AppStateKind::Stopping,
-                ..
-            }
+            reg.lock().await.state(session_id),
+            AppStateKind::NotFound
         ));
     }
 
     #[tokio::test]
     async fn dispatch_terminate_unknown_returns_error() {
         let reg = make_registry();
-        let resp = dispatch(Request::TerminateApp { session_id: 999 }, &reg).await;
+        let resp = dispatch(
+            Request::TerminateApp {
+                session_id: 999,
+                force: false,
+            },
+            &reg,
+        )
+        .await;
         assert!(matches!(resp, Response::Error { .. }));
     }
 
@@ -1245,14 +1286,14 @@ mod tests {
     fn registry_terminate_known_session() {
         let mut reg = SessionRegistry::default();
         let id = reg.launch("com.example.app");
-        assert!(reg.terminate(id));
+        assert!(reg.terminate(id, false).is_some());
         assert!(matches!(reg.state(id), AppStateKind::NotFound));
     }
 
     #[test]
     fn registry_terminate_unknown_returns_false() {
         let mut reg = SessionRegistry::default();
-        assert!(!reg.terminate(999));
+        assert!(reg.terminate(999, false).is_none());
     }
 
     #[test]
@@ -1267,7 +1308,7 @@ mod tests {
         assert_eq!(sessions[0].app_id, "com.example.a");
         assert_eq!(sessions[1].session_id, id2);
         assert_eq!(sessions[1].app_id, "com.example.b");
-        reg.terminate(id1);
+        reg.terminate(id1, false);
         assert_eq!(reg.running_sessions().len(), 1);
         assert_eq!(reg.running_sessions()[0].session_id, id2);
     }
@@ -1541,6 +1582,168 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
+    async fn an_app_that_cancels_a_close_keeps_running() {
+        use std::os::unix::fs::PermissionsExt;
+        let _env = env_lock().lock().await;
+        use_test_runtime_dir();
+        let dir = std::env::temp_dir().join(format!("weft_test_cancel_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let app = dir.join("store/org.example.cancel");
+        write_test_package(&app, "org.example.cancel", "");
+        let runtime = dir.join("runtime.sh");
+        std::fs::write(
+            &runtime,
+            "#!/bin/sh\necho READY $WEFT_READY_TOKEN\nexec sleep 30\n",
+        )
+        .unwrap();
+        // The app shell declines the close once, after a forged report.
+        let shell = dir.join("shell.sh");
+        std::fs::write(
+            &shell,
+            "#!/bin/sh\necho READY $WEFT_READY_TOKEN\nsleep 1\n\
+             echo CLOSE_CANCELLED 00000000000000000000000000000000\nsleep 1\n\
+             echo CLOSE_CANCELLED $WEFT_READY_TOKEN\nexec sleep 30\n",
+        )
+        .unwrap();
+        for script in [&runtime, &shell] {
+            std::fs::set_permissions(script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        let vars = [
+            ("WEFT_RUNTIME_BIN", runtime.clone().into_os_string()),
+            ("WEFT_APP_SHELL_BIN", shell.clone().into_os_string()),
+            ("WEFT_DISABLE_CGROUP", "1".into()),
+            ("WEFT_APP_STORE", dir.join("store").into_os_string()),
+        ];
+        let prior: Vec<_> = vars
+            .iter()
+            .map(|(k, _)| (*k, std::env::var_os(k)))
+            .collect();
+        for (key, value) in &vars {
+            // SAFETY: env_lock is held on a current_thread runtime.
+            unsafe { std::env::set_var(key, value) };
+        }
+
+        let registry = make_registry();
+        let (tx, mut compositor) = tokio::sync::mpsc::channel(8);
+        registry.lock().await.compositor_tx = Some(compositor_client::CompositorSender::new(
+            tx,
+            std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true)),
+        ));
+        let mut rx = registry.lock().await.subscribe();
+        let ack = dispatch(
+            Request::LaunchApp {
+                app_id: "org.example.cancel".into(),
+                surface_id: 0,
+            },
+            &registry,
+        )
+        .await;
+        let Response::LaunchAck { session_id, .. } = ack else {
+            panic!("{ack:?}");
+        };
+        let ready = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            while !matches!(rx.recv().await, Ok(Response::AppReady { .. })) {}
+        })
+        .await;
+        let started = std::time::Instant::now();
+        dispatch(
+            Request::TerminateApp {
+                session_id,
+                force: false,
+            },
+            &registry,
+        )
+        .await;
+        // Once the genuine report arrives, the declining window is brought
+        // to the front, and the session never left Running.
+        let resumed = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            loop {
+                match compositor.recv().await.map(|out| out.msg) {
+                    Some(weft_ipc_types::AppdToCompositor::AppFocusRequest { session_id: s })
+                        if s == session_id =>
+                    {
+                        return true;
+                    }
+                    Some(_) => {}
+                    None => return false,
+                }
+            }
+        })
+        .await;
+        let mut broadcasts = Vec::new();
+        while let Ok(message) = rx.try_recv() {
+            broadcasts.push(message);
+        }
+        let resumed_after = started.elapsed();
+        let state = registry.lock().await.state(session_id);
+        // A forced stop does not ask, so nothing can decline it.
+        let forced_at = std::time::Instant::now();
+        let forced = dispatch(
+            Request::TerminateApp {
+                session_id,
+                force: true,
+            },
+            &registry,
+        )
+        .await;
+        let stopped = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            while !matches!(
+                rx.recv().await,
+                Ok(Response::AppState {
+                    state: AppStateKind::Stopped,
+                    ..
+                })
+            ) {}
+        })
+        .await;
+
+        for (key, value) in prior {
+            // SAFETY: as above.
+            unsafe {
+                match value {
+                    Some(v) => std::env::set_var(key, v),
+                    None => std::env::remove_var(key),
+                }
+            }
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(ready.is_ok(), "the session did not become ready");
+        assert_eq!(
+            resumed,
+            Ok(true),
+            "the cancelled close did not resume the session"
+        );
+        // The forged report one second in did not count.
+        assert!(
+            resumed_after >= std::time::Duration::from_millis(1500),
+            "{resumed_after:?}"
+        );
+        assert!(matches!(state, AppStateKind::Running), "{state:?}");
+        assert!(
+            !broadcasts
+                .iter()
+                .any(|m| matches!(m, Response::AppState { .. })),
+            "{broadcasts:?}"
+        );
+        assert!(
+            matches!(
+                forced,
+                Response::AppState {
+                    state: AppStateKind::Stopping,
+                    ..
+                }
+            ),
+            "{forced:?}"
+        );
+        assert!(stopped.is_ok(), "a forced stop did not stop the session");
+        assert!(
+            forced_at.elapsed() < std::time::Duration::from_secs(3),
+            "{:?}",
+            forced_at.elapsed()
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
     async fn an_app_that_ignores_a_close_is_terminated_after_the_timeout() {
         use std::os::unix::fs::PermissionsExt;
         let _env = env_lock().lock().await;
@@ -1595,10 +1798,24 @@ mod tests {
         })
         .await;
         let started = std::time::Instant::now();
-        let reply = dispatch(Request::TerminateApp { session_id }, &registry).await;
-        // A second request while the app is closing changes nothing: the
-        // session stays registered and listed until it settles.
-        let again = dispatch(Request::TerminateApp { session_id }, &registry).await;
+        let reply = dispatch(
+            Request::TerminateApp {
+                session_id,
+                force: false,
+            },
+            &registry,
+        )
+        .await;
+        // While the application is asked, the session is still running; a
+        // second request changes nothing and does not ask again.
+        let again = dispatch(
+            Request::TerminateApp {
+                session_id,
+                force: false,
+            },
+            &registry,
+        )
+        .await;
         let closing = {
             let reg = registry.lock().await;
             (
@@ -1640,7 +1857,7 @@ mod tests {
             matches!(
                 reply,
                 Response::AppState {
-                    state: AppStateKind::Stopping,
+                    state: AppStateKind::Running,
                     ..
                 }
             ),
@@ -1650,27 +1867,32 @@ mod tests {
             matches!(
                 again,
                 Response::AppState {
-                    state: AppStateKind::Stopping,
+                    state: AppStateKind::Running,
                     ..
                 }
             ),
             "{again:?}"
         );
         assert!(
-            matches!(closing.0, AppStateKind::Stopping),
+            matches!(closing.0, AppStateKind::Running),
             "{:?}",
             closing.0
         );
-        assert!(closing.1, "a closing session is no longer listed");
-        // An app the user closed is not restored at the next start.
-        assert!(closing.2.is_empty(), "{:?}", closing.2);
+        assert!(
+            closing.1,
+            "a session being asked to close is no longer listed"
+        );
+        assert_eq!(closing.2, ["org.example.close"]);
         assert!(stopped.is_ok(), "the session did not stop");
         // The app was asked to close, given the timeout, then terminated.
-        assert!(
-            sent.iter().any(|m| matches!(
-                m,
-                weft_ipc_types::AppdToCompositor::AppCloseRequest { session_id: s } if *s == session_id
-            )),
+        assert_eq!(
+            sent.iter()
+                .filter(|m| matches!(
+                    m,
+                    weft_ipc_types::AppdToCompositor::AppCloseRequest { session_id: s } if *s == session_id
+                ))
+                .count(),
+            1,
             "{sent:?}"
         );
         assert!(elapsed >= runtime::CLOSE_TIMEOUT, "{elapsed:?}");
@@ -1678,6 +1900,139 @@ mod tests {
             elapsed < runtime::CLOSE_TIMEOUT + std::time::Duration::from_secs(5),
             "{elapsed:?}"
         );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_forced_stop_ends_a_close_in_progress() {
+        use std::os::unix::fs::PermissionsExt;
+        let _env = env_lock().lock().await;
+        use_test_runtime_dir();
+        let dir = std::env::temp_dir().join(format!("weft_test_force_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let app = dir.join("store/org.example.force");
+        write_test_package(&app, "org.example.force", "");
+        // Both children report ready and then ignore everything.
+        let child = dir.join("child.sh");
+        std::fs::write(
+            &child,
+            "#!/bin/sh\necho READY $WEFT_READY_TOKEN\nexec sleep 30\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&child, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let vars = [
+            ("WEFT_RUNTIME_BIN", child.clone().into_os_string()),
+            ("WEFT_APP_SHELL_BIN", child.clone().into_os_string()),
+            ("WEFT_DISABLE_CGROUP", "1".into()),
+            ("WEFT_APP_STORE", dir.join("store").into_os_string()),
+        ];
+        let prior: Vec<_> = vars
+            .iter()
+            .map(|(k, _)| (*k, std::env::var_os(k)))
+            .collect();
+        for (key, value) in &vars {
+            // SAFETY: env_lock is held on a current_thread runtime.
+            unsafe { std::env::set_var(key, value) };
+        }
+
+        let registry = make_registry();
+        let (tx, compositor) = tokio::sync::mpsc::channel(8);
+        registry.lock().await.compositor_tx = Some(compositor_client::CompositorSender::new(
+            tx,
+            std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true)),
+        ));
+        let mut rx = registry.lock().await.subscribe();
+        let ack = dispatch(
+            Request::LaunchApp {
+                app_id: "org.example.force".into(),
+                surface_id: 0,
+            },
+            &registry,
+        )
+        .await;
+        let Response::LaunchAck { session_id, .. } = ack else {
+            panic!("{ack:?}");
+        };
+        let ready = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            while !matches!(rx.recv().await, Ok(Response::AppReady { .. })) {}
+        })
+        .await;
+        // The close is under way: the session is running while it is asked.
+        let asked = dispatch(
+            Request::TerminateApp {
+                session_id,
+                force: false,
+            },
+            &registry,
+        )
+        .await;
+        // Repeats fill no queue a forced stop then cannot enter.
+        for _ in 0..3 {
+            dispatch(
+                Request::TerminateApp {
+                    session_id,
+                    force: false,
+                },
+                &registry,
+            )
+            .await;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+        let forced_at = std::time::Instant::now();
+        let reply = dispatch(
+            Request::TerminateApp {
+                session_id,
+                force: true,
+            },
+            &registry,
+        )
+        .await;
+        let stopped = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            while !matches!(
+                rx.recv().await,
+                Ok(Response::AppState {
+                    state: AppStateKind::Stopped,
+                    ..
+                })
+            ) {}
+        })
+        .await;
+        let elapsed = forced_at.elapsed();
+        drop(compositor);
+
+        for (key, value) in prior {
+            // SAFETY: as above.
+            unsafe {
+                match value {
+                    Some(v) => std::env::set_var(key, v),
+                    None => std::env::remove_var(key),
+                }
+            }
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(ready.is_ok(), "the session did not become ready");
+        assert!(
+            matches!(
+                reply,
+                Response::AppState {
+                    state: AppStateKind::Stopping,
+                    ..
+                }
+            ),
+            "{reply:?}"
+        );
+        assert!(
+            matches!(
+                asked,
+                Response::AppState {
+                    state: AppStateKind::Running,
+                    ..
+                }
+            ),
+            "{asked:?}"
+        );
+        assert!(stopped.is_ok(), "the forced stop did not stop the session");
+        // The forced stop does not wait out the close timeout.
+        assert!(elapsed < std::time::Duration::from_secs(3), "{elapsed:?}");
     }
 
     #[test]
@@ -2036,6 +2391,11 @@ mod tests {
             Ok(Ok(Response::AppReady { session_id: sid, .. })) if sid == session_id
         ));
 
+        let stopping = tokio::time::timeout(std::time::Duration::from_millis(200), rx.recv()).await;
+        assert!(matches!(
+            stopping,
+            Ok(Ok(Response::AppState { session_id: sid, state: AppStateKind::Stopping })) if sid == session_id
+        ));
         let stopped = tokio::time::timeout(std::time::Duration::from_millis(200), rx.recv()).await;
         assert!(matches!(
             stopped,
@@ -2080,7 +2440,7 @@ mod tests {
         let session_id = registry.lock().await.launch("test.abort.startup");
         let abort_rx = registry.lock().await.register_abort(session_id);
 
-        registry.lock().await.terminate(session_id);
+        registry.lock().await.terminate(session_id, false);
 
         use_test_runtime_dir();
 
