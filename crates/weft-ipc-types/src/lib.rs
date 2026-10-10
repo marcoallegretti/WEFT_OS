@@ -13,11 +13,16 @@ pub const MAX_FRAME_LEN: usize = 4 * 1024 * 1024;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum AppdToCompositor {
-    AppSurfaceCreated {
-        app_id: String,
+    /// Hands the compositor its end of the Wayland connection weft-appd
+    /// created for the session's app shell. The frame is sent with exactly
+    /// one file descriptor attached (SCM_RIGHTS): the compositor end of that
+    /// connection. Holding the connection is the session's identity; no
+    /// client-supplied ID or process ID is trusted for it.
+    AttachClient {
         session_id: u64,
-        pid: u32,
+        app_id: String,
     },
+    /// The session ended; the compositor closes its client and windows.
     AppSurfaceDestroyed {
         session_id: u64,
     },
@@ -30,8 +35,10 @@ pub enum AppdToCompositor {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum CompositorToAppd {
+    /// The session's client mapped its first toplevel.
     SurfaceReady { session_id: u64 },
-    ClientDisconnected { pid: u32 },
+    /// The session's Wayland client disconnected.
+    ClientDisconnected { session_id: u64 },
 }
 
 /// Encode a message as a length-prefixed MessagePack frame.
@@ -114,23 +121,17 @@ mod tests {
     use super::*;
 
     #[test]
-    fn roundtrip_appd_to_compositor_surface_created() {
-        let msg = AppdToCompositor::AppSurfaceCreated {
+    fn roundtrip_appd_to_compositor_attach_client() {
+        let msg = AppdToCompositor::AttachClient {
             app_id: "com.example.app".into(),
             session_id: 42,
-            pid: 1234,
         };
         let frame = frame_encode(&msg).unwrap();
         let decoded: AppdToCompositor = frame_decode(&frame).unwrap();
         match decoded {
-            AppdToCompositor::AppSurfaceCreated {
-                app_id,
-                session_id,
-                pid,
-            } => {
+            AppdToCompositor::AttachClient { app_id, session_id } => {
                 assert_eq!(app_id, "com.example.app");
                 assert_eq!(session_id, 42);
-                assert_eq!(pid, 1234);
             }
             _ => panic!("unexpected variant"),
         }
@@ -171,11 +172,11 @@ mod tests {
 
     #[test]
     fn roundtrip_compositor_to_appd_disconnected() {
-        let msg = CompositorToAppd::ClientDisconnected { pid: 5678 };
+        let msg = CompositorToAppd::ClientDisconnected { session_id: 5678 };
         let frame = frame_encode(&msg).unwrap();
         let decoded: CompositorToAppd = frame_decode(&frame).unwrap();
         match decoded {
-            CompositorToAppd::ClientDisconnected { pid } => assert_eq!(pid, 5678),
+            CompositorToAppd::ClientDisconnected { session_id } => assert_eq!(session_id, 5678),
             _ => panic!("unexpected variant"),
         }
     }

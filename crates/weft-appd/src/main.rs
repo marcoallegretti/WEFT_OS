@@ -8,15 +8,7 @@ use anyhow::Context;
 use tokio::io::AsyncWriteExt;
 use tokio::sync::Mutex;
 
-#[cfg(unix)]
 mod compositor_client;
-#[cfg(not(unix))]
-mod compositor_client {
-    use tokio::sync::mpsc;
-    use weft_ipc_types::AppdToCompositor;
-
-    pub type CompositorSender = mpsc::Sender<AppdToCompositor>;
-}
 mod grants;
 mod ipc;
 mod launch;
@@ -225,19 +217,35 @@ async fn run() -> anyhow::Result<()> {
         let _ = sd_notify::notify(false, &[sd_notify::NotifyState::Ready]);
     }
 
-    if let Some(app_ids) = load_session() {
-        tracing::info!(count = app_ids.len(), "restoring previous session");
-        for app_id in app_ids {
-            let _ = dispatch(
-                crate::ipc::Request::LaunchApp {
-                    app_id,
-                    surface_id: 0,
-                },
-                &registry,
-            )
-            .await;
-        }
-    }
+    // Restoring runs beside the request loops, so waiting for the
+    // compositor delays neither clients nor shutdown. Until it finishes,
+    // the restored list is what a shutdown saves.
+    let restore = load_session().map(|app_ids| {
+        let saved = app_ids.clone();
+        let registry = Arc::clone(&registry);
+        let task = tokio::spawn(async move {
+            // Apps need the compositor connection; give it a moment.
+            let compositor = registry.lock().await.compositor_tx.clone();
+            if let Some(compositor) = compositor {
+                let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
+                while !compositor.is_connected() && tokio::time::Instant::now() < deadline {
+                    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                }
+            }
+            tracing::info!(count = app_ids.len(), "restoring previous session");
+            for app_id in app_ids {
+                let _ = dispatch(
+                    crate::ipc::Request::LaunchApp {
+                        app_id,
+                        surface_id: 0,
+                    },
+                    &registry,
+                )
+                .await;
+            }
+        });
+        (task, saved)
+    });
 
     #[cfg(unix)]
     let mut sigterm = {
@@ -283,7 +291,14 @@ async fn run() -> anyhow::Result<()> {
         }
     }
 
-    save_session(registry.lock().await.running_app_ids()).await;
+    let app_ids = match restore {
+        Some((task, saved)) if !task.is_finished() => {
+            task.abort();
+            saved
+        }
+        _ => registry.lock().await.running_app_ids(),
+    };
+    save_session(app_ids).await;
     registry.lock().await.shutdown_all();
     tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;
     let _ = std::fs::remove_file(&socket_path);
@@ -446,8 +461,20 @@ pub(crate) async fn dispatch(req: Request, registry: &Registry) -> Response {
             // The package is resolved and its capabilities granted before a
             // session exists; a package this host cannot satisfy is refused,
             // not started.
+            let compositor_down = registry
+                .lock()
+                .await
+                .compositor_tx
+                .as_ref()
+                .is_some_and(|tx| !tx.is_connected());
             let launch = if !weft_ipc_types::package::is_valid_app_id(&app_id) {
                 Err(grants::Refusal::new(400, "invalid app ID"))
+            } else if compositor_down {
+                // An app started now could never show a window.
+                Err(grants::Refusal::new(
+                    503,
+                    "weft-compositor is not connected",
+                ))
             } else if std::env::var("WEFT_RUNTIME_BIN").is_ok() {
                 resolve_launch(app_id.clone()).await.map(Some)
             } else {
@@ -1388,6 +1415,191 @@ mod tests {
         assert!(stopped.is_ok(), "session did not stop");
         assert!(registry.lock().await.ipc_sender_for(session_id).is_none());
         assert!(!session_ipc_socket_path(session_id).unwrap().exists());
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn without_a_connected_compositor_nothing_is_started() {
+        use std::os::unix::fs::PermissionsExt;
+        let _env = env_lock().lock().await;
+        use_test_runtime_dir();
+        let dir = std::env::temp_dir().join(format!("weft_test_nocomp_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let app = dir.join("store/org.example.nocomp");
+        write_test_package(&app, "org.example.nocomp", "");
+        // Each child records that it started.
+        let log = dir.join("started.log");
+        let child = dir.join("child.sh");
+        std::fs::write(
+            &child,
+            format!(
+                "#!/bin/sh\necho started >> '{}'\necho READY $WEFT_READY_TOKEN\nexec sleep 1\n",
+                log.display()
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&child, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let vars = [
+            ("WEFT_RUNTIME_BIN", child.clone().into_os_string()),
+            ("WEFT_APP_SHELL_BIN", child.clone().into_os_string()),
+            ("WEFT_DISABLE_CGROUP", "1".into()),
+            ("WEFT_APP_STORE", dir.join("store").into_os_string()),
+        ];
+        let prior: Vec<_> = vars
+            .iter()
+            .map(|(k, _)| (*k, std::env::var_os(k)))
+            .collect();
+        for (key, value) in &vars {
+            // SAFETY: env_lock is held on a current_thread runtime.
+            unsafe { std::env::set_var(key, value) };
+        }
+
+        let registry = make_registry();
+        let (tx, mut compositor) = tokio::sync::mpsc::channel(8);
+        registry.lock().await.compositor_tx = Some(compositor_client::CompositorSender::new(
+            tx,
+            std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        ));
+        let refused = dispatch(
+            Request::LaunchApp {
+                app_id: "org.example.nocomp".into(),
+                surface_id: 0,
+            },
+            &registry,
+        )
+        .await;
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+        let started = std::fs::read_to_string(&log).unwrap_or_default();
+
+        for (key, value) in prior {
+            // SAFETY: as above.
+            unsafe {
+                match value {
+                    Some(v) => std::env::set_var(key, v),
+                    None => std::env::remove_var(key),
+                }
+            }
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(
+            matches!(refused, Response::Error { code: 503, .. }),
+            "{refused:?}"
+        );
+        // Nothing started and nothing was queued for the compositor.
+        assert_eq!(started, "");
+        assert!(compositor.try_recv().is_err());
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn the_app_shell_connects_only_through_its_session_connection() {
+        use std::io::BufRead;
+        use std::os::unix::fs::PermissionsExt;
+        let _env = env_lock().lock().await;
+        use_test_runtime_dir();
+        let dir = std::env::temp_dir().join(format!("weft_test_attach_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let app = dir.join("store/org.example.attach");
+        write_test_package(&app, "org.example.attach", "");
+        // Each child writes its Wayland environment to its standard input,
+        // which only the app shell has connected to anything.
+        let child = dir.join("child.sh");
+        std::fs::write(
+            &child,
+            "#!/bin/sh\nprintf '%s %s\\n' \"${WAYLAND_SOCKET-unset}\" \
+             \"${WAYLAND_DISPLAY-unset}\" >&0 2>/dev/null\n\
+             echo READY $WEFT_READY_TOKEN\nexec sleep 1\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&child, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let vars = [
+            ("WEFT_RUNTIME_BIN", child.clone().into_os_string()),
+            ("WEFT_APP_SHELL_BIN", child.clone().into_os_string()),
+            ("WEFT_DISABLE_CGROUP", "1".into()),
+            ("WEFT_APP_STORE", dir.join("store").into_os_string()),
+            ("WAYLAND_DISPLAY", "wayland-ambient".into()),
+        ];
+        let prior: Vec<_> = vars
+            .iter()
+            .map(|(k, _)| (*k, std::env::var_os(k)))
+            .collect();
+        for (key, value) in &vars {
+            // SAFETY: env_lock is held on a current_thread runtime.
+            unsafe { std::env::set_var(key, value) };
+        }
+
+        let registry = make_registry();
+        let (tx, mut compositor) = tokio::sync::mpsc::channel(8);
+        registry.lock().await.compositor_tx = Some(compositor_client::CompositorSender::new(
+            tx,
+            std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true)),
+        ));
+        let mut rx = registry.lock().await.subscribe();
+        let ack = dispatch(
+            Request::LaunchApp {
+                app_id: "org.example.attach".into(),
+                surface_id: 0,
+            },
+            &registry,
+        )
+        .await;
+        let attached = tokio::time::timeout(std::time::Duration::from_secs(10), compositor.recv())
+            .await
+            .ok()
+            .flatten();
+        let stopped = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            while !matches!(
+                rx.recv().await,
+                Ok(Response::AppState {
+                    state: AppStateKind::Stopped,
+                    ..
+                })
+            ) {}
+        })
+        .await;
+        let released = compositor.try_recv().ok().map(|out| out.msg);
+
+        for (key, value) in prior {
+            // SAFETY: as above.
+            unsafe {
+                match value {
+                    Some(v) => std::env::set_var(key, v),
+                    None => std::env::remove_var(key),
+                }
+            }
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+        let Response::LaunchAck { session_id, .. } = ack else {
+            panic!("{ack:?}");
+        };
+        assert!(stopped.is_ok(), "session did not stop");
+        let attached = attached.expect("no connection was handed to the compositor");
+        assert!(
+            matches!(
+                &attached.msg,
+                weft_ipc_types::AppdToCompositor::AttachClient { session_id: s, app_id }
+                    if *s == session_id && app_id == "org.example.attach"
+            ),
+            "{:?}",
+            attached.msg
+        );
+        // The compositor's end reaches the app shell, which sees only
+        // WAYLAND_SOCKET and no display to connect to instead.
+        let stream = std::os::unix::net::UnixStream::from(attached.fd.expect("no descriptor"));
+        stream
+            .set_read_timeout(Some(std::time::Duration::from_secs(5)))
+            .unwrap();
+        let mut line = String::new();
+        std::io::BufReader::new(stream)
+            .read_line(&mut line)
+            .unwrap();
+        assert_eq!(line.trim(), "0 unset");
+        assert!(
+            matches!(
+                released,
+                Some(weft_ipc_types::AppdToCompositor::AppSurfaceDestroyed { session_id: s })
+                    if s == session_id
+            ),
+            "{released:?}"
+        );
     }
 
     #[tokio::test(flavor = "current_thread")]

@@ -53,11 +53,35 @@ use smithay::{
 #[derive(Default)]
 pub struct WeftClientState {
     pub compositor_state: CompositorClientState,
+    /// The appd session this client's connection was created for. Clients
+    /// that connect through the display socket have none.
+    pub session: Option<SessionBinding>,
+}
+
+/// The appd session a client belongs to, established by weft-appd handing
+/// the compositor the client's connection, never by the client itself.
+pub struct SessionBinding {
+    pub session_id: u64,
+    pub app_id: String,
+    /// Reports the session's disconnection to the event loop.
+    pub disconnected: smithay::reexports::calloop::channel::Sender<(u64, ClientId)>,
+}
+
+/// Whether `client` connected through the display socket rather than
+/// through a connection weft-appd created for an application session.
+pub fn outside_sessions(client: &Client) -> bool {
+    client
+        .get_data::<WeftClientState>()
+        .is_none_or(|data| data.session.is_none())
 }
 
 impl ClientData for WeftClientState {
     fn initialized(&self, _client_id: ClientId) {}
-    fn disconnected(&self, _client_id: ClientId, _reason: DisconnectReason) {}
+    fn disconnected(&self, client_id: ClientId, _reason: DisconnectReason) {
+        if let Some(binding) = &self.session {
+            let _ = binding.disconnected.send((binding.session_id, client_id));
+        }
+    }
 }
 
 /// Accumulated state for a multi-touch swipe gesture in progress.
@@ -124,7 +148,10 @@ impl WeftCompositorState {
     ) -> Self {
         let compositor_state = CompositorState::new::<Self>(&display_handle);
         let xdg_shell_state = XdgShellState::new::<Self>(&display_handle);
-        let layer_shell_state = WlrLayerShellState::new::<Self>(&display_handle);
+        // Layer surfaces and input methods are shell-level: an application
+        // session's client is not offered them.
+        let layer_shell_state =
+            WlrLayerShellState::new_with_filter::<Self, _>(&display_handle, outside_sessions);
         let shm_state = ShmState::new::<Self>(&display_handle, vec![]);
         let dmabuf_state = DmabufState::new();
         let output_manager_state = OutputManagerState::new_with_xdg_output::<Self>(&display_handle);
@@ -132,7 +159,7 @@ impl WeftCompositorState {
         let presentation_state = PresentationState::new::<Self>(&display_handle, 1);
         let text_input_state = TextInputManagerState::new::<Self>(&display_handle);
         let input_method_state =
-            InputMethodManagerState::new::<Self, _>(&display_handle, |_client| true);
+            InputMethodManagerState::new::<Self, _>(&display_handle, outside_sessions);
         let pointer_constraints_state = PointerConstraintsState::new::<Self>(&display_handle);
         let cursor_shape_state = CursorShapeManagerState::new::<Self>(&display_handle);
         let weft_shell_state = WeftShellState::new::<Self>(&display_handle);
@@ -241,8 +268,16 @@ impl XdgShellHandler for WeftCompositorState {
 
     fn new_toplevel(&mut self, surface: ToplevelSurface) {
         surface.send_configure();
+        let session = surface.wl_surface().client().and_then(|client| {
+            client
+                .get_data::<WeftClientState>()
+                .and_then(|data| data.session.as_ref().map(|s| s.session_id))
+        });
         let window = Window::new_wayland_window(surface);
         self.space.map_element(window, (0, 0), false);
+        if let (Some(session_id), Some(ipc)) = (session, self.appd_ipc.as_mut()) {
+            ipc.surface_created(session_id);
+        }
     }
 
     fn new_popup(&mut self, surface: PopupSurface, positioner: PositionerState) {
@@ -466,7 +501,7 @@ impl GlobalDispatch<ZweftShellManagerV1, ()> for WeftCompositorState {
 impl Dispatch<ZweftShellManagerV1, ()> for WeftCompositorState {
     fn request(
         state: &mut Self,
-        _client: &Client,
+        client: &Client,
         _resource: &ZweftShellManagerV1,
         request: zweft_shell_manager_v1::Request,
         _data: &(),
@@ -486,6 +521,14 @@ impl Dispatch<ZweftShellManagerV1, ()> for WeftCompositorState {
                 width,
                 height,
             } => {
+                // An application session's windows carry the identity appd
+                // bound to its connection, and only the trusted shell, which
+                // connects through the display socket, may take shell roles.
+                let session = client
+                    .get_data::<WeftClientState>()
+                    .and_then(|data| data.session.as_ref());
+                let shell_role = matches!(role.as_str(), "panel" | "overlay");
+                let app_id = session.map_or(app_id, |s| s.app_id.clone());
                 let is_panel = role == "panel";
                 let window = data_init.init(
                     id,
@@ -497,6 +540,18 @@ impl Dispatch<ZweftShellManagerV1, ()> for WeftCompositorState {
                         closed: std::sync::atomic::AtomicBool::new(false),
                     },
                 );
+                if let Some(session) = session
+                    && shell_role
+                {
+                    window.post_error(
+                        crate::protocols::server::zweft_shell_window_v1::Error::RoleNotPermitted,
+                        format!(
+                            "session {} ({}) may not create shell windows",
+                            session.session_id, session.app_id
+                        ),
+                    );
+                    return;
+                }
                 if is_panel {
                     let (ox, oy, ow, oh) = state
                         .space

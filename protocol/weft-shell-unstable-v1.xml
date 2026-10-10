@@ -65,6 +65,11 @@
         object identity; no separate window_id is exchanged. The
         compositor will emit configure on the new object to communicate the
         effective initial geometry and state.
+
+        For a client that the compositor associated with an application
+        session, the session's application identifier replaces the app_id
+        argument, and the panel and overlay roles are refused with the
+        role_not_permitted error on the new window.
       </description>
       <arg name="id"     type="new_id" interface="zweft_shell_window_v1"
            summary="new window object"/>
@@ -114,6 +119,8 @@
       <description summary="protocol errors"/>
       <entry name="defunct_window" value="0"
              summary="request sent after window_closed was received"/>
+      <entry name="role_not_permitted" value="1"
+             summary="an application session requested a shell-only role"/>
     </enum>
 
     <request name="destroy" type="destructor">
