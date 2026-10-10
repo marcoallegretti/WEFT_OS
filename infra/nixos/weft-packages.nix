@@ -82,5 +82,9 @@ in {
   weft-mount-helper = mkWeftPkg {
     pname = "weft-mount-helper";
     extraBuildInputs = with pkgs; [ cryptsetup ];
+    # The helper runs setuid and takes no program from its caller's PATH.
+    extraEnv = {
+      WEFT_VERITYSETUP = "${pkgs.cryptsetup}/bin/veritysetup";
+    };
   };
 }

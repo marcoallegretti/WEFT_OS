@@ -32,7 +32,7 @@ The first installation of an app ID records its owner in `$XDG_DATA_HOME/weft/ow
 
 Not yet covered: key rotation and ownership transfer have no workflow, and removing a key is the only revocation; and capabilities are granted at launch without asking the user, independently of the signature.
 
-For verified read-only package storage, `weft-pack build-image` produces an EROFS image protected with dm-verity. Mounting requires the setuid `weft-mount-helper` which calls `veritysetup`. The image's root hash is not yet authenticated (see `architecture.md`).
+For verified read-only package storage, `weft-pack build-image` produces an EROFS image protected with dm-verity. Mounting requires the setuid-root `weft-mount-helper`, which calls `veritysetup`. Its callers can mount only images they can read, at their own runtime directory, read-only, without set-user-ID programs, devices or executables, at most 64 at a time (see `architecture.md`). A user can therefore have the kernel parse an EROFS image of their own making: the EROFS driver's handling of crafted images is part of the attack surface wherever the helper is installed. The NixOS image installs it through a `security.wrappers` entry that only the `users` group may run. The image's root hash is not yet authenticated.
 
 ## Seccomp
 

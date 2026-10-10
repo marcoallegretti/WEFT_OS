@@ -36,7 +36,7 @@ Per-session file proxy. Runs as a separate process with the session's directory 
 
 ### weft-mount-helper
 
-Setuid helper binary. Calls `veritysetup` and mounts EROFS images for dm-verity-protected packages. Its device-mapper device is named after the mountpoint, which weft-appd names with a random token in `$XDG_RUNTIME_DIR/weft/mnt`. The helper does not yet restrict its callers or the images and mountpoints they pass, so it is not part of a supported installation.
+Setuid-root helper that mounts the EROFS images of dm-verity protected packages for weft-appd and unmounts them. Since its caller controls every argument and the environment, it mounts only at an empty directory `/run/user/<uid>/weft/mnt/<name>` of the real user (weft-appd names it with a random token in `$XDG_RUNTIME_DIR/weft/mnt`, so `XDG_RUNTIME_DIR` must be `/run/user/<uid>`), with every component from `<uid>` on owned by that user, not writable by others and opened without following symbolic links, and mounts through the opened directory. It opens the image and hash tree with the real user's permissions, mounts read-only with `nosuid`, `nodev` and `noexec`, unmounts only an EROFS filesystem at such a directory, and runs `veritysetup` from the absolute path fixed at build time (`WEFT_VERITYSETUP`, `/usr/sbin/veritysetup` by default) with an empty environment. Its device-mapper device is `weft-<uid>-<name>`, so a user can only reach their own devices; a device left by an interrupted mount is closed by the next mount or unmount at that directory, and a user may have at most 64 open.
 
 ## Process Topology
 
