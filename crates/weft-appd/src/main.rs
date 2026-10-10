@@ -578,6 +578,29 @@ pub(crate) async fn dispatch(req: Request, registry: &Registry) -> Response {
     }
 }
 
+/// Refuses a launch while the app declares a capability the user has not
+/// approved; a signature, however trusted, approves nothing.
+fn check_approval(app_id: &str, declared: &[String]) -> Result<(), grants::Refusal> {
+    use weft_ipc_types::approval::{approval_path, read_approved, unapproved};
+    let data_home = weft_ipc_types::package::data_home().ok_or_else(|| {
+        grants::Refusal::new(500, "cannot locate the data home holding app approvals")
+    })?;
+    let record = approval_path(&data_home, app_id);
+    let approved = read_approved(&record)
+        .map_err(|e| grants::Refusal::new(500, format!("cannot read {}: {e}", record.display())))?;
+    let pending = unapproved(declared, &approved);
+    if pending.is_empty() {
+        return Ok(());
+    }
+    Err(grants::Refusal::new(
+        403,
+        format!(
+            "{app_id} needs approval for {}; approve it with weft-pack approve {app_id}",
+            pending.join(", ")
+        ),
+    ))
+}
+
 /// Resolves the package of `app_id` and derives its grants. Resolution may
 /// mount an image, so it runs off the async workers; a refused launch
 /// releases the mount the same way.
@@ -586,6 +609,10 @@ async fn resolve_launch(
 ) -> Result<(launch::LaunchPackage, grants::SessionGrants), grants::Refusal> {
     tokio::task::spawn_blocking(move || {
         let package = launch::resolve(&app_id)?;
+        // Unknown and unsupported capabilities are refused as such, then
+        // unapproved ones, before anything is prepared on the host.
+        grants::validate(&package.capabilities)?;
+        check_approval(&app_id, &package.capabilities)?;
         let grants = grants::derive(&app_id, &package.capabilities, grants::HostDirs::from_env)?;
         tracing::info!(
             %app_id,
@@ -827,6 +854,69 @@ mod tests {
             }
         }
         assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn a_capability_launches_only_once_approved() {
+        let _env = env_lock().lock().await;
+        let store = std::env::temp_dir().join(format!("weft_approve_{}", std::process::id()));
+        let id = "org.example.notify";
+        write_test_package(
+            &store.join(id),
+            id,
+            "capabilities = [\"sys:notifications\"]",
+        );
+        let prior_store = std::env::var("WEFT_APP_STORE").ok();
+        let prior_bin = std::env::var("WEFT_RUNTIME_BIN").ok();
+        // SAFETY: env_lock is held and the runtime is current_thread. A
+        // configured runtime makes appd resolve the package.
+        unsafe {
+            std::env::set_var("WEFT_APP_STORE", &store);
+            std::env::set_var("WEFT_RUNTIME_BIN", "/nonexistent/weft-runtime");
+        }
+        let launch = || async {
+            dispatch(
+                Request::LaunchApp {
+                    app_id: id.into(),
+                    surface_id: 0,
+                },
+                &make_registry(),
+            )
+            .await
+        };
+        let refused = launch().await;
+        let data_home = weft_ipc_types::package::data_home().unwrap();
+        let record = weft_ipc_types::approval::approval_path(&data_home, id);
+        weft_ipc_types::approval::write_approved(&record, &["sys:notifications".to_owned()])
+            .unwrap();
+        let approved = launch().await;
+        let _ = std::fs::remove_file(&record);
+        // SAFETY: as above.
+        unsafe {
+            match prior_store {
+                Some(v) => std::env::set_var("WEFT_APP_STORE", v),
+                None => std::env::remove_var("WEFT_APP_STORE"),
+            }
+            match prior_bin {
+                Some(v) => std::env::set_var("WEFT_RUNTIME_BIN", v),
+                None => std::env::remove_var("WEFT_RUNTIME_BIN"),
+            }
+        }
+        let _ = std::fs::remove_dir_all(&store);
+        match refused {
+            Response::Error { code, message } => {
+                assert_eq!(code, 403);
+                assert!(
+                    message.contains("needs approval for sys:notifications"),
+                    "{message}"
+                );
+            }
+            other => panic!("an unapproved capability launched: {other:?}"),
+        }
+        assert!(
+            matches!(approved, Response::LaunchAck { .. }),
+            "{approved:?}"
+        );
     }
 
     #[tokio::test]

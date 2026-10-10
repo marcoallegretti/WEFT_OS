@@ -20,22 +20,30 @@ fn main() -> anyhow::Result<()> {
             print_info(&manifest);
         }
         Some("install") => {
-            let usage = "usage: weft-pack install <dir|archive> [--dev] [--claim-data]";
+            let usage = "usage: weft-pack install <dir|archive> [--dev] [--claim-data] [--approve]";
             let dir = args.get(2).context(usage)?;
             let mut mode = InstallMode::Verified;
             let mut claim_data = false;
+            let mut approve = false;
             for arg in &args[3..] {
                 match arg.as_str() {
                     "--dev" => mode = InstallMode::Development,
                     "--claim-data" => claim_data = true,
+                    "--approve" => approve = true,
                     other => anyhow::bail!("unexpected argument '{other}'; {usage}"),
                 }
             }
-            install_package(Path::new(dir), mode, claim_data)?;
+            install_package(Path::new(dir), mode, claim_data, approve)?;
         }
         Some("uninstall") => {
             let app_id = args.get(2).context("usage: weft-pack uninstall <app_id>")?;
             uninstall_package(app_id)?;
+        }
+        Some("approve") => {
+            let app_id = args
+                .get(2)
+                .context("usage: weft-pack approve <app_id> [<capability>...]")?;
+            approve_package(app_id, &args[3..])?;
         }
         Some("rollback") => {
             let app_id = args.get(2).context("usage: weft-pack rollback <app_id>")?;
@@ -123,8 +131,14 @@ fn main() -> anyhow::Result<()> {
             eprintln!(
                 "                                           --claim-data: adopt app data with no owner"
             );
+            eprintln!(
+                "                                           --approve: approve its declared capabilities"
+            );
             eprintln!("  weft-pack uninstall    <app_id>          remove installed package");
             eprintln!("  weft-pack rollback     <app_id>          activate the previous revision");
+            eprintln!(
+                "  weft-pack approve      <app_id> [<cap>...] approve its declared or listed capabilities"
+            );
             eprintln!("  weft-pack list                           list installed packages");
             eprintln!(
                 "  weft-pack build-image   <dir> [--out <img>] create EROFS image with mkfs.erofs"
@@ -270,14 +284,19 @@ enum InstallMode {
     Development,
 }
 
-fn install_package(path: &Path, mode: InstallMode, claim_data: bool) -> anyhow::Result<()> {
+fn install_package(
+    path: &Path,
+    mode: InstallMode,
+    claim_data: bool,
+    approve: bool,
+) -> anyhow::Result<()> {
     let root = resolve_install_root()?;
-    install_into(path, &root, mode, claim_data)
+    install_into(path, &root, mode, claim_data, approve)
 }
 
 #[cfg(test)]
 fn install_package_to(path: &Path, store_root: &Path, mode: InstallMode) -> anyhow::Result<()> {
-    install_into(path, store_root, mode, false)
+    install_into(path, store_root, mode, false, false)
 }
 
 /// Installs the package at `path` into `store_root`. App data that exists
@@ -289,12 +308,13 @@ fn install_into(
     store_root: &Path,
     mode: InstallMode,
     claim_data: bool,
+    approve: bool,
 ) -> anyhow::Result<()> {
     create_store(store_root)?;
     if !(path.extension().is_some_and(|e| e == "zst" || e == "tar")
         || path.to_string_lossy().ends_with(".app.tar.zst"))
     {
-        return install_dir(path, store_root, mode, claim_data);
+        return install_dir(path, store_root, mode, claim_data, approve);
     }
     let name = path
         .file_name()
@@ -308,7 +328,7 @@ fn install_into(
     let _in_use = weft_ipc_types::store::try_claim(&unpacked)
         .with_context(|| format!("open {}", unpacked.display()))?;
     let result = unbundle_package(path, &unpacked)
-        .and_then(|()| install_dir(&unpacked.join(name), store_root, mode, claim_data));
+        .and_then(|()| install_dir(&unpacked.join(name), store_root, mode, claim_data, approve));
     let _ = std::fs::remove_dir_all(&unpacked);
     result
 }
@@ -379,6 +399,7 @@ fn install_dir(
     store_root: &Path,
     mode: InstallMode,
     claim_data: bool,
+    approve: bool,
 ) -> anyhow::Result<()> {
     check_package(dir)?;
     // The package is copied into the store first and every decision, the app
@@ -399,7 +420,7 @@ fn install_dir(
             // operation never takes it for abandoned.
             let in_use = weft_ipc_types::store::try_claim(&staging)
                 .with_context(|| format!("open {}", staging.display()))?;
-            install_staged(&staging, store_root, mode, claim_data, in_use)
+            install_staged(&staging, store_root, mode, claim_data, approve, in_use)
         });
     if result.is_err() {
         let _ = std::fs::remove_dir_all(&staging);
@@ -415,6 +436,7 @@ fn install_staged(
     store_root: &Path,
     mode: InstallMode,
     claim_data: bool,
+    approve: bool,
     in_use: Option<std::fs::File>,
 ) -> anyhow::Result<()> {
     check_package(staging)?;
@@ -457,7 +479,144 @@ fn install_staged(
         dest.display(),
         &revision[..12]
     );
+    settle_approval(&data_home, app_id, manifest.capabilities(), approve)
+}
+
+/// Records the installed package's capabilities as approved with
+/// `approve`; otherwise reports those that still need approval, since the
+/// app does not launch until they are approved.
+fn settle_approval(
+    data_home: &Path,
+    app_id: &str,
+    declared: &[String],
+    approve: bool,
+) -> anyhow::Result<()> {
+    use weft_ipc_types::approval::{approval_path, read_approved, unapproved, write_approved};
+    let record = approval_path(data_home, app_id);
+    if approve {
+        write_approved(&record, declared)
+            .with_context(|| format!("record the approval of {app_id}"))?;
+        let approved: Vec<_> = declared
+            .iter()
+            .filter(|c| weft_ipc_types::approval::needs_approval(c))
+            .collect();
+        if !approved.is_empty() {
+            println!(
+                "approved for {app_id}: {}",
+                approved
+                    .iter()
+                    .map(|c| c.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            );
+        }
+        return Ok(());
+    }
+    let approved = read_approved(&record).with_context(|| format!("read {}", record.display()))?;
+    // An approval covers what the installed package declares: a capability
+    // it no longer declares is dropped, so declaring it again later asks
+    // again.
+    let kept: std::collections::BTreeSet<String> = declared
+        .iter()
+        .filter(|c| approved.contains(*c))
+        .cloned()
+        .collect();
+    if kept != approved {
+        write_approved(&record, &kept.into_iter().collect::<Vec<_>>())
+            .with_context(|| format!("update the approval of {app_id}"))?;
+    }
+    let pending = unapproved(declared, &approved);
+    if !pending.is_empty() {
+        println!(
+            "{app_id} needs approval for {} before it launches; run weft-pack approve {app_id}",
+            pending.join(", ")
+        );
+    }
     Ok(())
+}
+
+/// Approves capabilities for `app_id`: those listed in `explicit`, or
+/// without a list, those its installed package declares. The package is the
+/// one weft-appd launches: the first store, in weft-appd's order, holding
+/// the app. A verified image, whose manifest weft-pack cannot read, needs
+/// the explicit list.
+fn approve_package(app_id: &str, explicit: &[String]) -> anyhow::Result<()> {
+    use weft_ipc_types::approval::needs_approval;
+    anyhow::ensure!(
+        weft_ipc_types::package::is_valid_app_id(app_id),
+        "'{app_id}' is not a valid app ID"
+    );
+    let data_home = weft_ipc_types::package::data_home()
+        .context("cannot locate the data home to record the approval")?;
+    let _lock = weft_ipc_types::trust::lock_owner(&data_home, app_id)?;
+    let roots = list_installed_roots();
+    let image = roots
+        .iter()
+        .any(|root| ImageFiles::in_store(root, app_id).any_present());
+    if !explicit.is_empty() {
+        for capability in explicit {
+            capability
+                .parse::<weft_ipc_types::capability::Capability>()
+                .map_err(|e| anyhow::anyhow!("{e}"))?;
+            anyhow::ensure!(needs_approval(capability), "{capability} needs no approval");
+        }
+        // Approvals by name add to the app's approval. They are for an
+        // installed app, and for a package weft-pack can read, only for
+        // what it declares.
+        if !image {
+            let manifest = launched_manifest(&roots, app_id)?;
+            if let Some(undeclared) = explicit
+                .iter()
+                .find(|c| !manifest.capabilities().contains(c))
+            {
+                anyhow::bail!("{app_id} does not declare {undeclared}");
+            }
+        }
+        let record = weft_ipc_types::approval::approval_path(&data_home, app_id);
+        let mut approved: Vec<String> = weft_ipc_types::approval::read_approved(&record)
+            .with_context(|| format!("read {}", record.display()))?
+            .into_iter()
+            .collect();
+        approved.extend(explicit.iter().cloned());
+        return settle_approval(&data_home, app_id, &approved, true);
+    }
+    if image {
+        anyhow::bail!(
+            "{app_id} is installed as a verified image, whose capabilities weft-pack cannot \
+             read; approve them by name: weft-pack approve {app_id} <capability>..."
+        );
+    }
+    let manifest = launched_manifest(&roots, app_id)?;
+    if !manifest.capabilities().iter().any(|c| needs_approval(c)) {
+        println!("{app_id} declares nothing that needs approval");
+    }
+    settle_approval(&data_home, app_id, manifest.capabilities(), true)
+}
+
+/// The manifest of the package of `app_id` that weft-appd launches from a
+/// directory or revision: the first of `roots` holding one.
+fn launched_manifest(roots: &[PathBuf], app_id: &str) -> anyhow::Result<Manifest> {
+    let found = roots
+        .iter()
+        .find_map(|root| match active(root, app_id) {
+            Ok(Some(found))
+                if std::fs::symlink_metadata(
+                    found.dir().join(weft_ipc_types::manifest::MANIFEST_FILE),
+                )
+                .is_ok() =>
+            {
+                Some(found)
+            }
+            _ => None,
+        })
+        .with_context(|| format!("{app_id} is not installed"))?;
+    let manifest = load_manifest(found.dir())?;
+    anyhow::ensure!(
+        manifest.package.id == app_id,
+        "{} declares another app ID",
+        found.dir().display()
+    );
+    Ok(manifest)
 }
 
 /// The active package of `app_id` in `store_root`.
@@ -848,7 +1007,8 @@ fn rollback_package(store_root: &Path, app_id: &str) -> anyhow::Result<()> {
     activate(store_root, app_id, &previous)?;
     collect(store_root, app_id);
     println!("rolled {app_id} back to revision {}", &previous[..12]);
-    Ok(())
+    let manifest = load_manifest(&dir)?;
+    settle_approval(&data_home, app_id, manifest.capabilities(), false)
 }
 
 /// Establishes who owns the app ID of a checked, staged package:
@@ -979,6 +1139,11 @@ fn uninstall_package_from(app_id: &str, store_root: &Path) -> anyhow::Result<()>
         && !installed_in_another_store(app_id, store_root)
     {
         release_owner_without_data(home, app_id);
+        // A later installation asks for approval again.
+        weft_ipc_types::approval::remove_approval(&weft_ipc_types::approval::approval_path(
+            home, app_id,
+        ))
+        .with_context(|| format!("remove the approval of {app_id}"))?;
     }
     println!("uninstalled {}", app_id);
     Ok(())
@@ -1462,6 +1627,22 @@ mod tests {
         .unwrap();
     }
 
+    /// Runs `f` with WEFT_APP_STORE set to `store`. Callers run it inside
+    /// `with_home`, which holds env_lock.
+    fn with_store<T>(store: &Path, f: impl FnOnce() -> T) -> T {
+        let prior = std::env::var_os("WEFT_APP_STORE");
+        // SAFETY: the caller holds env_lock through with_home.
+        unsafe { std::env::set_var("WEFT_APP_STORE", store) };
+        let result = f();
+        unsafe {
+            match prior {
+                Some(v) => std::env::set_var("WEFT_APP_STORE", v),
+                None => std::env::remove_var("WEFT_APP_STORE"),
+            }
+        }
+        result
+    }
+
     /// Runs `f` with HOME set to `home` and XDG_DATA_HOME to `home/share`.
     fn with_home<T>(home: &Path, f: impl FnOnce() -> T) -> T {
         let _env = env_lock();
@@ -1932,6 +2113,104 @@ mod tests {
     }
 
     #[test]
+    fn capabilities_are_approved_only_when_asked_and_again_for_new_ones() {
+        use weft_ipc_types::approval::{approval_path, read_approved, unapproved};
+        let home = temp_root("approval");
+        let store = home.join("store");
+        let app_id = "org.weft.test.approval";
+        let src = home.join("src");
+        let record = approval_path(&home.join("share"), app_id);
+        let pending = |declared: &[&str]| {
+            let declared: Vec<String> = declared.iter().map(|c| (*c).to_owned()).collect();
+            unapproved(&declared, &read_approved(&record).unwrap())
+                .into_iter()
+                .map(str::to_owned)
+                .collect::<Vec<_>>()
+        };
+        write_package(&src, app_id, "\"sys:notifications\", \"fs:rw:app-data\"");
+        with_home(&home, || {
+            install_package_to(&src, &store, InstallMode::Development)
+        })
+        .unwrap();
+        assert_eq!(pending(&["sys:notifications"]), ["sys:notifications"]);
+        with_home(&home, || {
+            with_store(&store, || approve_package(app_id, &[]))
+        })
+        .unwrap();
+        assert!(pending(&["sys:notifications", "fs:rw:app-data"]).is_empty());
+        // An update that asks for more is not approved by the earlier answer.
+        write_package(
+            &src,
+            app_id,
+            "\"sys:notifications\", \"sys:clipboard:read\"",
+        );
+        with_home(&home, || {
+            install_package_to(&src, &store, InstallMode::Development)
+        })
+        .unwrap();
+        assert_eq!(
+            pending(&["sys:notifications", "sys:clipboard:read"]),
+            ["sys:clipboard:read"]
+        );
+        // --approve approves what the installed package declares.
+        with_home(&home, || {
+            install_into(&src, &store, InstallMode::Development, false, true)
+        })
+        .unwrap();
+        assert!(pending(&["sys:notifications", "sys:clipboard:read"]).is_empty());
+        // A capability the package stops declaring is no longer approved.
+        write_package(&src, app_id, "\"sys:notifications\"");
+        with_home(&home, || {
+            install_package_to(&src, &store, InstallMode::Development)
+        })
+        .unwrap();
+        write_package(
+            &src,
+            app_id,
+            "\"sys:notifications\", \"sys:clipboard:read\"",
+        );
+        with_home(&home, || {
+            install_package_to(&src, &store, InstallMode::Development)
+        })
+        .unwrap();
+        assert_eq!(
+            pending(&["sys:notifications", "sys:clipboard:read"]),
+            ["sys:clipboard:read"]
+        );
+        // Capabilities can be approved by name, and only valid ones that
+        // need approval.
+        with_home(&home, || {
+            with_store(&store, || {
+                approve_package(app_id, &["sys:clipboard:read".to_owned()])
+            })
+        })
+        .unwrap();
+        // Added to what was approved before.
+        assert!(pending(&["sys:notifications", "sys:clipboard:read"]).is_empty());
+        let undeclared = with_home(&home, || {
+            with_store(&store, || {
+                approve_package(app_id, &["sys:clipboard:write".to_owned()])
+            })
+        });
+        assert!(
+            undeclared.is_err(),
+            "approved a capability the package does not declare"
+        );
+        for refused in ["fs:rw:app-data", "sys:everything"] {
+            assert!(
+                with_home(&home, || with_store(&store, || {
+                    approve_package(app_id, &[refused.to_owned()])
+                }))
+                .is_err()
+            );
+        }
+        // Uninstalling forgets the approval.
+        with_home(&home, || uninstall_package_from(app_id, &store)).unwrap();
+        assert!(!record.exists());
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    #[test]
     fn leftovers_of_interrupted_operations_are_removed() {
         let home = temp_root("leftovers");
         let store = home.join("store");
@@ -2309,7 +2588,13 @@ mod tests {
         assert!(message.contains("--claim-data"), "{message}");
         assert_eq!(owner_of(&home, app_id), None);
         with_home(&home, || {
-            install_into(&home.join("src"), &other, InstallMode::Development, true)
+            install_into(
+                &home.join("src"),
+                &other,
+                InstallMode::Development,
+                true,
+                false,
+            )
         })
         .unwrap();
         assert_eq!(owner_of(&home, app_id), Some(Owner::Development));
@@ -2550,7 +2835,13 @@ mod tests {
         assert!(message.contains("--claim-data"), "{message}");
         assert!(!store.join(app_id).join("wapp.toml").exists());
         with_home(&home, || {
-            install_into(&home.join("src"), &store, InstallMode::Development, true)
+            install_into(
+                &home.join("src"),
+                &store,
+                InstallMode::Development,
+                true,
+                false,
+            )
         })
         .unwrap();
         assert!(store.join(app_id).join("wapp.toml").exists());
