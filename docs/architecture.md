@@ -8,7 +8,7 @@ WEFT OS is a Wayland compositor and application runtime where every app is a Web
 
 ### weft-compositor
 
-Smithay-based Wayland compositor. Implements the `zweft-shell-unstable-v1` protocol extension, which allows shell clients (servo-shell, app-shell) to register their surfaces as typed shell slots. Each application session's Wayland connection is handed to the compositor by weft-appd, which binds the client to that session (see `security.md`). Supports DRM/KMS and winit (software/dev) backends.
+Smithay-based Wayland compositor. Implements the `zweft-shell-unstable-v1` protocol extension, which allows shell clients (servo-shell, app-shell) to register their surfaces as typed shell slots. Each application session's Wayland connection is handed to the compositor by weft-appd, which binds the client to that session (see `security.md`). The compositor owns stacking and focus: the system shell's panel is sized to the output and kept beneath application windows; a session's first window, a clicked window and an activated one are raised, marked activated and given keyboard focus, and when the focused window closes the topmost remaining application window gets focus. A session's later windows are shown without taking focus. weft-appd's `ACTIVATE_APP` request, which the taskbar sends, asks the compositor to activate a running session's window. Supports DRM/KMS and winit (software/dev) backends.
 
 ### weft-servo-shell
 

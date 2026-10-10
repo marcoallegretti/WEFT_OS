@@ -46,6 +46,9 @@ pub struct WeftAppdIpc {
     sessions: HashMap<u64, ClientId>,
     /// Sessions whose first toplevel was reported to appd.
     reported: HashSet<u64>,
+    /// Sessions that already received keyboard focus for a mapped window;
+    /// kept until the session ends, so recreating a window gains nothing.
+    focused_on_map: HashSet<u64>,
     /// Where clients report their session's disconnection.
     disconnected: Option<channel::Sender<(u64, ClientId)>>,
     /// Bytes for appd that did not fit in the socket buffer, sent before
@@ -67,6 +70,7 @@ impl WeftAppdIpc {
             fds: VecDeque::new(),
             sessions: HashMap::new(),
             reported: HashSet::new(),
+            focused_on_map: HashSet::new(),
             disconnected: None,
             out_buf: Vec::new(),
             flush_retry: None,
@@ -148,6 +152,12 @@ impl WeftAppdIpc {
                 }
             })
             .ok();
+    }
+
+    /// Whether a window `session_id` maps now may take keyboard focus: only
+    /// the first one in the session's lifetime.
+    pub fn take_focus_on_map(&mut self, session_id: u64) -> bool {
+        self.sessions.contains_key(&session_id) && self.focused_on_map.insert(session_id)
     }
 
     /// Reports a session's first toplevel to appd.
@@ -250,6 +260,7 @@ impl WeftAppdIpc {
         self.read_buf.clear();
         self.fds.clear();
         self.reported.clear();
+        self.focused_on_map.clear();
         self.sessions.drain().map(|(_, client)| client).collect()
     }
 }
@@ -265,6 +276,7 @@ fn handle_message(state: &mut WeftCompositorState, msg: AppdToCompositor) {
                 return;
             };
             ipc.reported.remove(&session_id);
+            ipc.focused_on_map.remove(&session_id);
             if let Some(client) = ipc.sessions.remove(&session_id) {
                 tracing::info!(session_id, "closing the client of an ended session");
                 state
@@ -274,7 +286,14 @@ fn handle_message(state: &mut WeftCompositorState, msg: AppdToCompositor) {
             }
         }
         AppdToCompositor::AppFocusRequest { session_id } => {
-            tracing::debug!(session_id, "AppFocusRequest");
+            if state.activate_session(session_id) {
+                tracing::info!(session_id, "session activated");
+            } else {
+                tracing::info!(
+                    session_id,
+                    "activation requested for a session with no window"
+                );
+            }
         }
     }
 }
@@ -382,6 +401,7 @@ pub fn setup(state: &mut WeftCompositorState) -> anyhow::Result<()> {
             {
                 ipc.sessions.remove(&session_id);
                 ipc.reported.remove(&session_id);
+                ipc.focused_on_map.remove(&session_id);
                 tracing::info!(session_id, "session client disconnected");
                 ipc.send(&CompositorToAppd::ClientDisconnected { session_id });
             }

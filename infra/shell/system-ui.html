@@ -399,6 +399,12 @@
         });
         el.appendChild(span);
         el.appendChild(close);
+        // Choosing the entry brings the app's window to the front.
+        el.addEventListener('click', function () {
+          if (ws && ws.readyState === WebSocket.OPEN) {
+            ws.send(JSON.stringify({ type: 'ACTIVATE_APP', session_id: sessionId }));
+          }
+        });
         var taskbar = document.querySelector('weft-taskbar');
         var clock = document.getElementById('clock');
         taskbar.insertBefore(el, clock);

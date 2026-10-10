@@ -266,6 +266,10 @@ impl XdgShellHandler for WeftCompositorState {
         &mut self.xdg_shell_state
     }
 
+    fn toplevel_destroyed(&mut self, surface: ToplevelSurface) {
+        self.window_closed(surface.wl_surface());
+    }
+
     fn new_toplevel(&mut self, surface: ToplevelSurface) {
         surface.send_configure();
         let session = surface.wl_surface().client().and_then(|client| {
@@ -274,7 +278,7 @@ impl XdgShellHandler for WeftCompositorState {
                 .and_then(|data| data.session.as_ref().map(|s| s.session_id))
         });
         let window = Window::new_wayland_window(surface);
-        self.space.map_element(window, (0, 0), false);
+        self.map_new_window(window);
         if let (Some(session_id), Some(ipc)) = (session, self.appd_ipc.as_mut()) {
             ipc.surface_created(session_id);
         }
@@ -570,6 +574,7 @@ impl Dispatch<ZweftShellManagerV1, ()> for WeftCompositorState {
                         ),
                     );
                     state.weft_shell_state.add_panel(window);
+                    state.fit_panels();
                 } else {
                     window.configure(x, y, width, height, 0);
                 }
