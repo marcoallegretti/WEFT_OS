@@ -158,10 +158,17 @@ def count_area(screenshot, card):
 def run(args, desktop, xdotool):
     port = free_port()
     target = Path(args.target)
+    # A private home, so owner records appd writes stay out of the user's.
+    home = args.output / "home"
+    shutil.rmtree(home, ignore_errors=True)
+    home.mkdir(parents=True)
     desktop.launch_client("appd", [target / "weft-appd"], {
         "WEFT_RUNTIME_BIN": str(target / "weft-runtime"),
         "WEFT_APP_SHELL_BIN": str(target / "weft-app-shell"),
         "WEFT_APP_STORE": str(args.store),
+        "WEFT_TRUSTED_KEYS": str(ROOT / "examples/keys"),
+        "HOME": str(home),
+        "XDG_DATA_HOME": str(home / "share"),
         "WEFT_DISABLE_CGROUP": "1",
         "WEFT_APPD_WS_PORT": str(port),
     })

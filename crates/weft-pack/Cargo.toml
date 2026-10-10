@@ -17,3 +17,6 @@ rand = "0.8"
 hex = "0.4"
 tar = "0.4"
 zstd = "0.13"
+
+[target.'cfg(unix)'.dependencies]
+rustix = { version = "1", features = ["fs"] }
