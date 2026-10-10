@@ -1,16 +1,22 @@
 //! Stacking, focus and activation of toplevel windows.
 //!
-//! The compositor decides the order: the trusted shell's panel, which
-//! fills the output, stays beneath every application window; a session's
-//! first window, a clicked window and one appd asks to activate is raised to
-//! the top, marked activated and given keyboard focus. When the focused
-//! window closes, the topmost remaining application window gets focus.
+//! The compositor decides the order and the geometry. The trusted shell's
+//! panel fills the output and starts beneath every application window;
+//! application windows fill the work area, the output less the strips the
+//! panel reserves. A session's first window, a clicked window (the panel
+//! included, which then shows the shell's home over the applications) and
+//! one appd asks to activate is raised to the top, marked activated and
+//! given keyboard focus; apart from a panel being lowered when it
+//! registers, nothing else changes the order, and a window that maps
+//! without taking focus goes beneath the window in front. When the
+//! focused window closes, the topmost remaining application window gets
+//! focus.
 
 use smithay::desktop::Window;
 use smithay::reexports::wayland_protocols::xdg::shell::server::xdg_toplevel;
 use smithay::reexports::wayland_server::Resource;
 use smithay::reexports::wayland_server::protocol::wl_surface::WlSurface;
-use smithay::utils::SERIAL_COUNTER;
+use smithay::utils::{Logical, Rectangle, SERIAL_COUNTER};
 use smithay::wayland::seat::WaylandFocus;
 
 use crate::protocols::WeftShellWindowData;
@@ -20,12 +26,15 @@ impl WeftCompositorState {
     /// Whether `surface` backs a window the trusted shell registered as its
     /// panel.
     pub fn is_panel_surface(&self, surface: &WlSurface) -> bool {
-        self.weft_shell_state.panels().any(|panel| {
-            panel
-                .data::<WeftShellWindowData>()
-                .and_then(|data| data.surface.as_ref())
-                .is_some_and(|s| s == surface)
-        })
+        self.weft_shell_state
+            .panels()
+            .filter(|p| p.is_alive())
+            .any(|panel| {
+                panel
+                    .data::<WeftShellWindowData>()
+                    .and_then(|data| data.surface.as_ref())
+                    .is_some_and(|s| s == surface)
+            })
     }
 
     fn is_panel(&self, window: &Window) -> bool {
@@ -34,19 +43,11 @@ impl WeftCompositorState {
             .is_some_and(|surface| self.is_panel_surface(&surface))
     }
 
-    /// Raises `window` above the other application windows, marks it
-    /// activated and gives it keyboard focus. A panel is focused but stays
-    /// beneath the applications.
+    /// Raises `window` to the top, marks it activated and gives it keyboard
+    /// focus. Activating the panel shows the shell's home, with its launcher,
+    /// over the applications until one is activated again.
     pub fn activate_window(&mut self, window: &Window) {
-        if self.is_panel(window) {
-            // The panel takes focus without rising; no application window
-            // stays marked activated.
-            for other in self.space.elements() {
-                other.set_activated(false);
-            }
-        } else {
-            self.space.raise_element(window, true);
-        }
+        self.space.raise_element(window, true);
         self.send_pending_configures();
         if let (Some(keyboard), Some(surface)) = (self.seat.get_keyboard(), window.wl_surface()) {
             keyboard.set_focus(
@@ -75,51 +76,71 @@ impl WeftCompositorState {
         }
     }
 
-    /// Sizes the panels to the output, places them at its origin and keeps
-    /// them beneath every application window.
+    /// Sizes the panels to the output and keeps them beneath every
+    /// application window; used when a panel registers.
     pub fn fit_panels(&mut self) {
-        let Some(geometry) = self
+        self.place_windows(true, None);
+        // A shell that took focus before registering as the panel, such as
+        // one restarted while applications run, hands it to the window that
+        // is now in front.
+        let focus_on_panel = self
+            .seat
+            .get_keyboard()
+            .and_then(|keyboard| keyboard.current_focus())
+            .is_some_and(|focus| self.is_panel_surface(&focus));
+        let front = self.space.elements().last().cloned();
+        if focus_on_panel
+            && let Some(front) = front
+            && !self.is_panel(&front)
+        {
+            self.activate_window(&front);
+        }
+    }
+
+    /// Places every window for the current output and reservations: panels
+    /// fill the output, application windows the work area. The stacking
+    /// order is kept, except that `lower_panels` moves the panels beneath
+    /// the applications, and `below_top` slips that window under the
+    /// window that was on top.
+    pub fn place_windows(&mut self, lower_panels: bool, below_top: Option<&Window>) {
+        // Without an output the order still changes; windows keep their
+        // size and place until one is mapped.
+        let output = self
             .space
             .outputs()
             .next()
-            .and_then(|output| self.space.output_geometry(output))
-        else {
-            return;
-        };
-        let panels: Vec<Window> = self
-            .space
-            .elements()
-            .filter(|window| self.is_panel(window))
-            .cloned()
-            .collect();
-        if panels.is_empty() {
-            return;
+            .and_then(|output| self.space.output_geometry(output));
+        let area = self.work_area();
+        let mut order: Vec<Window> = self.space.elements().cloned().collect();
+        if lower_panels {
+            let (panels, apps): (Vec<Window>, Vec<Window>) =
+                order.into_iter().partition(|window| self.is_panel(window));
+            order = panels.into_iter().chain(apps).collect();
         }
-        for panel in &panels {
-            if let Some(toplevel) = panel.toplevel() {
+        if let Some(window) = below_top
+            && let Some(position) = order.iter().position(|w| w == window)
+            && position + 1 == order.len()
+            && order.len() > 1
+        {
+            order.swap(position, position - 1);
+        }
+        for window in &order {
+            let panel = self.is_panel(window);
+            let Some(geometry) = (if panel { output } else { area }) else {
+                let location = self.space.element_location(window).unwrap_or_default();
+                self.space.map_element(window.clone(), location, false);
+                continue;
+            };
+            if let Some(toplevel) = window.toplevel() {
                 toplevel.with_pending_state(|state| {
                     state.size = Some(geometry.size);
                     state.states.set(xdg_toplevel::State::Maximized);
                 });
                 toplevel.send_pending_configure();
-                tracing::debug!(
-                    width = geometry.size.w,
-                    height = geometry.size.h,
-                    "panel fitted to the output"
-                );
             }
-            self.space.map_element(panel.clone(), geometry.loc, false);
-        }
-        // Raising every other window, in its current order, leaves the
-        // panels at the bottom.
-        let others: Vec<Window> = self
-            .space
-            .elements()
-            .filter(|window| !self.is_panel(window))
-            .cloned()
-            .collect();
-        for window in &others {
-            self.space.raise_element(window, false);
+            // Mapping puts a window on top; mapping all of them in `order`
+            // leaves exactly that order.
+            self.space.map_element(window.clone(), geometry.loc, false);
         }
     }
 
@@ -146,7 +167,12 @@ impl WeftCompositorState {
         if self.is_panel(&window) {
             self.fit_panels();
         } else if first {
+            self.layout_app_windows();
             self.activate_window(&window);
+        } else {
+            // A window that does not take focus does not cover the window
+            // in front either, the shell's home included.
+            self.place_windows(false, Some(&window));
         }
     }
 
@@ -185,6 +211,67 @@ impl WeftCompositorState {
                 }
             }
         }
+    }
+
+    /// The part of the output that application windows occupy: the output
+    /// less the strips the panels reserved.
+    pub fn work_area(&self) -> Option<Rectangle<i32, Logical>> {
+        use crate::protocols::server::zweft_shell_window_v1::Edge;
+        let output = self.space.outputs().next()?;
+        let mut area = self.space.output_geometry(output)?;
+        for panel in self.weft_shell_state.panels().filter(|p| p.is_alive()) {
+            let Some(data) = panel.data::<WeftShellWindowData>() else {
+                continue;
+            };
+            let zone = *data
+                .exclusive_zone
+                .lock()
+                .unwrap_or_else(|p| p.into_inner());
+            let Some((edge, size)) = zone else {
+                continue;
+            };
+            match edge {
+                Edge::Top => {
+                    let size = size.min(area.size.h);
+                    area.loc.y += size;
+                    area.size.h -= size;
+                }
+                Edge::Bottom => area.size.h -= size.min(area.size.h),
+                Edge::Left => {
+                    let size = size.min(area.size.w);
+                    area.loc.x += size;
+                    area.size.w -= size;
+                }
+                Edge::Right => area.size.w -= size.min(area.size.w),
+            }
+        }
+        // A zone covering the output still leaves applications a size the
+        // client must honour, never 0, which would let it pick its own.
+        area.size.w = area.size.w.max(1);
+        area.size.h = area.size.h.max(1);
+        Some(area)
+    }
+
+    /// The output's geometry as (x, y, width, height).
+    pub fn output_geometry(&self) -> (i32, i32, i32, i32) {
+        self.space
+            .outputs()
+            .next()
+            .and_then(|output| self.space.output_geometry(output))
+            .map_or((0, 0, 0, 0), |g| (g.loc.x, g.loc.y, g.size.w, g.size.h))
+    }
+
+    /// The geometry the layout gives application windows, as
+    /// (x, y, width, height).
+    pub fn app_geometry(&self) -> (i32, i32, i32, i32) {
+        self.work_area()
+            .map_or((0, 0, 0, 0), |a| (a.loc.x, a.loc.y, a.size.w, a.size.h))
+    }
+
+    /// Lays the windows out again after the work area changed, keeping the
+    /// stacking order.
+    pub fn layout_app_windows(&mut self) {
+        self.place_windows(false, None);
     }
 
     /// Sends the configure for every toplevel whose pending state changed,

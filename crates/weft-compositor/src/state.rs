@@ -542,6 +542,7 @@ impl Dispatch<ZweftShellManagerV1, ()> for WeftCompositorState {
                         role,
                         surface,
                         closed: std::sync::atomic::AtomicBool::new(false),
+                        exclusive_zone: std::sync::Mutex::new(None),
                     },
                 );
                 if let Some(session) = session
@@ -576,7 +577,11 @@ impl Dispatch<ZweftShellManagerV1, ()> for WeftCompositorState {
                     state.weft_shell_state.add_panel(window);
                     state.fit_panels();
                 } else {
-                    window.configure(x, y, width, height, 0);
+                    // The compositor decides application geometry: the work
+                    // area, whatever was requested.
+                    let _ = (x, y, width, height);
+                    let (x, y, w, h) = state.app_geometry();
+                    window.configure(x, y, w, h, 0);
                 }
             }
         }
@@ -585,7 +590,7 @@ impl Dispatch<ZweftShellManagerV1, ()> for WeftCompositorState {
 
 impl Dispatch<ZweftShellWindowV1, WeftShellWindowData> for WeftCompositorState {
     fn request(
-        _state: &mut Self,
+        state: &mut Self,
         _client: &Client,
         resource: &ZweftShellWindowV1,
         request: zweft_shell_window_v1::Request,
@@ -605,14 +610,64 @@ impl Dispatch<ZweftShellWindowV1, WeftShellWindowData> for WeftCompositorState {
             zweft_shell_window_v1::Request::UpdateMetadata { title, role } => {
                 let _ = (title, role);
             }
-            zweft_shell_window_v1::Request::SetGeometry {
-                x,
-                y,
-                width,
-                height,
-            } => {
-                resource.configure(x, y, width, height, 0);
+            zweft_shell_window_v1::Request::SetGeometry { .. } => {
+                // The request is advisory: the configure reports the
+                // geometry the compositor's layout gives the window.
+                let is_panel = state
+                    .weft_shell_state
+                    .panels()
+                    .any(|panel| panel == resource);
+                let (x, y, w, h) = if is_panel {
+                    state.output_geometry()
+                } else {
+                    state.app_geometry()
+                };
+                let flags = if is_panel {
+                    u32::from(crate::protocols::server::zweft_shell_window_v1::State::Maximized)
+                } else {
+                    0
+                };
+                resource.configure(x, y, w, h, flags);
             }
+            zweft_shell_window_v1::Request::SetExclusiveZone { edge, size } => {
+                let is_panel = state
+                    .weft_shell_state
+                    .panels()
+                    .any(|panel| panel == resource);
+                let edge = edge.into_result().ok();
+                match edge {
+                    Some(edge) if is_panel && size >= 0 => {
+                        let zone = (size > 0).then_some((edge, size));
+                        *data
+                            .exclusive_zone
+                            .lock()
+                            .unwrap_or_else(|p| p.into_inner()) = zone;
+                        state.layout_app_windows();
+                    }
+                    _ => resource.post_error(
+                        crate::protocols::server::zweft_shell_window_v1::Error::InvalidExclusiveZone,
+                        "only a panel may reserve an edge, with a size of at least 0",
+                    ),
+                }
+            }
+        }
+    }
+
+    fn destroyed(
+        state: &mut Self,
+        _client: wayland_server::backend::ClientId,
+        resource: &ZweftShellWindowV1,
+        data: &WeftShellWindowData,
+    ) {
+        // A panel that goes away, by destroy or with its client, releases
+        // its reserved strip and its window slot; applications take the
+        // space back. The surface's window is not mapped again if it
+        // registers once more.
+        if state.weft_shell_state.remove_panel(resource) {
+            if let Some(surface) = &data.surface {
+                state.window_closed(surface);
+            }
+            state.layout_app_windows();
         }
     }
 }

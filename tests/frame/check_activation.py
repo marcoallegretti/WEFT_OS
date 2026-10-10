@@ -6,10 +6,14 @@ panel, and weft-appd with two test applications, one red and one blue, on a
 nested desktop (see session.py). Each application page switches between its
 colour and a lighter shade on every key press. In the presented pixels:
 
-- the panel fills the compositor output and stays beneath the applications;
+- the panel fills the compositor output and starts beneath the applications;
+- application windows fill the work area: the output less the strip the
+  shell reserves for its taskbar along the bottom, which stays visible;
 - each newly launched application is shown on top and receives keys;
 - ACTIVATE_APP, the request the taskbar sends, brings the other session's
   window back to the front with keyboard focus;
+- clicking the taskbar strip brings the panel, the shell's home, over the
+  applications, and activating an application brings it back;
 - when the focused application ends, the remaining one gets keyboard focus;
 - ACTIVATE_APP for a session that is not running is refused.
 
@@ -35,6 +39,8 @@ APPS = {
     "org.weft.test.blue": ((0, 0, 200), (120, 120, 255)),
 }
 STARTUP_TIMEOUT = 120.0
+# The strip weft-servo-shell reserves at the bottom (TASKBAR_HEIGHT).
+TASKBAR = 48
 
 PANEL_PAGE = ('<!DOCTYPE html><html><body style="margin:0;background:rgb(0,160,0);'
               'width:100vw;height:100vh"></body></html>')
@@ -97,10 +103,9 @@ def run(args, desktop, store, home):
     shot, panel = wait_for_color(desktop, GREEN, 60)
     if panel is None:
         raise AssertionError("the panel was not shown")
-    width, height, _ = parse_ppm(shot)
-    # The compositor sizes the panel to its whole output, which reaches the
-    # right and bottom edges of the nested desktop.
-    if panel[2] != width - 1 or panel[3] < height - 3:
+    # The compositor sizes the panel to its whole output, larger than a
+    # toplevel's default size.
+    if panel[2] - panel[0] + 1 < 1000 or panel[3] - panel[1] + 1 < 700:
         raise AssertionError(f"the panel does not fill the output: {panel}")
 
     t = Path(args.target)
@@ -133,9 +138,13 @@ def run(args, desktop, store, home):
             box, _, _ = area(shot, color)
             hidden = all(area(shot, c)[0] is None for c in others)
             if box is not None and hidden:
-                # The panel stays visible beside the application window.
-                if area(shot, GREEN)[0] is None:
-                    raise AssertionError("an application covered the panel")
+                # The application fills the work area: the panel's whole
+                # width, down to the reserved strip, which stays visible.
+                if box[0] != panel[0] or box[2] != panel[2] or box[1] != panel[1]:
+                    raise AssertionError(f"{app_id} does not fill the work area: {box}")
+                if box[3] != panel[3] - TASKBAR:
+                    raise AssertionError(
+                        f"{app_id} does not end at the reserved strip: {box}, panel {panel}")
                 return
             time.sleep(0.3)
         state = "pressed " if pressed else ""
@@ -172,6 +181,25 @@ def run(args, desktop, store, home):
     shown(red)
     key("a")
     shown(red, pressed=True)
+    activate(blue)
+    shown(blue, pressed=True)
+
+    # A click on the taskbar strip shows the shell's home over the
+    # applications; activating one brings it back.
+    x, y = (panel[0] + panel[2]) // 2, panel[3] - TASKBAR // 2
+    subprocess.run([args.xdotool, "mousemove", "--sync", str(x), str(y)],
+                   env={"DISPLAY": desktop.display}, check=True, timeout=20)
+    subprocess.run([args.xdotool, "click", "1"], env={"DISPLAY": desktop.display},
+                   check=True, timeout=20)
+    deadline = time.monotonic() + 20
+    while True:
+        shot = desktop.capture()
+        if area(shot, GREEN)[0] == panel and all(
+                area(shot, c)[0] is None for cs in APPS.values() for c in cs):
+            break
+        if time.monotonic() > deadline:
+            raise AssertionError("clicking the taskbar did not show the shell over the apps")
+        time.sleep(0.3)
     activate(blue)
     shown(blue, pressed=True)
 

@@ -124,7 +124,7 @@ pub fn run() -> anyhow::Result<()> {
                 state
                     .weft_shell_state
                     .reconfigure_panels(0, 0, size.w, size.h);
-                state.fit_panels();
+                state.layout_app_windows();
                 state.weft_shell_state.retain_alive_panels();
             }
             WinitEvent::Input(input_event) => {

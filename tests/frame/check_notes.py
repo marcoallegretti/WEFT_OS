@@ -35,14 +35,16 @@ from pathlib import Path
 
 sys.dont_write_bytecode = True
 from check_counter import AppdClient, free_port, read_endpoint  # noqa: E402
-from session import ROOT, Desktop, SessionError, missing_tools  # noqa: E402
+from session import ROOT, Desktop, SessionError, bounding_box, missing_tools, parse_ppm  # noqa: E402
 
 APP_ID = "org.weft.demo.notes"
 SEED = 'path C:\\new\\table "quoted"\tcaf\u00e9 \u2603'
 
 
-# The Discard button in the 800x600 Notes window at the desktop's origin.
-DISCARD = ("663", "68")
+PAGE = (15, 15, 15)  # The Notes page's background, #0f0f0f.
+# The Discard button, right-aligned in the header: its offset from the
+# window's right edge, and its height on the desktop.
+DISCARD_FROM_RIGHT, DISCARD_Y = 137, 68
 
 
 def runtime_pid():
@@ -94,6 +96,11 @@ def run(args, desktop, home, xdotool):
     if reply.get("type") != "APP_READY":
         raise AssertionError(f"Notes did not start: {reply}")
     time.sleep(2)
+    width, height, pixels = parse_ppm(desktop.capture())
+    page = bounding_box(width, height, pixels, PAGE)
+    if page is None:
+        raise AssertionError("the Notes page is not on screen")
+    discard = (str(page[2] + 1 - DISCARD_FROM_RIGHT), str(DISCARD_Y))
 
     def act(*arguments):
         subprocess.run([xdotool, *arguments], env={"DISPLAY": desktop.display},
@@ -132,7 +139,7 @@ def run(args, desktop, home, xdotool):
 
     os.kill(runtime, signal.SIGSTOP)
     try:
-        act("mousemove", "--sync", *DISCARD)
+        act("mousemove", "--sync", *discard)
         act("click", "1")
         act("mousemove", "--sync", "100", "300")
         act("click", "1")
@@ -147,7 +154,7 @@ def run(args, desktop, home, xdotool):
     act("key", "ctrl+s")
     wait_for_file(notes, other + "!")
     notes.write_bytes(b"\xff not text")
-    act("mousemove", "--sync", *DISCARD)
+    act("mousemove", "--sync", *discard)
     act("click", "1")
     time.sleep(2)
     # The editor stays read-only and nothing can be saved over the file.
@@ -158,7 +165,7 @@ def run(args, desktop, home, xdotool):
     time.sleep(2)
     if notes.read_bytes() != b"\xff not text":
         raise AssertionError("a failed load changed the stored notes")
-    act("mousemove", "--sync", *DISCARD)
+    act("mousemove", "--sync", *discard)
     notes.write_text("repaired", encoding="utf-8")
     act("click", "1")
     time.sleep(2)

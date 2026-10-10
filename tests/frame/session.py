@@ -17,7 +17,8 @@ from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[2]
-SCREEN = (1024, 768)
+# Large enough to show the nested compositor's whole 1280x800 output.
+SCREEN = (1400, 900)
 ANSI_ESCAPE = re.compile(r"\x1b\[[0-9;]*m")
 REQUIRED_TOOLS = ("Xvfb", "xwd", "convert")
 
@@ -111,9 +112,11 @@ def _stop(process):
 class Desktop:
     """Xvfb plus weft-compositor; logs are written to `output/<name>.log`."""
 
-    def __init__(self, compositor, output, outputs=()):
-        """`outputs` names further files in `output` that this run will write."""
+    def __init__(self, compositor, output, outputs=(), screen=SCREEN):
+        """`outputs` names further files in `output` that this run will write;
+        `screen` is the X screen size."""
         self.compositor = Path(compositor)
+        self.screen = screen
         self.output = Path(output)
         self.own_outputs = ["xvfb.log", "compositor.log", "shell.log", *outputs]
         self.processes = []
@@ -180,7 +183,7 @@ class Desktop:
         try:
             xvfb = subprocess.Popen(
                 ["Xvfb", "-displayfd", str(write_end), "-screen", "0",
-                 f"{SCREEN[0]}x{SCREEN[1]}x24", "-nolisten", "tcp"],
+                 f"{self.screen[0]}x{self.screen[1]}x24", "-nolisten", "tcp"],
                 stdout=log, stderr=subprocess.STDOUT, env=self.env,
                 start_new_session=True, pass_fds=(write_end,))
         finally:
