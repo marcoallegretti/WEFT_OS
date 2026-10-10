@@ -158,10 +158,17 @@ def count_area(screenshot, card):
 def run(args, desktop, xdotool):
     port = free_port()
     target = Path(args.target)
+    # A private home, so owner records appd writes stay out of the user's.
+    home = args.output / "home"
+    shutil.rmtree(home, ignore_errors=True)
+    home.mkdir(parents=True)
     desktop.launch_client("appd", [target / "weft-appd"], {
         "WEFT_RUNTIME_BIN": str(target / "weft-runtime"),
         "WEFT_APP_SHELL_BIN": str(target / "weft-app-shell"),
         "WEFT_APP_STORE": str(args.store),
+        "WEFT_TRUSTED_KEYS": str(ROOT / "examples/keys"),
+        "HOME": str(home),
+        "XDG_DATA_HOME": str(home / "share"),
         "WEFT_DISABLE_CGROUP": "1",
         "WEFT_APPD_WS_PORT": str(port),
     })
@@ -169,9 +176,16 @@ def run(args, desktop, xdotool):
     appd = AppdClient(port, token)
     appd.send({"type": "LAUNCH_APP", "app_id": APP_ID, "surface_id": 0})
     try:
-        appd.wait_for(lambda m: m.get("type") == "APP_READY", STARTUP_TIMEOUT)
+        ready = appd.wait_for(lambda m: m.get("type") == "APP_READY", STARTUP_TIMEOUT)
     except TimeoutError:
         raise AssertionError("no APP_READY")
+    session_id = ready["session_id"]
+
+    # The app's only Wayland connection is the one appd handed the
+    # compositor for this session.
+    bound = f"client bound to session session_id={session_id} app_id={APP_ID}"
+    if bound not in desktop.log_text("compositor"):
+        raise AssertionError(f"the compositor did not bind the app's client: {bound!r}")
 
     def capture_card():
         deadline = time.monotonic() + 10
@@ -212,6 +226,20 @@ def run(args, desktop, xdotool):
         raise AssertionError("counts 0, 1 and 2 are not distinct on screen")
     if states[3] != states[1]:
         raise AssertionError("count after ArrowDown does not match the count after one ArrowUp")
+
+    # Ending the session closes the app as a user close would: the
+    # compositor asks its window to close and the app shell exits by itself.
+    appd.send({"type": "TERMINATE_APP", "session_id": session_id})
+    deadline = time.monotonic() + 15
+    asked = f"session asked to close session_id={session_id} windows=1"
+    # appd records "closed on request" only when the app shell exits cleanly.
+    closed = (f'stopping session session_id={session_id} reason="closed on request; '
+              'app shell exited')
+    while asked not in desktop.log_text("compositor") or closed not in desktop.log_text("appd"):
+        if time.monotonic() > deadline:
+            raise AssertionError("the session did not close on request; see compositor.log "
+                                 "and appd.log")
+        time.sleep(0.3)
 
 
 def subprocess_run(xdotool, display, arguments):

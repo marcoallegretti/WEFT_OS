@@ -87,14 +87,9 @@ impl HostDirs {
     }
 }
 
-/// Derives grants for the declared capabilities. Every capability is
-/// checked before host directories are resolved or the app's data
-/// directory is created, so a refused launch leaves nothing behind.
-pub(crate) fn derive(
-    app_id: &str,
-    declared: &[String],
-    host_dirs: impl FnOnce() -> Result<HostDirs, Refusal>,
-) -> Result<SessionGrants, Refusal> {
+/// Parses the declared capabilities, refusing unknown ones and those this
+/// host does not support, without touching the host.
+pub(crate) fn validate(declared: &[String]) -> Result<Vec<Capability>, Refusal> {
     let mut capabilities = Vec::new();
     for text in declared {
         let capability: Capability =
@@ -110,7 +105,18 @@ pub(crate) fn derive(
         }
         capabilities.push(capability);
     }
+    Ok(capabilities)
+}
 
+/// Derives grants for the declared capabilities. Every capability is
+/// checked before host directories are resolved or the app's data
+/// directory is created, so a refused launch leaves nothing behind.
+pub(crate) fn derive(
+    app_id: &str,
+    declared: &[String],
+    host_dirs: impl FnOnce() -> Result<HostDirs, Refusal>,
+) -> Result<SessionGrants, Refusal> {
+    let capabilities = validate(declared)?;
     let mut grants = SessionGrants::default();
     let needs_dirs = capabilities
         .iter()

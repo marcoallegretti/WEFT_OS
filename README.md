@@ -14,9 +14,9 @@ WEFT OS is a Wayland compositor and application runtime where every app is a Web
 
 **Runtime** — `weft-runtime` runs WASI Component Model binaries under Wasmtime 30 (`--features wasmtime-runtime`). Provides `weft:app/notify`, `weft:app/ipc`, `weft:app/fetch`, `weft:app/notifications`, and `weft:app/clipboard` host imports. Preopens filesystem paths according to declared capabilities.
 
-**Package management** — `weft-pack` handles check, sign, verify, install, uninstall, list, build-image (EROFS dm-verity), and info. Validates capability strings at check time. App data is stored apart from packages and survives uninstall.
+**Package management** — `weft-pack` handles check, sign, verify, install and update, rollback, uninstall, list, build-image (EROFS dm-verity), and info. Validates capability strings at check time. Installs only packages signed by a trusted key (or explicitly as development content) and binds each app ID to its first publisher. App data is stored apart from packages and survives uninstall.
 
-**File portal** — `weft-file-portal` is a per-session file proxy with a path allowlist and `..` blocking.
+**File portal** — `weft-file-portal` is a per-session file proxy for the session's directory grants, with every operation confined beneath the granted directory by the kernel.
 
 **Mount helper** — `weft-mount-helper` is a setuid helper for EROFS dm-verity mount/umount via `veritysetup`.
 

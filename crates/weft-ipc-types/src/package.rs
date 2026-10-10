@@ -79,6 +79,39 @@ pub fn legacy_app_data_dir(home: &Path, app_id: &str) -> PathBuf {
         .join("data")
 }
 
+/// The home directory, when `HOME` is set to an absolute path.
+pub fn home_dir() -> Option<PathBuf> {
+    std::env::var_os("HOME")
+        .map(PathBuf::from)
+        .filter(|home| home.is_absolute())
+}
+
+/// Where app data for `app_id` already exists, in the current layout or in
+/// the earlier one under `home`, if anywhere. Data in the earlier layout is
+/// moved to the current one when the app next launches, so it counts too.
+pub fn existing_app_data(
+    data_home: &Path,
+    home: &Path,
+    app_id: &str,
+) -> std::io::Result<Option<PathBuf>> {
+    let places = [
+        app_data_dir(data_home, app_id),
+        legacy_app_data_dir(home, app_id),
+    ];
+    for place in places {
+        match std::fs::symlink_metadata(&place) {
+            Ok(_) => return Ok(Some(place)),
+            Err(e)
+                if matches!(
+                    e.kind(),
+                    std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory
+                ) => {}
+            Err(e) => return Err(e),
+        }
+    }
+    Ok(None)
+}
+
 /// The result of moving data from the earlier layout.
 #[derive(Debug, PartialEq, Eq)]
 pub enum Migration {
@@ -180,13 +213,13 @@ pub fn migrate_app_data(legacy: &Path, target: &Path) -> Result<Migration, Migra
 /// Renames `from` to `to`, failing with `AlreadyExists` instead of replacing
 /// an existing `to`, even one created after the caller checked for it.
 #[cfg(target_os = "linux")]
-fn rename_no_replace(from: &Path, to: &Path) -> std::io::Result<()> {
+pub fn rename_no_replace(from: &Path, to: &Path) -> std::io::Result<()> {
     use rustix::fs::{CWD, RenameFlags, renameat_with};
     renameat_with(CWD, from, CWD, to, RenameFlags::NOREPLACE).map_err(std::io::Error::from)
 }
 
 #[cfg(not(target_os = "linux"))]
-fn rename_no_replace(from: &Path, to: &Path) -> std::io::Result<()> {
+pub fn rename_no_replace(from: &Path, to: &Path) -> std::io::Result<()> {
     if std::fs::symlink_metadata(to).is_ok() {
         return Err(std::io::ErrorKind::AlreadyExists.into());
     }

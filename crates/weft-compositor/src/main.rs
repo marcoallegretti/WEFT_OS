@@ -5,6 +5,7 @@ mod backend;
 mod input;
 mod protocols;
 mod state;
+mod windows;
 
 fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt()

@@ -52,8 +52,18 @@ APP_ID = "org.weft.test.confinement"
 PROBES = ["own-image", "bridge", "outside-image", "other-image", "linked-image", "http-image",
           "http-fetch", "websocket", "worker-fetch", "srcdoc-internals"]
 GREEN = (0, 192, 0)
-# The app window's page area on the 1024x768 nested desktop.
-PAGE_TOP, PAGE_HEIGHT, PAGE_X = 35, 600, 400
+# Where the probe bands are sampled across the app window's page.
+PAGE_X = 400
+# The X root behind the nested compositor window.
+ROOT_COLOUR = (0, 0, 0)
+
+
+def page_rows(width, height, pixels):
+    """The first and last rows the app window's page covers at PAGE_X: the
+    compositor gives the application its whole work area. No shell runs in
+    this check, so every row of the output that is not the X root is page."""
+    rows = [y for y in range(height) if pixel(width, pixels, PAGE_X, y) != ROOT_COLOUR]
+    return (rows[0], rows[-1]) if rows else None
 
 
 def png():
@@ -142,6 +152,12 @@ def make_package(store, http_port, ws_port, other_dir):
     (package / "outside.png").write_bytes(png())
     other.write_bytes(png())
     (package / "ui/linked").symlink_to(other_dir)
+    # The package holds a link, which weft-pack refuses to install, so it is
+    # planted directly and recorded as development content, which runs
+    # unverified: the renderer's own confinement is what this check probes.
+    record = store / "home/share/weft/owners" / APP_ID
+    record.parent.mkdir(parents=True, exist_ok=True)
+    record.write_text("development\n")
 
 
 def run(args, desktop, store, other_dir):
@@ -157,6 +173,8 @@ def run(args, desktop, store, other_dir):
             "WEFT_RUNTIME_BIN": str(t / "weft-runtime"),
             "WEFT_APP_SHELL_BIN": str(t / "weft-app-shell"),
             "WEFT_APP_STORE": str(store),
+            "HOME": str(store / "home"),
+            "XDG_DATA_HOME": str(store / "home/share"),
             "WEFT_DISABLE_CGROUP": "1",
             "WEFT_APPD_WS_PORT": str(free_port()),
         })
@@ -169,10 +187,14 @@ def run(args, desktop, store, other_dir):
 
         deadline = time.monotonic() + 15
         while True:
-            width, _, pixels = parse_ppm(desktop.capture())
+            width, height, pixels = parse_ppm(desktop.capture())
+            rows = page_rows(width, height, pixels)
+            if rows is None:
+                raise AssertionError("the test app's page is not on screen")
+            top, bottom = rows
             colours = {}
             for i, name in enumerate(PROBES):
-                y = PAGE_TOP + int((i + 0.5) * PAGE_HEIGHT / len(PROBES))
+                y = top + int((i + 0.5) * (bottom - top + 1) / len(PROBES))
                 colours[name] = pixel(width, pixels, PAGE_X, y)
             if all(c == GREEN for c in colours.values()) or time.monotonic() > deadline:
                 break

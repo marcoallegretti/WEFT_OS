@@ -10473,6 +10473,7 @@ dependencies = [
  "futures-util",
  "libc",
  "rmp-serde",
+ "rustix 1.1.4",
  "sd-notify",
  "serde",
  "serde_json",
@@ -10494,6 +10495,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "bitflags 2.11.0",
+ "rustix 1.1.4",
  "sd-notify",
  "smithay",
  "smithay-drm-extras",
@@ -10511,6 +10513,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
+ "rustix 1.1.4",
  "serde",
  "serde_json",
 ]
@@ -10519,9 +10522,12 @@ dependencies = [
 name = "weft-ipc-types"
 version = "0.1.0"
 dependencies = [
+ "ed25519-dalek",
+ "hex",
  "rmp-serde",
  "rustix 1.1.4",
  "serde",
+ "sha2",
  "toml 0.8.23",
 ]
 
@@ -10540,6 +10546,7 @@ dependencies = [
  "ed25519-dalek",
  "hex",
  "rand 0.8.5",
+ "rustix 1.1.4",
  "sha2",
  "tar",
  "weft-ipc-types",

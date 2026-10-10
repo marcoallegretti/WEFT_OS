@@ -8,7 +8,15 @@ pub enum Request {
         app_id: String,
         surface_id: u64,
     },
+    /// Asks a running session to close as a user close would, or with
+    /// `force`, terminates it without asking.
     TerminateApp {
+        session_id: u64,
+        #[serde(default)]
+        force: bool,
+    },
+    /// Brings the session's window to the front with keyboard focus.
+    ActivateApp {
         session_id: u64,
     },
     QueryRunning,
@@ -211,10 +219,19 @@ mod tests {
 
     #[test]
     fn terminate_app_request_roundtrip() {
-        let req = Request::TerminateApp { session_id: 42 };
+        let req = Request::TerminateApp {
+            session_id: 42,
+            force: false,
+        };
         let bytes = rmp_serde::to_vec(&req).unwrap();
         let decoded: Request = rmp_serde::from_slice(&bytes).unwrap();
-        assert!(matches!(decoded, Request::TerminateApp { session_id: 42 }));
+        assert!(matches!(
+            decoded,
+            Request::TerminateApp {
+                session_id: 42,
+                force: false
+            }
+        ));
     }
 
     #[test]
