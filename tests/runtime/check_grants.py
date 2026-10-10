@@ -28,7 +28,9 @@ scenario passes a different set of `--grant` and `--preopen` arguments:
 
 It also checks that the runtime refuses, with a specific error, filesystem
 capabilities passed as `--grant`, unknown capabilities and preopens
-without an access mode.
+without an access mode, and that a runtime running the Counter demo, which
+waits for messages forever, answers over its IPC connection and exits once
+weft-appd's end of that connection closes.
 
 Requires cargo with the wasm32-wasip2 target.
 """
@@ -36,6 +38,7 @@ Requires cargo with the wasm32-wasip2 target.
 import argparse
 import http.server
 import shutil
+import socket
 import subprocess
 import sys
 import tempfile
@@ -43,6 +46,7 @@ import threading
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
+COUNTER = ROOT / "examples/org.weft.demo.counter/app.wasm"
 PROBE_DIR = ROOT / "tests/components/grants-probe"
 APP_ID = "org.weft.test.grants"
 NOT_GRANTED = "is not granted"
@@ -186,6 +190,52 @@ def check(runner, data):
                                  f"{message!r}:\n{result.stderr}")
 
 
+def check_hangup(runtime, work):
+    path = work / "ipc.sock"
+    listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    listener.bind(str(path))
+    listener.listen(1)
+    listener.settimeout(30)
+    process = subprocess.Popen(
+        [str(runtime), "org.weft.demo.counter", "1", "--module", str(COUNTER),
+         "--ipc-socket", str(path)],
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+        env={"PATH": "/usr/bin:/bin", "RUST_LOG": "info"})
+    try:
+        try:
+            connection, _ = listener.accept()
+        except socket.timeout:
+            raise AssertionError("the runtime did not connect to its IPC socket")
+        connection.settimeout(30)
+        connection.sendall(b"increment\n")
+        reply = b""
+        while not reply.endswith(b"\n"):
+            try:
+                chunk = connection.recv(4096)
+            except socket.timeout:
+                raise AssertionError("the counter did not answer over IPC")
+            if not chunk:
+                break
+            reply += chunk
+        if reply != b'{"count":1}\n':
+            raise AssertionError(f"the counter did not answer over IPC: {reply!r}")
+        connection.close()
+        try:
+            process.wait(timeout=10)
+        except subprocess.TimeoutExpired:
+            raise AssertionError("the runtime kept running after its IPC connection closed")
+        log = process.stderr.read()
+        process.stdout.read()  # drained; the log is on standard error
+        if process.returncode != 0 or "IPC connection ended" not in log:
+            raise AssertionError(f"the runtime did not end with the connection: "
+                                 f"exit {process.returncode}")
+    finally:
+        if process.poll() is None:
+            process.kill()
+            process.wait()
+        listener.close()
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__,
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -207,6 +257,7 @@ def main(argv=None):
         data = work / "data"
         data.mkdir()
         check(runner, data)
+        check_hangup(args.runtime, work)
     except AssertionError as failure:
         print(f"grants check failed: {failure}", file=sys.stderr)
         return 1

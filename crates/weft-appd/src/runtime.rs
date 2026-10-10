@@ -67,6 +67,10 @@ pub(crate) fn spawn_ipc_relay(
         // One component per session: no further connections are accepted.
         drop(listener);
         tracing::debug!(session_id, "IPC relay: component connected");
+        // The runtime ends when its side of this connection is shut down,
+        // even only for writing, so the connection stays whole until the
+        // session ends: tokio::io::split does not shut down a dropped half,
+        // as UnixStream::into_split would.
         let (reader, writer) = tokio::io::split(stream);
         let mut reader = BufReader::new(reader);
         let mut writer = BufWriter::new(writer);
