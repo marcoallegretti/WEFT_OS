@@ -83,6 +83,20 @@ impl WeftCompositorState {
         }
     }
 
+    /// Asks every window of `session_id` to close; returns how many.
+    pub fn close_session_windows(&mut self, session_id: u64) -> usize {
+        let mut closed = 0;
+        for window in self.space.elements() {
+            if window_session(window) == Some(session_id)
+                && let Some(toplevel) = window.toplevel()
+            {
+                toplevel.send_close();
+                closed += 1;
+            }
+        }
+        closed
+    }
+
     /// Activates the topmost window of `session_id`; returns whether the
     /// session has one.
     pub fn activate_session(&mut self, session_id: u64) -> bool {
