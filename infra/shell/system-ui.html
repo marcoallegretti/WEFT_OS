@@ -14,6 +14,7 @@
       --text-primary: rgba(255, 255, 255, 0.92);
       --text-secondary: rgba(255, 255, 255, 0.55);
       --accent: #5b8af5;
+      --focus-ring: #9db8ff;
     }
 
     *, *::before, *::after {
@@ -63,19 +64,30 @@
       -webkit-backdrop-filter: blur(20px);
     }
 
-    weft-taskbar-launcher {
+    button {
+      font: inherit;
+      color: inherit;
+      border: 0;
+      margin: 0;
+      background: transparent;
+      cursor: pointer;
+    }
+
+    :focus-visible {
+      outline: 2px solid var(--focus-ring);
+      outline-offset: 2px;
+    }
+
+    #launcher-btn {
       display: flex;
       align-items: center;
       justify-content: center;
       width: 36px;
       height: 36px;
       border-radius: 8px;
-      cursor: pointer;
-      background: transparent;
-      transition: background 0.15s;
     }
 
-    weft-taskbar-launcher:hover {
+    #launcher-btn:hover {
       background: var(--surface-border);
     }
 
@@ -111,60 +123,65 @@
       margin: 0 auto;
     }
 
-    weft-app-icon {
+    .app-icon {
       display: flex;
       flex-direction: column;
       align-items: center;
       gap: 6px;
       padding: 12px 8px;
       border-radius: 12px;
-      cursor: pointer;
       color: var(--text-primary);
       font-size: 12px;
       text-align: center;
       word-break: break-word;
-      transition: background 0.15s;
     }
 
-    weft-app-icon:hover {
+    .app-icon:hover {
       background: var(--surface-border);
     }
 
-    weft-app-icon svg {
+    .app-icon svg {
       flex-shrink: 0;
     }
 
     weft-taskbar-app {
       display: inline-flex;
       align-items: center;
-      gap: 4px;
+      gap: 2px;
       font-size: 12px;
       color: var(--text-secondary);
-      padding: 0 4px 0 6px;
-      cursor: pointer;
       border-radius: 6px;
-      transition: background 0.15s;
     }
 
     weft-taskbar-app:hover {
       background: var(--surface-border);
     }
 
+    weft-taskbar-app .task-activate {
+      padding: 4px 2px 4px 6px;
+      border-radius: 6px;
+    }
+
     weft-taskbar-app .task-close {
       opacity: 0;
       font-size: 11px;
       line-height: 1;
-      padding: 1px 3px;
+      padding: 3px 4px;
       border-radius: 3px;
-      transition: opacity 0.1s, background 0.1s;
     }
 
-    weft-taskbar-app:hover .task-close {
+    /* Shown on hover and whenever the entry has keyboard focus. */
+    weft-taskbar-app:hover .task-close,
+    weft-taskbar-app:focus-within .task-close {
       opacity: 1;
     }
 
     weft-taskbar-app .task-close:hover {
       background: rgba(255,80,80,0.3);
+    }
+
+    weft-taskbar-app .task-close.force {
+      color: #ff6b6b;
     }
 
     weft-notification-center {
@@ -188,7 +205,8 @@
   <weft-desktop>
     <weft-wallpaper></weft-wallpaper>
     <weft-taskbar>
-      <weft-taskbar-launcher id="launcher-btn" title="Apps">
+      <button id="launcher-btn" type="button" title="Apps" aria-label="Apps"
+              aria-haspopup="dialog" aria-expanded="false" aria-controls="launcher">
         <svg width="18" height="18" viewBox="0 0 18 18" fill="none"
              xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
           <rect x="1" y="1" width="6" height="6" rx="1.5"
@@ -200,15 +218,15 @@
           <rect x="11" y="11" width="6" height="6" rx="1.5"
                 fill="rgba(255,255,255,0.7)" />
         </svg>
-      </weft-taskbar-launcher>
+      </button>
       <weft-taskbar-clock id="clock"></weft-taskbar-clock>
     </weft-taskbar>
   </weft-desktop>
 
-  <weft-launcher hidden id="launcher">
+  <weft-launcher hidden id="launcher" tabindex="-1" role="dialog" aria-modal="true" aria-label="Apps">
     <weft-app-grid id="app-grid"></weft-app-grid>
   </weft-launcher>
-  <weft-notification-center id="notifications"></weft-notification-center>
+  <weft-notification-center id="notifications" role="status" aria-live="polite"></weft-notification-center>
 
   <script>
     (function () {
@@ -222,27 +240,76 @@
       updateClock();
       setInterval(updateClock, 10000);
 
-      document.getElementById('launcher-btn').addEventListener('click', function () {
-        var launcher = document.getElementById('launcher');
-        if (launcher.hasAttribute('hidden')) {
-          launcher.removeAttribute('hidden');
-          if (ws && ws.readyState === WebSocket.OPEN) {
-            ws.send(JSON.stringify({ type: 'QUERY_INSTALLED_APPS' }));
-          }
-        } else {
-          launcher.setAttribute('hidden', '');
+      var launcher = document.getElementById('launcher');
+      var launcherBtn = document.getElementById('launcher-btn');
+      var appGrid = document.getElementById('app-grid');
+
+      function launcherOpen() {
+        return !launcher.hasAttribute('hidden');
+      }
+
+      // Opening the launcher moves keyboard focus into it; closing it
+      // returns focus to the Apps button.
+      function openLauncher() {
+        launcher.removeAttribute('hidden');
+        launcherBtn.setAttribute('aria-expanded', 'true');
+        focusInLauncher(null);
+        if (ws && ws.readyState === WebSocket.OPEN) {
+          ws.send(JSON.stringify({ type: 'QUERY_INSTALLED_APPS' }));
         }
+      }
+
+      function closeLauncher() {
+        if (!launcherOpen()) return;
+        launcher.setAttribute('hidden', '');
+        launcherBtn.setAttribute('aria-expanded', 'false');
+        launcherBtn.focus();
+      }
+
+      // Focuses the icon of `appId`, else the first one, else the dialog.
+      function focusInLauncher(appId) {
+        var icons = appGrid.querySelectorAll('.app-icon');
+        var target = null;
+        icons.forEach(function (icon) {
+          if (icon.dataset.appId === appId) target = icon;
+        });
+        (target || icons[0] || launcher).focus();
+      }
+
+      launcherBtn.addEventListener('click', function () {
+        if (launcherOpen()) closeLauncher(); else openLauncher();
       });
 
       document.addEventListener('keydown', function (e) {
-        if (e.key === 'Escape') {
-          document.getElementById('launcher').setAttribute('hidden', '');
+        // The compositor brings the shell to the front when a Super key is
+        // tapped, then delivers the tap here; it opens or closes the
+        // launcher.
+        if (e.key === 'Meta' && !e.repeat && !e.altKey && !e.ctrlKey && !e.shiftKey) {
+          e.preventDefault();
+          if (launcherOpen()) closeLauncher(); else openLauncher();
+        } else if (e.key === 'Escape' && launcherOpen()) {
+          e.preventDefault();
+          closeLauncher();
+        } else if (e.key === 'Tab' && launcherOpen()) {
+          // The launcher is modal: Tab cycles through its apps, and Escape
+          // leaves it.
+          var icons = Array.prototype.slice.call(appGrid.querySelectorAll('.app-icon'));
+          e.preventDefault();
+          if (icons.length === 0) { launcher.focus(); return; }
+          var at = icons.indexOf(document.activeElement);
+          var next = at === -1 ? 0 : (at + (e.shiftKey ? icons.length - 1 : 1)) % icons.length;
+          icons[next].focus();
         }
       });
 
-      document.getElementById('launcher').addEventListener('click', function (e) {
+      // weft-servo-shell calls this when the shell loses keyboard focus, as
+      // when an application window is clicked; the launcher closes, so the
+      // next Super tap opens it.
+      window.weftShellBlurred = closeLauncher;
+
+      launcher.addEventListener('click', function (e) {
         if (e.target === this) {
-          this.setAttribute('hidden', '');
+          closeLauncher();
         }
       });
 
@@ -285,7 +352,7 @@
           if (ws !== socket) return;
           wsReconnectDelay = 1000;
           socket.send(JSON.stringify({ type: 'HELLO', role: 'system', token: endpoint.token }));
-          document.querySelectorAll('weft-taskbar-app').forEach(function (el) { el.remove(); });
+          document.querySelectorAll('weft-taskbar-app').forEach(removeEntryElement);
           socket.send(JSON.stringify({ type: 'QUERY_RUNNING' }));
           socket.send(JSON.stringify({ type: 'QUERY_INSTALLED_APPS' }));
         });
@@ -347,17 +414,25 @@
       }
 
       function renderLauncher(apps) {
-        var grid = document.getElementById('app-grid');
+        var grid = appGrid;
+        // Replacing the icons would drop keyboard focus; it returns to the
+        // same app's new icon.
+        var focused = grid.contains(document.activeElement) ? document.activeElement.dataset.appId : null;
+        var active = document.activeElement;
+        var refocus = launcherOpen() && (!active || active === document.body || launcher.contains(active));
         grid.innerHTML = '';
         if (apps.length === 0) {
           var empty = document.createElement('p');
           empty.textContent = 'No apps installed';
           empty.style.cssText = 'color:var(--text-secondary);font-size:13px;';
           grid.appendChild(empty);
+          if (refocus) focusInLauncher(null);
           return;
         }
         apps.forEach(function (app) {
-          var icon = document.createElement('weft-app-icon');
+          var icon = document.createElement('button');
+          icon.type = 'button';
+          icon.className = 'app-icon';
           icon.dataset.appId = app.app_id;
           icon.title = app.app_id + (app.version ? ' v' + app.version : '');
           // Names come from package manifests; they are set as text, never markup.
@@ -369,14 +444,16 @@
             '</text></svg><span></span>';
           icon.querySelector('text').textContent = app.name ? app.name.charAt(0).toUpperCase() : '?';
           icon.querySelector('span').textContent = app.name || app.app_id;
+          icon.setAttribute('aria-label', 'Open ' + (app.name || app.app_id));
           icon.addEventListener('click', function () {
             if (ws && ws.readyState === WebSocket.OPEN) {
               ws.send(JSON.stringify({ type: 'LAUNCH_APP', app_id: app.app_id, surface_id: 0 }));
             }
-            document.getElementById('launcher').setAttribute('hidden', '');
+            closeLauncher();
           });
           grid.appendChild(icon);
         });
+        if (refocus) focusInLauncher(focused);
       }
 
       // Longer than weft-appd's close timeout, so an app that neither closes
@@ -392,13 +469,20 @@
         el.id = id;
         el.dataset.sessionId = sessionId;
         if (appId) { el.dataset.appId = appId; }
+        el.setAttribute('role', 'group');
+        el.setAttribute('aria-label', label);
         el.title = appId ? appId + ' (session ' + sessionId + ')' : 'Session ' + sessionId;
-        var span = document.createElement('span');
+        var span = document.createElement('button');
+        span.type = 'button';
+        span.className = 'task-activate';
         span.textContent = '● ' + label;
-        var close = document.createElement('span');
+        span.setAttribute('aria-label', 'Show ' + label);
+        var close = document.createElement('button');
+        close.type = 'button';
         close.className = 'task-close';
         close.textContent = '×';
         close.title = 'Close';
+        close.setAttribute('aria-label', 'Close ' + label);
         // The first click asks the app to close; it may decline, for example
         // to offer saving. An app still running once it has had time to
         // answer can then be force quit, losing what it has not saved.
@@ -415,7 +499,9 @@
             close.dataset.force = '1';
             close.textContent = 'Force quit';
             close.title = 'Force quit: changes the app has not saved are lost';
-            close.style.color = '#ff6b6b';
+            close.setAttribute('aria-label', 'Force quit ' + label + '; changes it has not saved are lost');
+            close.classList.add('force');
+            showNotification(label + ' did not close; its close button now force quits it');
             // Offered only for a while: an app that declined to let the user
             // keep working is closed normally next time.
             closeTimer = setTimeout(resetClose, FORCE_QUIT_OFFER);
@@ -428,7 +514,8 @@
           delete close.dataset.force;
           close.textContent = '×';
           close.title = 'Close';
-          close.style.color = '';
+          close.setAttribute('aria-label', 'Close ' + label);
+          close.classList.remove('force');
         }
         el.appendChild(span);
         el.appendChild(close);
@@ -452,13 +539,26 @@
         el.dataset.closing = '1';
         el.style.opacity = '0.5';
         el.title += ' (closing)';
+        var activate = el.querySelector('.task-activate');
+        activate.setAttribute('aria-disabled', 'true');
+        activate.setAttribute('aria-label', activate.getAttribute('aria-label') + ' (closing)');
         var close = el.querySelector('.task-close');
-        if (close) { close.style.display = 'none'; }
+        if (close) {
+          if (document.activeElement === close) { activate.focus(); }
+          close.style.display = 'none';
+        }
       }
 
       function removeTaskbarEntry(sessionId) {
         var el = document.getElementById('task-' + sessionId);
-        if (el) { el.remove(); }
+        if (el) { removeEntryElement(el); }
+      }
+
+      // Focus on a removed entry would be lost; it moves to the Apps button.
+      function removeEntryElement(el) {
+        var hadFocus = el.contains(document.activeElement);
+        el.remove();
+        if (hadFocus) { launcherBtn.focus(); }
       }
 
       function showNotification(text) {

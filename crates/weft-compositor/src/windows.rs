@@ -4,13 +4,13 @@
 //! panel fills the output and starts beneath every application window;
 //! application windows fill the work area, the output less the strips the
 //! panel reserves. A session's first window, a clicked window (the panel
-//! included, which then shows the shell's home over the applications) and
-//! one appd asks to activate is raised to the top, marked activated and
-//! given keyboard focus; apart from a panel being lowered when it
-//! registers, nothing else changes the order, and a window that maps
-//! without taking focus goes beneath the window in front. When the
-//! focused window closes, the topmost remaining application window gets
-//! focus.
+//! included, which then shows the shell's home over the applications), one
+//! appd asks to activate and the panel when a Super key is tapped are
+//! raised to the top, marked activated and given keyboard focus; apart
+//! from a panel being lowered when it registers, nothing else changes the
+//! order, and a window that maps without taking focus goes beneath the
+//! window in front. When the focused window closes, the topmost remaining
+//! application window gets focus.
 
 use smithay::desktop::Window;
 use smithay::reexports::wayland_protocols::xdg::shell::server::xdg_toplevel;
@@ -55,6 +55,31 @@ impl WeftCompositorState {
                 Some(surface.into_owned()),
                 SERIAL_COUNTER.next_serial(),
             );
+        }
+    }
+
+    /// Activates the shell's panel; returns whether one is registered. With
+    /// several, the first registered is the shell's.
+    pub fn activate_panel(&mut self) -> bool {
+        let panel = self
+            .weft_shell_state
+            .panels()
+            .filter(|p| p.is_alive())
+            .find_map(|panel| {
+                let surface = panel
+                    .data::<WeftShellWindowData>()
+                    .and_then(|data| data.surface.clone())?;
+                self.space
+                    .elements()
+                    .find(|window| window.wl_surface().is_some_and(|s| *s == surface))
+                    .cloned()
+            });
+        match panel {
+            Some(panel) => {
+                self.activate_window(&panel);
+                true
+            }
+            None => false,
         }
     }
 
