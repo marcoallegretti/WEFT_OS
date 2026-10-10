@@ -14,7 +14,7 @@ The approval is recorded per user, in `$XDG_DATA_HOME/weft/approvals/<id>`; weft
 
 ## Process Isolation
 
-Each app session runs as a separate OS process (`weft-runtime`). When systemd is available, the process is wrapped in a systemd scope (`weft-apps.slice`) with `CPUQuota=200%` and `MemoryMax=512M`.
+Each app session runs as a separate OS process (`weft-runtime`). When systemd is available, the process is wrapped in a systemd scope (`weft-apps.slice`) with `CPUQuota=200%`, `MemoryMax=512M` and `TasksMax=512` (threads included; the runtime runs a few per CPU). Independently of systemd, the runtime limits the component's linear memory to 256 MiB in total, across all its memories (`--max-memory-mib` changes it), and bounds its tables, memories and core instances: a memory or table that would grow past its limit does not grow, and the component sees an allocation failure. App messages over `weft:app/ipc` are single lines of at most 64 KiB, the limit weft-appd applies; a component's message that is longer or contains a line break is refused, a longer line from weft-appd, or a failed send, or a write that blocks for 10 seconds, ends the connection for both sides, so weft-appd ends the session as it does when the component closes the connection. CPU time within the quota is not limited per component.
 
 ## Filesystem Isolation
 

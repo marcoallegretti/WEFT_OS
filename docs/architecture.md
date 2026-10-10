@@ -46,7 +46,7 @@ systemd
 ├── weft-servo-shell (user, after compositor)
 └── weft-appd (user, after compositor + servo-shell)
     └── per-session:
-        ├── weft-runtime <app_id> <session_id> --ipc-socket <path> --module <path> [--preopen HOST::GUEST::ro|rw]... [--grant CAP]...
+        ├── weft-runtime <app_id> <session_id> --ipc-socket <path> --module <path> [--preopen HOST::GUEST::ro|rw]... [--grant CAP]... [--max-memory-mib N]
         ├── weft-app-shell <app_id> <session_id> --ui <path>
         └── weft-file-portal <socket> [--allow ...] [--allow-read ...]
 ```
