@@ -56,17 +56,40 @@ fn io(path: &Path) -> impl FnOnce(std::io::Error) -> TrustError + '_ {
 
 /// The SHA-256 content digest a package signature covers.
 pub fn content_digest(package_root: &Path) -> Result<[u8; 32], TrustError> {
-    let mut entries = Vec::new();
-    collect(package_root, package_root, &mut entries)?;
-    entries.sort();
-    let mut inventory = String::new();
-    for (path, hash) in &entries {
-        inventory.push_str(path);
-        inventory.push('\t');
-        inventory.push_str(&hex::encode(hash));
-        inventory.push('\n');
+    Inventory::read(package_root).map(|inventory| inventory.digest())
+}
+
+/// The files of a package and their SHA-256 hashes, as read once: the digest
+/// and the hash of any one file come from the same reading.
+#[derive(Debug)]
+pub struct Inventory(Vec<(String, [u8; 32])>);
+
+impl Inventory {
+    pub fn read(package_root: &Path) -> Result<Self, TrustError> {
+        let mut entries = Vec::new();
+        collect(package_root, package_root, &mut entries)?;
+        entries.sort();
+        Ok(Self(entries))
     }
-    Ok(Sha256::digest(inventory.as_bytes()).into())
+
+    /// The content digest a package signature covers.
+    pub fn digest(&self) -> [u8; 32] {
+        let mut inventory = String::new();
+        for (path, hash) in &self.0 {
+            inventory.push_str(path);
+            inventory.push('\t');
+            inventory.push_str(&hex::encode(hash));
+            inventory.push('\n');
+        }
+        Sha256::digest(inventory.as_bytes()).into()
+    }
+
+    /// Whether the file at `path`, relative to the package root, had exactly
+    /// these bytes when the inventory was read.
+    pub fn holds(&self, path: &str, bytes: &[u8]) -> bool {
+        let hash: [u8; 32] = Sha256::digest(bytes).into();
+        self.0.iter().any(|(p, h)| p == path && *h == hash)
+    }
 }
 
 fn collect(
@@ -220,12 +243,15 @@ impl TrustStore {
         let Some(signature) = read_signature(package_root)? else {
             return Ok(None);
         };
-        let digest = content_digest(package_root)?;
-        Ok(self
-            .keys
+        Ok(self.signer_of(&content_digest(package_root)?, &signature))
+    }
+
+    /// The trusted key that made `signature` over `digest`, if any.
+    pub fn signer_of(&self, digest: &[u8; 32], signature: &Signature) -> Option<PublisherKey> {
+        self.keys
             .iter()
             .copied()
-            .find(|k| k.signed(&digest, &signature)))
+            .find(|k| k.signed(digest, signature))
     }
 }
 
@@ -406,6 +432,17 @@ mod tests {
         let refused = content_digest(&dir);
         assert!(matches!(refused, Err(TrustError::ControlCharacter(_))));
         assert_ne!(refused.ok(), Some(signed));
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn an_inventory_knows_the_bytes_it_hashed() {
+        let dir = dir("inventory");
+        let inventory = Inventory::read(&dir).unwrap();
+        assert_eq!(inventory.digest(), content_digest(&dir).unwrap());
+        assert!(inventory.holds("wapp.toml", b"[package]\n"));
+        assert!(!inventory.holds("wapp.toml", b"[package]\ncapabilities = []\n"));
+        assert!(!inventory.holds("absent.toml", b"[package]\n"));
         std::fs::remove_dir_all(&dir).unwrap();
     }
 

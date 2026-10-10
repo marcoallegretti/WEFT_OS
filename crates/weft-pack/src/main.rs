@@ -490,14 +490,19 @@ fn admit(
             "{app_id} belongs to {existing}; this package is {owner}. Its app data stays with \
              its owner, so another publisher or a development build cannot take the ID over"
         ),
+        None if claim_data => {
+            write_owner(&record, owner)?;
+            Some(record)
+        }
         None => {
-            let data = weft_ipc_types::package::app_data_dir(data_home, app_id);
-            let no_data = match std::fs::symlink_metadata(&data) {
-                Err(e) if e.kind() == std::io::ErrorKind::NotFound => true,
-                Err(e) => return Err(e).with_context(|| format!("inspect {}", data.display())),
-                Ok(_) => false,
-            };
-            if !no_data && !claim_data {
+            // Data in the earlier layout counts: weft-appd moves it to the
+            // app's data directory when the app next launches.
+            let home = weft_ipc_types::package::home_dir().context(
+                "HOME is not set to an absolute path, so earlier app data cannot be found",
+            )?;
+            let existing = weft_ipc_types::package::existing_app_data(data_home, &home, app_id)
+                .with_context(|| format!("inspect the app data of {app_id}"))?;
+            if let Some(data) = existing {
                 anyhow::bail!(
                     "{} holds app data for {app_id} with no recorded owner; install with \
                      --claim-data to give it to {owner}, or move it aside",
@@ -600,9 +605,13 @@ fn installed_in_another_store(app_id: &str, store_root: &Path) -> bool {
 /// Removes the owner record of `app_id` when the app has no data, and
 /// reports whether a record was removed.
 fn release_owner_without_data(data_home: &Path, app_id: &str) -> bool {
-    let no_data =
-        std::fs::symlink_metadata(weft_ipc_types::package::app_data_dir(data_home, app_id))
-            .is_err_and(|e| e.kind() == std::io::ErrorKind::NotFound);
+    // Data in either layout keeps the record; so does not being able to look.
+    let no_data = weft_ipc_types::package::home_dir().is_some_and(|home| {
+        matches!(
+            weft_ipc_types::package::existing_app_data(data_home, &home, app_id),
+            Ok(None)
+        )
+    });
     no_data
         && std::fs::remove_file(weft_ipc_types::trust::owner_record_path(data_home, app_id)).is_ok()
 }
@@ -1341,6 +1350,13 @@ mod tests {
         std::fs::remove_dir_all(&data).unwrap();
         with_home(&home, || uninstall_package_from(app_id, &store)).unwrap();
         assert!(!record.exists());
+
+        // Data in the earlier layout keeps the record too.
+        weft_ipc_types::trust::write_owner(&record, Owner::Development).unwrap();
+        let legacy = weft_ipc_types::package::legacy_app_data_dir(&home, app_id);
+        std::fs::create_dir_all(&legacy).unwrap();
+        assert!(with_home(&home, || uninstall_package_from(app_id, &store)).is_err());
+        assert!(record.exists());
         let _ = std::fs::remove_dir_all(&home);
     }
 
@@ -1396,6 +1412,46 @@ mod tests {
         std::fs::set_permissions(&absolute, std::fs::Permissions::from_mode(0o750)).unwrap();
         create_store(&absolute).unwrap();
         assert_eq!(mode(&absolute), 0o750);
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn unowned_data_in_the_earlier_layout_needs_a_claim() {
+        let home = temp_root("legacy_claim");
+        let app_id = "org.weft.test.legacyclaim";
+        write_package(&home.join("src"), app_id, APP_DATA);
+        let legacy = weft_ipc_types::package::legacy_app_data_dir(&home, app_id);
+        std::fs::create_dir_all(&legacy).unwrap();
+        let other = home.join("other");
+        let unclaimed = with_home(&home, || {
+            install_package_to(&home.join("src"), &other, InstallMode::Development)
+        });
+        let message = format!("{:#}", unclaimed.unwrap_err());
+        assert!(message.contains("--claim-data"), "{message}");
+        assert_eq!(owner_of(&home, app_id), None);
+        with_home(&home, || {
+            install_into(&home.join("src"), &other, InstallMode::Development, true)
+        })
+        .unwrap();
+        assert_eq!(owner_of(&home, app_id), Some(Owner::Development));
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn a_first_install_without_a_usable_home_records_nothing() {
+        let home = temp_root("no_home");
+        let app_id = "org.weft.test.nohome";
+        write_package(&home.join("src"), app_id, "");
+        let store = home.join("store");
+        let refused = with_home(&home, || {
+            // SAFETY: with_home holds env_lock and restores HOME afterwards.
+            unsafe { std::env::set_var("HOME", "relative") };
+            install_package_to(&home.join("src"), &store, InstallMode::Development)
+        });
+        let message = format!("{:#}", refused.unwrap_err());
+        assert!(message.contains("HOME"), "{message}");
+        assert_eq!(owner_of(&home, app_id), None);
+        assert!(!store.join(app_id).exists());
         let _ = std::fs::remove_dir_all(&home);
     }
 
