@@ -89,6 +89,7 @@ python3 tests/frame/check_notes.py     # Notes stores exactly what is typed, ref
 python3 tests/frame/check_app_data.py  # Notes data from the earlier layout is moved and kept
 python3 tests/frame/check_confinement.py  # an app page reaches only its UI files and its session bridge
 python3 tests/frame/check_activation.py   # panel beneath two apps; launch and ACTIVATE_APP raise and focus
+python3 tests/frame/check_update.py    # updates leave running sessions on their revision; failed updates, rollback and uninstall
 ```
 
 ## Demo apps (wasm32-wasip2)
@@ -125,6 +126,16 @@ weft-pack generate-key ./keys
 weft-pack sign ./examples/org.weft.demo.counter --key ./keys/weft-sign.key
 weft-pack verify ./examples/org.weft.demo.counter --key ./keys/weft-sign.pub
 ```
+
+Installation requires a signature by a trusted key. To install the demos with the demo key, trust it for your user (the key is a test fixture; do not trust it on a system you depend on):
+
+```sh
+mkdir -p ~/.config/weft/trusted-keys
+cp examples/keys/weft-sign.pub ~/.config/weft/trusted-keys/weft-demo.pub
+weft-pack install examples/org.weft.demo.notes
+```
+
+Unsigned packages under development install with `weft-pack install <dir> --dev`, recorded as development content and marked `(development)` by `weft-pack list`. See `docs/security.md` for the trust store and app ID ownership.
 
 ## NixOS VM (requires Nix with flakes)
 

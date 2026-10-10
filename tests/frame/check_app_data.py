@@ -41,12 +41,20 @@ def run(args, desktop, home, xdotool):
     (legacy / "notes.txt").write_bytes(NOTES)
     data_home = home / "data-home"
     target = data_home / "weft/app-data" / APP_ID
+    # The earlier data is recorded as the demo publisher's. Data from before
+    # owner records has no record and is refused until claimed with
+    # weft-pack install --claim-data.
+    owner = data_home / "weft/owners" / APP_ID
+    owner.parent.mkdir(parents=True)
+    key = (ROOT / "examples/keys/weft-sign.pub").read_text().strip()
+    owner.write_text(f"verified {key}\n")
 
     t = Path(args.target)
     desktop.launch_client("appd", [t / "weft-appd"], {
         "WEFT_RUNTIME_BIN": str(t / "weft-runtime"),
         "WEFT_APP_SHELL_BIN": str(t / "weft-app-shell"),
         "WEFT_APP_STORE": str(args.store),
+        "WEFT_TRUSTED_KEYS": str(ROOT / "examples/keys"),
         "WEFT_DISABLE_CGROUP": "1",
         "WEFT_APPD_WS_PORT": str(free_port()),
         "HOME": str(home),

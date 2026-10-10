@@ -28,7 +28,7 @@ WASI Preview 2 + Component Model execution host (Wasmtime 30). Runs the componen
 
 ### weft-pack
 
-Package management CLI. Subcommands: `check` (validate wapp.toml + wasm module), `sign` (Ed25519 signature), `verify` (verify signature), `generate-key`, `install`, `uninstall`, `list`, `build-image` (EROFS dm-verity), `info`.
+Package management CLI. Subcommands: `check` (validate wapp.toml, entries and package content), `sign` (Ed25519 signature over every file), `verify` (verify signature), `generate-key`, `install` (requires a signature by a trusted key unless `--dev`; records the app ID's owner; installs or updates, see [Installing and updating](#installing-and-updating)), `uninstall`, `rollback`, `approve` (approve the app's declared capabilities, or those listed; `install --approve` does so at installation), `list`, `build-image` (EROFS dm-verity), `info`.
 
 ### weft-file-portal
 
@@ -102,7 +102,7 @@ Fetch grants name hosts, not addresses: ports are not restricted, and a host tha
   app.wasm           — WASI Component Model binary
   ui/
     index.html       — entry point served by weft-app-shell
-  signature.sig      — Ed25519 signature over SHA-256 of (wapp.toml + app.wasm)
+  signature.sig      — Ed25519 signature over the content digest of every other file (see security.md)
 ```
 
 Package store roots (in priority order):
@@ -115,11 +115,19 @@ Package store roots (in priority order):
 `weft-appd` resolves a launch once. A verified image in any store root takes precedence over a directory install in any root, so a user's directory cannot shadow a system image; otherwise the first root with a directory install is used:
 
 - **Verified image:** `<root>/<id>.app.img` with its dm-verity hash tree `<id>.app.hash` and root hash `<id>.app.roothash`, the names `weft-pack build-image` and `build-verity` produce. When any of the three exists, the image must mount through `weft-mount-helper`; a missing companion, a malformed root hash, a missing helper or a failed mount refuses the launch, and appd never falls back to a directory install. The root hash is read from the store next to the image and is not yet authenticated, so dm-verity detects corruption but not a store whose image, hash tree and root hash were replaced together. The mount belongs to the session and is released when the session stops.
-- **Directory install:** `<root>/<id>/wapp.toml`.
+- **Directory install:** `<root>/<id>`, a link to the active revision `.revisions/<id>/<digest>` written by `weft-pack`, or, for a store written before revisions, a package directory. A link is followed only in exactly that form, to one of the app's own revisions; any other link is refused (403). The session runs from the revision directory itself and holds a shared lock on it until it stops, so it keeps its bytes while an update or rollback switches the link.
 
 The package root must be a directory and its manifest a regular file, neither a symbolic link, and the manifest must declare the requested ID. `[runtime].module` and `[ui].entry` must be relative paths of plain components, without symbolic links, naming regular files inside that root. The component, the UI document and the capabilities all come from that one manifest. A refused launch reports 400 (invalid ID), 404 (not installed), 403 (invalid package, image or image metadata) or 500 (the host cannot read the package or mount the image).
 
-A directory install can still be changed by its owner while a session runs, and nothing verifies its content at launch.
+A directory install can still be changed by its owner while a session runs; for a verified owner, appd checks its content against the signature at launch, with the limits security.md describes.
+
+### Installing and updating
+
+`weft-pack install` copies the package into a staging directory in the store and checks, verifies and admits that copy, so the bytes that are checked are the bytes that are installed. The copy is flushed to disk and renamed to an immutable revision named by its content digest, `<root>/.revisions/<id>/<digest>`; installing the same content again reuses it. One rename of the link `<root>/<id>` then makes it active. The rename of the link is the commit point. An installation that fails before it leaves the previously active revision active, or, for a first installation, nothing installed; a failed first installation also removes the owner record it created, while one interrupted by a crash leaves that record until `weft-pack uninstall <id>` releases it. After the commit point the update stands, and what an interruption leaves to tidy is collected later. A revision is reused only when it still holds the same content and signature file; otherwise the new copy replaces it in one exchange, unless a running session uses it. Such a replacement, for the same content with another signature file, is visible under the revision's name at once, even if the installation then fails. A package directory from before revisions is replaced in one exchange with the new link, only while no session runs from it and only after the app data an earlier weft-appd kept in its `data` directory has been moved to the app data directory, under the same rules as for uninstall; otherwise the update stops before replacing anything. Data moved this way stays in the app data directory even if the update is then refused.
+
+The revision active before an update is kept for `weft-pack rollback <id>`, which makes it active again, keeping the revision it replaces in turn; it is checked against the owner record again, so a revision whose publisher key was withdrawn is not rolled back to. Other revisions are removed by each install, rollback or uninstall of the app, except those a session still runs from; those stay until a later operation on the app finds them unused. Temporary links of interrupted activations are removed then too, and staging, unpacking and removal directories once they are an hour old. `weft-pack uninstall` removes the link, so new launches no longer find the app, and the kept revision; running sessions continue on their revisions. Apart from that move of data from the earlier layout, app data is never touched by these operations. Package revisions and app data are independent: rolling back a package does not roll back its data.
+
+A launch is refused (500, try again) while a package operation holds the revision it would run from, rather than waiting for it. Only sessions started by this weft-appd hold their revisions: a session left from an earlier version, or processes that outlive weft-appd, do not, and a package directory from before revisions such sessions run from can be replaced under them. Package operations on one app are serialised by the owner lock in the data home of the user running them; the store itself is not locked against users with other data homes.
 
 ## App data
 

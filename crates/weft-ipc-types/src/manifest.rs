@@ -62,9 +62,19 @@ impl Manifest {
     /// Reads `<package_root>/wapp.toml`.
     pub fn read(package_root: &Path) -> Result<Self, ManifestError> {
         let path = package_root.join(MANIFEST_FILE);
-        let text =
-            std::fs::read_to_string(&path).map_err(|e| ManifestError::Io(path.clone(), e))?;
-        toml::from_str(&text).map_err(|e| ManifestError::Parse(path, e))
+        let bytes = std::fs::read(&path).map_err(|e| ManifestError::Io(path.clone(), e))?;
+        Self::parse(&path, &bytes)
+    }
+
+    /// Parses manifest bytes already read from `path`.
+    pub fn parse(path: &Path, bytes: &[u8]) -> Result<Self, ManifestError> {
+        let text = std::str::from_utf8(bytes).map_err(|e| {
+            ManifestError::Io(
+                path.to_path_buf(),
+                std::io::Error::new(std::io::ErrorKind::InvalidData, e),
+            )
+        })?;
+        toml::from_str(text).map_err(|e| ManifestError::Parse(path.to_path_buf(), e))
     }
 
     pub fn capabilities(&self) -> &[String] {
