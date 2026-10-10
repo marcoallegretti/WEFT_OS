@@ -26,6 +26,7 @@ wayland-scanner = "0.31"
 wayland-server = "0.31"
 wayland-backend = "0.3"
 bitflags = "2"
+rustix = { version = "1", features = ["net"] }
 
 # DRM/KMS and hardware input depend on Linux kernel interfaces; compile only on Linux.
 [target.'cfg(target_os = "linux")'.dependencies]

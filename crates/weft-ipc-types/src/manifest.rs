@@ -38,6 +38,31 @@ pub struct RuntimeMeta {
 pub struct UiMeta {
     /// The UI document, relative to the package root.
     pub entry: String,
+    /// What happens when the user asks the application's window to close.
+    #[serde(default)]
+    pub close: ClosePolicy,
+}
+
+/// An application's declared unsaved-change policy: what a user close does.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ClosePolicy {
+    /// The window closes at once; the application keeps no unsaved state.
+    #[default]
+    Immediate,
+    /// The page is asked first and may cancel the close, for example to
+    /// offer saving unsaved changes; it then closes itself when done.
+    Ask,
+}
+
+impl ClosePolicy {
+    /// The value weft-appd passes to the app shell in `WEFT_APP_CLOSE`.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Immediate => "immediate",
+            Self::Ask => "ask",
+        }
+    }
 }
 
 /// Why a manifest could not be read.
@@ -62,9 +87,19 @@ impl Manifest {
     /// Reads `<package_root>/wapp.toml`.
     pub fn read(package_root: &Path) -> Result<Self, ManifestError> {
         let path = package_root.join(MANIFEST_FILE);
-        let text =
-            std::fs::read_to_string(&path).map_err(|e| ManifestError::Io(path.clone(), e))?;
-        toml::from_str(&text).map_err(|e| ManifestError::Parse(path, e))
+        let bytes = std::fs::read(&path).map_err(|e| ManifestError::Io(path.clone(), e))?;
+        Self::parse(&path, &bytes)
+    }
+
+    /// Parses manifest bytes already read from `path`.
+    pub fn parse(path: &Path, bytes: &[u8]) -> Result<Self, ManifestError> {
+        let text = std::str::from_utf8(bytes).map_err(|e| {
+            ManifestError::Io(
+                path.to_path_buf(),
+                std::io::Error::new(std::io::ErrorKind::InvalidData, e),
+            )
+        })?;
+        toml::from_str(text).map_err(|e| ManifestError::Parse(path.to_path_buf(), e))
     }
 
     pub fn capabilities(&self) -> &[String] {
@@ -212,6 +247,24 @@ mod tests {
         let manifest = Manifest::read(&dir).unwrap();
         assert_eq!(manifest.package.id, "org.weft.test");
         assert_eq!(manifest.capabilities(), ["sys:notifications"]);
+        assert_eq!(manifest.ui.close, ClosePolicy::Immediate);
+        std::fs::write(
+            dir.join(MANIFEST_FILE),
+            "[package]\nid = \"org.weft.test\"\nname = \"T\"\nversion = \"1.0.0\"\n\
+             [runtime]\nmodule = \"app.wasm\"\n[ui]\nentry = \"ui/index.html\"\nclose = \"ask\"\n",
+        )
+        .unwrap();
+        assert_eq!(Manifest::read(&dir).unwrap().ui.close, ClosePolicy::Ask);
+        std::fs::write(
+            dir.join(MANIFEST_FILE),
+            "[package]\nid = \"org.weft.test\"\nname = \"T\"\nversion = \"1.0.0\"\n\
+             [runtime]\nmodule = \"app.wasm\"\n[ui]\nentry = \"ui/index.html\"\nclose = \"later\"\n",
+        )
+        .unwrap();
+        assert!(matches!(
+            Manifest::read(&dir),
+            Err(ManifestError::Parse(..))
+        ));
         std::fs::write(dir.join(MANIFEST_FILE), "[package]\nid = \"x\"\n").unwrap();
         assert!(matches!(
             Manifest::read(&dir),
