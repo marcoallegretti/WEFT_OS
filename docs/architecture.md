@@ -28,7 +28,7 @@ WASI Preview 2 + Component Model execution host (Wasmtime 30). Runs the componen
 
 ### weft-pack
 
-Package management CLI. Subcommands: `check` (validate wapp.toml + wasm module), `sign` (Ed25519 signature), `verify` (verify signature), `generate-key`, `install`, `uninstall`, `list`, `build-image` (EROFS dm-verity), `info`.
+Package management CLI. Subcommands: `check` (validate wapp.toml, entries and package content), `sign` (Ed25519 signature over every file), `verify` (verify signature), `generate-key`, `install` (requires a signature by a trusted key unless `--dev`; records the app ID's owner), `uninstall`, `list`, `build-image` (EROFS dm-verity), `info`.
 
 ### weft-file-portal
 
@@ -102,7 +102,7 @@ Fetch grants name hosts, not addresses: ports are not restricted, and a host tha
   app.wasm           — WASI Component Model binary
   ui/
     index.html       — entry point served by weft-app-shell
-  signature.sig      — Ed25519 signature over SHA-256 of (wapp.toml + app.wasm)
+  signature.sig      — Ed25519 signature over the content digest of every other file (see security.md)
 ```
 
 Package store roots (in priority order):

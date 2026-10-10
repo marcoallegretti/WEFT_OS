@@ -10519,9 +10519,12 @@ dependencies = [
 name = "weft-ipc-types"
 version = "0.1.0"
 dependencies = [
+ "ed25519-dalek",
+ "hex",
  "rmp-serde",
  "rustix 1.1.4",
  "serde",
+ "sha2",
  "toml 0.8.23",
 ]
 
@@ -10540,6 +10543,7 @@ dependencies = [
  "ed25519-dalek",
  "hex",
  "rand 0.8.5",
+ "rustix 1.1.4",
  "sha2",
  "tar",
  "weft-ipc-types",

@@ -180,13 +180,13 @@ pub fn migrate_app_data(legacy: &Path, target: &Path) -> Result<Migration, Migra
 /// Renames `from` to `to`, failing with `AlreadyExists` instead of replacing
 /// an existing `to`, even one created after the caller checked for it.
 #[cfg(target_os = "linux")]
-fn rename_no_replace(from: &Path, to: &Path) -> std::io::Result<()> {
+pub fn rename_no_replace(from: &Path, to: &Path) -> std::io::Result<()> {
     use rustix::fs::{CWD, RenameFlags, renameat_with};
     renameat_with(CWD, from, CWD, to, RenameFlags::NOREPLACE).map_err(std::io::Error::from)
 }
 
 #[cfg(not(target_os = "linux"))]
-fn rename_no_replace(from: &Path, to: &Path) -> std::io::Result<()> {
+pub fn rename_no_replace(from: &Path, to: &Path) -> std::io::Result<()> {
     if std::fs::symlink_metadata(to).is_ok() {
         return Err(std::io::ErrorKind::AlreadyExists.into());
     }

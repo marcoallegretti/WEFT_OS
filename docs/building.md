@@ -125,6 +125,16 @@ weft-pack sign ./examples/org.weft.demo.counter --key ./keys/weft-sign.key
 weft-pack verify ./examples/org.weft.demo.counter --key ./keys/weft-sign.pub
 ```
 
+Installation requires a signature by a trusted key. To install the demos with the demo key, trust it for your user (the key is a test fixture; do not trust it on a system you depend on):
+
+```sh
+mkdir -p ~/.config/weft/trusted-keys
+cp examples/keys/weft-sign.pub ~/.config/weft/trusted-keys/weft-demo.pub
+weft-pack install examples/org.weft.demo.notes
+```
+
+Unsigned packages under development install with `weft-pack install <dir> --dev`, recorded as development content and marked `(development)` by `weft-pack list`. See `docs/security.md` for the trust store and app ID ownership.
+
 ## NixOS VM (requires Nix with flakes)
 
 Build the VM image:
