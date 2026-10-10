@@ -83,14 +83,14 @@ Each capability-controlled host import (fetch, notifications, clipboard) checks 
 | `fs:read:app-data` / `fs:rw:app-data` | Preopen the app's data directory (see *App data*) as `/data`, read-only or read-write |
 | `fs:read:xdg-documents` / `fs:rw:xdg-documents` | Preopen the documents directory from the XDG user-dirs configuration (`XDG_DOCUMENTS_DIR`) as `/xdg/documents`; the launch fails when none is configured |
 | `net:fetch:<host>` | `weft:app/fetch` to that exact host (a lowercase DNS name or dotted IPv4 address) over HTTP or HTTPS, on any port |
-| `net:fetch:*` | `weft:app/fetch` to any host |
+| `net:fetch:*` | `weft:app/fetch` to any host at a public address |
 | `sys:notifications` | `weft:app/notifications` |
 | `sys:clipboard:read` / `sys:clipboard:write` | `weft:app/clipboard#read` / `#write` |
 | `hw:gpu:compute` / `hw:gpu:render` | Not supported; the launch fails |
 
 Fetch does not follow redirects: a redirect is returned to the component as a response, so every destination it requests is checked against its grants. HTTP error statuses are responses too; only policy and transport failures are errors. Only the methods GET, HEAD, POST, PUT, PATCH, DELETE and OPTIONS are accepted, and a component cannot set `Host`, `Content-Length`, `Transfer-Encoding` or other hop-by-hop headers. Connecting times out after 10 seconds and the whole request after 30 seconds, not counting DNS resolution; response bodies are limited to 16 MiB. Fetch requires a runtime built with the `net-fetch` feature.
 
-Fetch grants name hosts, not addresses: ports are not restricted, and a host that resolves to a loopback or private address (or `net:fetch:*`) can reach local services. IPv6 literals cannot be granted.
+The runtime resolves a fetch destination itself and connects only to the addresses it allows. A grant for a name, and `net:fetch:*`, reach only public unicast addresses: loopback, unspecified, private, shared (100.64/10), link-local, multicast, broadcast, reserved, documentation and benchmarking addresses, and their IPv6 counterparts (unique local, site-local, Teredo and others), are refused, and an IPv6 address that carries an IPv4 address (mapped, compatible, translated, 6to4, NAT64) is judged by that address, so DNS cannot point a granted name at this machine or the local network. An IPv4 address named in a grant, such as `net:fetch:127.0.0.1`, is reached as declared. Fetch never goes through a proxy. Ports are not restricted. Credentials in a URL are refused; a component sends credentials in a header, and only to a host it is granted, since redirects are not followed. IPv6 literals cannot be granted.
 
 `tests/runtime/check_grants.py` runs the real runtime on a probe component (`tests/components/grants-probe`) under each kind of grant.
 

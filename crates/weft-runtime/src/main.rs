@@ -416,7 +416,14 @@ fn host_fetch(
         return Err(format!("unsupported URL scheme '{}'", parsed.scheme()));
     }
     let host = parsed.host_str().ok_or("URL has no host")?;
-    grants.fetch_host(host)?;
+    let reach = grants.fetch_host(host)?;
+    // Credentials are never taken from a URL; a component that needs them
+    // sends them in a header to the host it is granted.
+    if !parsed.username().is_empty() || parsed.password().is_some() {
+        return Err(
+            "URLs with credentials are not supported; send an Authorization header".to_owned(),
+        );
+    }
     // The method is written into the request line as given, so only known
     // methods are accepted.
     if !matches!(
@@ -437,6 +444,9 @@ fn host_fetch(
         }
     }
     let agent = ureq::AgentBuilder::new()
+        .resolver(GrantedResolver(reach))
+        // A proxy would be connected to instead of the checked address.
+        .try_proxy_from_env(false)
         .redirects(0)
         .timeout_connect(Duration::from_secs(10))
         .timeout(Duration::from_secs(30))
@@ -469,6 +479,33 @@ fn host_fetch(
         content_type,
         body: body_bytes,
     })
+}
+
+/// Resolves a fetch destination and keeps only the addresses its grant
+/// may reach; the connection is made to those addresses alone, so the
+/// check cannot be bypassed by a second, different DNS answer.
+#[cfg(all(feature = "wasmtime-runtime", feature = "net-fetch"))]
+struct GrantedResolver(grants::Reach);
+
+#[cfg(all(feature = "wasmtime-runtime", feature = "net-fetch"))]
+impl ureq::Resolver for GrantedResolver {
+    fn resolve(&self, netloc: &str) -> std::io::Result<Vec<std::net::SocketAddr>> {
+        use std::net::ToSocketAddrs;
+        let addresses: Vec<_> = netloc
+            .to_socket_addrs()?
+            .filter(|a| self.0 == grants::Reach::Declared || grants::is_public(a.ip()))
+            .collect();
+        if addresses.is_empty() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                format!(
+                    "{netloc} resolves only to addresses on this machine or a local network, \
+                     which only a grant naming that address covers"
+                ),
+            ));
+        }
+        Ok(addresses)
+    }
 }
 
 #[cfg(all(feature = "wasmtime-runtime", not(feature = "net-fetch")))]
