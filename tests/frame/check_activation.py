@@ -15,6 +15,8 @@ colour and a lighter shade on every key press. In the presented pixels:
 - clicking the taskbar strip brings the panel, the shell's home, over the
   applications, and activating an application brings it back;
 - when the focused application ends, the remaining one gets keyboard focus;
+- Alt+F4 asks the focused application window to close; its app shell exits
+  cleanly and the session ends; Alt+F4 does not close the shell's panel;
 - ACTIVATE_APP for a session that is not running is refused.
 
 The applications are unsigned test packages, recorded as development content
@@ -208,6 +210,31 @@ def run(args, desktop, store, home):
     shown(red, pressed=True)
     key("a")
     shown(red)
+
+    # Alt+F4 closes the focused application window, which ends its session;
+    # with the panel focused, it closes nothing.
+    key("alt+F4")
+    try:
+        appd.wait_for(lambda m: m.get("type") == "APP_STATE" and m.get("state") == "stopped"
+                      and m.get("session_id") == sessions[red], 20)
+    except TimeoutError:
+        raise AssertionError("Alt+F4 did not end the focused application's session")
+    # The app shell ended by closing, with exit status 0, not by a crash.
+    clean = (f'stopping session session_id={sessions[red]} '
+             'reason="app shell exited (Ok(ExitStatus(unix_wait_status(0))))"')
+    if clean not in desktop.log_text("appd"):
+        raise AssertionError("the closed app shell did not exit cleanly; see appd.log")
+    deadline = time.monotonic() + 20
+    while any(area(desktop.capture(), c)[0] is not None for cs in APPS.values() for c in cs):
+        if time.monotonic() > deadline:
+            raise AssertionError("the closed application is still shown")
+        time.sleep(0.3)
+    key("alt+F4")
+    deadline = time.monotonic() + 6
+    while time.monotonic() < deadline:
+        if area(desktop.capture(), GREEN)[0] != panel:
+            raise AssertionError("Alt+F4 closed or moved the shell's panel")
+        time.sleep(0.5)
 
     appd.send({"type": "ACTIVATE_APP", "session_id": 999})
     reply = appd.wait_for(lambda m: m.get("type") == "ERROR", 10)

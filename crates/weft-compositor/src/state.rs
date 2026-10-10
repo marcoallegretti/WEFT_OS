@@ -98,6 +98,9 @@ pub struct WeftCompositorState {
     pub loop_signal: LoopSignal,
     pub loop_handle: LoopHandle<'static, WeftCompositorState>,
     pub gesture_state: GestureState,
+    /// Keycodes whose press a compositor shortcut took, so their release is
+    /// taken as well and no client sees half of a key.
+    pub suppressed_keys: Vec<u32>,
 
     pub compositor_state: CompositorState,
     pub xdg_shell_state: XdgShellState,
@@ -196,6 +199,7 @@ impl WeftCompositorState {
             dmabuf_global: None,
             running: true,
             gesture_state: GestureState::default(),
+            suppressed_keys: Vec::new(),
             #[cfg(unix)]
             appd_ipc: None,
             #[cfg(target_os = "linux")]
