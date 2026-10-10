@@ -35,6 +35,9 @@ pub(crate) struct LaunchPackage {
     /// The image the package root is mounted from, held for as long as the
     /// session runs.
     pub(crate) image: Option<Mount>,
+    /// The lock that keeps an installed revision from being removed while
+    /// the session runs from it.
+    pub(crate) pin: Option<weft_ipc_types::store::Pin>,
 }
 
 /// Resolves `app_id` in the package stores.
@@ -68,16 +71,47 @@ fn resolve_in(app_id: &str, stores: &[PathBuf]) -> Result<LaunchPackage, Refusal
         let root = image.root().to_path_buf();
         return from_root(app_id, root, Some(image));
     }
+    // A store whose entry for the app cannot be used does not hide the app
+    // in a later store, as it does not in the list of installed apps; the
+    // first such problem is reported when no store has the app.
+    let mut unusable = None;
     for store in stores {
-        let dir = store.join(app_id);
-        if std::fs::symlink_metadata(dir.join(MANIFEST_FILE)).is_ok() {
-            return from_root(app_id, dir, None);
+        let active = match weft_ipc_types::store::active(store, app_id) {
+            Ok(Some(active)) => active,
+            Ok(None) => continue,
+            Err(e) => {
+                tracing::warn!(app_id, error = %e, "package entry skipped");
+                unusable.get_or_insert(match e {
+                    weft_ipc_types::store::StoreError::NotAPackage(_) => {
+                        Refusal::new(403, e.to_string())
+                    }
+                    weft_ipc_types::store::StoreError::Io(..) => Refusal::new(500, e.to_string()),
+                });
+                continue;
+            }
+        };
+        let dir = active.dir().to_path_buf();
+        // A directory left with only app data by an earlier layout is not a
+        // package.
+        if std::fs::symlink_metadata(dir.join(MANIFEST_FILE)).is_err() {
+            continue;
         }
+        // The session runs from the revision itself, not the link, so an
+        // update or rollback that switches the link while it runs leaves it
+        // on the bytes it started with. From here on a refusal is final: a
+        // package that is being changed, or that fails its checks, is not
+        // silently replaced by another store's copy.
+        let pin = weft_ipc_types::store::pin(&dir).map_err(|e| {
+            Refusal::new(
+                500,
+                format!("cannot hold {} while it runs: {e}", dir.display()),
+            )
+        })?;
+        let mut package = from_root(app_id, dir, None)?;
+        package.pin = Some(pin);
+        return Ok(package);
     }
-    Err(Refusal::new(
-        404,
-        format!("package {app_id} is not installed"),
-    ))
+    Err(unusable.unwrap_or_else(|| Refusal::new(404, format!("package {app_id} is not installed"))))
 }
 
 fn from_root(app_id: &str, root: PathBuf, image: Option<Mount>) -> Result<LaunchPackage, Refusal> {
@@ -129,6 +163,7 @@ fn from_root(app_id: &str, root: PathBuf, image: Option<Mount>) -> Result<Launch
         ui_entry,
         root,
         image,
+        pin: None,
     })
 }
 
@@ -249,6 +284,7 @@ impl LaunchPackage {
             ui_entry: PathBuf::from("/nonexistent/ui/index.html"),
             capabilities: Vec::new(),
             image: None,
+            pin: None,
         }
     }
 
@@ -382,14 +418,69 @@ mod tests {
         std::os::unix::fs::symlink(store.join("manifest.toml"), &manifest).unwrap();
         let manifest_link = refusal(resolve(ID));
         finish(&store);
-        for refused in [root_link, manifest_link] {
-            assert_eq!(refused.code, 403, "{}", refused.message);
-            assert!(
-                refused.message.contains("not a link"),
-                "{}",
-                refused.message
-            );
-        }
+        // Only a link to one of the app's own revisions is followed.
+        assert_eq!(root_link.code, 403, "{}", root_link.message);
+        assert!(
+            root_link
+                .message
+                .contains("nor a link to one of its revisions"),
+            "{}",
+            root_link.message
+        );
+        assert_eq!(manifest_link.code, 403, "{}", manifest_link.message);
+        assert!(
+            manifest_link.message.contains("not a link"),
+            "{}",
+            manifest_link.message
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn an_unusable_store_entry_does_not_hide_a_later_store() {
+        let _env = crate::tests::env_lock().blocking_lock();
+        let user = store("unusable_user", ID, "app.wasm");
+        let system = std::env::temp_dir().join(format!(
+            "weft_appd_launch_unusable_system_{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&system);
+        std::fs::create_dir_all(&system).unwrap();
+        std::fs::rename(user.join(ID), system.join(ID)).unwrap();
+        // A link to something other than one of the app's revisions.
+        std::os::unix::fs::symlink("/tmp", user.join(ID)).unwrap();
+        let found = resolve_in(ID, &[user.clone(), system.clone()]).map(|p| p.root);
+        let alone = refusal(resolve_in(ID, std::slice::from_ref(&user)));
+        finish(&user);
+        let _ = std::fs::remove_dir_all(&system);
+        assert_eq!(found.ok(), Some(system.join(ID)));
+        // With no other store, its problem is reported, not "not installed".
+        assert_eq!(alone.code, 403, "{}", alone.message);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_session_runs_from_its_revision_and_holds_it() {
+        use weft_ipc_types::store::{link_target, revisions_of, try_claim};
+        let _env = crate::tests::env_lock().blocking_lock();
+        let store = store("revision", ID, "app.wasm");
+        let revision = "ab".repeat(32);
+        let dir = revisions_of(&store, ID).join(&revision);
+        std::fs::create_dir_all(dir.parent().unwrap()).unwrap();
+        std::fs::rename(store.join(ID), &dir).unwrap();
+        std::os::unix::fs::symlink(link_target(ID, &revision), store.join(ID)).unwrap();
+        let package = resolve(ID).unwrap();
+        let held = try_claim(&dir).unwrap().is_none();
+        let root = package.root.clone();
+        let module = package.module.clone();
+        drop(package);
+        let released = try_claim(&dir).unwrap().is_some();
+        finish(&store);
+        // The children get the revision's own paths, not the link's.
+        assert_eq!(root, dir);
+        assert_eq!(module, dir.join("app.wasm"));
+        assert!(held, "the revision is not held while the session runs");
+        assert!(released, "the revision is still held after the session");
     }
 
     const DEMO: &str = "org.weft.demo.counter";
