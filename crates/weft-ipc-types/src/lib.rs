@@ -1,6 +1,9 @@
+pub mod approval;
 pub mod capability;
 pub mod manifest;
 pub mod package;
+pub mod store;
+pub mod trust;
 
 use serde::{Deserialize, Serialize};
 
