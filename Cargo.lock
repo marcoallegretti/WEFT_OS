@@ -10451,7 +10451,7 @@ checksum = "a28ac98ddc8b9274cb41bb4d9d4d5c425b6020c50c46f25559911905610b4a88"
 
 [[package]]
 name = "weft-app-shell"
-version = "0.1.0"
+version = "0.0.1-alpha.0"
 dependencies = [
  "anyhow",
  "bitflags 2.11.0",
@@ -10467,7 +10467,7 @@ dependencies = [
 
 [[package]]
 name = "weft-appd"
-version = "0.1.0"
+version = "0.0.1-alpha.0"
 dependencies = [
  "anyhow",
  "futures-util",
@@ -10487,11 +10487,11 @@ dependencies = [
 
 [[package]]
 name = "weft-build-meta"
-version = "0.1.0"
+version = "0.0.1-alpha.0"
 
 [[package]]
 name = "weft-compositor"
-version = "0.1.0"
+version = "0.0.1-alpha.0"
 dependencies = [
  "anyhow",
  "bitflags 2.11.0",
@@ -10509,7 +10509,7 @@ dependencies = [
 
 [[package]]
 name = "weft-file-portal"
-version = "0.1.0"
+version = "0.0.1-alpha.0"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -10520,7 +10520,7 @@ dependencies = [
 
 [[package]]
 name = "weft-ipc-types"
-version = "0.1.0"
+version = "0.0.1-alpha.0"
 dependencies = [
  "ed25519-dalek",
  "hex",
@@ -10533,7 +10533,7 @@ dependencies = [
 
 [[package]]
 name = "weft-mount-helper"
-version = "0.1.0"
+version = "0.0.1-alpha.0"
 dependencies = [
  "anyhow",
  "libc",
@@ -10541,7 +10541,7 @@ dependencies = [
 
 [[package]]
 name = "weft-pack"
-version = "0.1.0"
+version = "0.0.1-alpha.0"
 dependencies = [
  "anyhow",
  "ed25519-dalek",
@@ -10556,7 +10556,7 @@ dependencies = [
 
 [[package]]
 name = "weft-runtime"
-version = "0.1.0"
+version = "0.0.1-alpha.0"
 dependencies = [
  "anyhow",
  "cap-std",
@@ -10573,7 +10573,7 @@ dependencies = [
 
 [[package]]
 name = "weft-servo-shell"
-version = "0.1.0"
+version = "0.0.1-alpha.0"
 dependencies = [
  "anyhow",
  "bitflags 2.11.0",

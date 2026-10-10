@@ -104,3 +104,5 @@ See `docs/security.md`. Key points:
 ## Contributing
 
 See [CONTRIBUTING.md](CONTRIBUTING.md). [AGENTS.md](AGENTS.md) is the engineering contract and [BLUEPRINT.md](BLUEPRINT.md) the accepted direction toward `0.1.0`.
+
+The workspace is at `0.0.1-alpha.0`, the first prerelease on the way to `0.0.1`. The `0.1.0` it declared before was an unreleased development placeholder; no release was published under it.
