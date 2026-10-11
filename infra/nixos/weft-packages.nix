@@ -15,13 +15,22 @@ let
       in !(lib.hasPrefix "target" rel || lib.hasSuffix "-result" rel);
   };
 
+  servoHash = "sha256-L5XlHf5GOoPtyitRsbb+keXSkTMSJWmYCrWCHzGFI5M=";
+
+  # The pinned Servo revision as a whole tree; see servo-tree.py.
+  servoSrc = pkgs.fetchgit {
+    url = "https://github.com/marcoallegretti/servo";
+    rev = "e5d9a518ebddb5ebd6af404d1fd4e00ea0f77163";
+    hash = servoHash;
+  };
+
   cargoLock = {
     lockFile = ../../Cargo.lock;
     # One hash per git source in Cargo.lock: the Servo fork and the Stylo fork
     # (keyed by its `selectors` crate). Recompute them whenever a revision
     # changes; a build with a stale hash reports the right one.
     outputHashes = {
-      "servo-0.0.1" = "sha256-L5XlHf5GOoPtyitRsbb+keXSkTMSJWmYCrWCHzGFI5M=";
+      "servo-0.0.1" = servoHash;
       "selectors-0.36.0" = "13y6pa19j4w2zsxfhv6mrl03wsa0frazlsssbqkzpwci8k9gzl4i";
     };
   };
@@ -89,6 +98,14 @@ let
       # The helper runs setuid and takes no program from its caller's PATH.
       WEFT_VERITYSETUP = "${pkgs.cryptsetup}/bin/veritysetup";
     };
+
+    # Servo's code generator finds its WebIDL parser from its own path
+    # without resolving links, so the tree's third_party/ is also linked
+    # where that path leads from the vendor directory.
+    preBuild = ''
+      python3 ${./servo-tree.py} ${servoSrc} Cargo.lock "$NIX_BUILD_TOP/cargo-vendor-dir" "$NIX_BUILD_TOP/servo"
+      ln -s "$NIX_BUILD_TOP/servo/third_party" "$NIX_BUILD_TOP/third_party"
+    '';
 
     # The system UI page and the UI kit both shells inject, at the paths the
     # session's units name.
