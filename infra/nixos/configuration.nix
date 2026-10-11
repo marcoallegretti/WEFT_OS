@@ -119,7 +119,12 @@
         # units after it; a restarted compositor must not inherit it, or an
         # X11 DISPLAY, or it would pick the nested backend.
         UnsetEnvironment = "WAYLAND_DISPLAY DISPLAY";
-        Environment = "LIBSEAT_BACKEND=seatd";
+        Environment = [
+          "LIBSEAT_BACKEND=seatd"
+          # QEMU's default virtio-gpu has no 3D acceleration; Mesa renders in
+          # software.
+          "WEFT_ALLOW_SOFTWARE_RENDERING=1"
+        ];
         Restart = "on-failure";
         RestartSec = "1";
       };

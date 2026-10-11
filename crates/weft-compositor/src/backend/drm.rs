@@ -311,8 +311,10 @@ fn device_added(state: &mut WeftCompositorState, node: DrmNode, path: &Path) -> 
         let egl_display =
             unsafe { EGLDisplay::new(gbm.clone()).context("EGLDisplay::new failed")? };
         let egl_device = EGLDevice::device_for_display(&egl_display).context("no EGL device")?;
-        if egl_device.is_software() {
-            anyhow::bail!("software renderer");
+        // A software renderer is refused unless asked for: it is the only
+        // one a virtual GPU without 3D acceleration offers.
+        if egl_device.is_software() && std::env::var_os("WEFT_ALLOW_SOFTWARE_RENDERING").is_none() {
+            anyhow::bail!("software renderer (set WEFT_ALLOW_SOFTWARE_RENDERING to use it)");
         }
         let rn = egl_device
             .try_get_render_node()
