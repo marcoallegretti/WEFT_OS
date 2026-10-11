@@ -1,4 +1,4 @@
-{ pkgs, rust193, ... }:
+{ pkgs, lib, rust193, ... }:
 
 let
   rustPlatform = pkgs.makeRustPlatform {
@@ -6,85 +6,104 @@ let
     rustc = rust193;
   };
 
-  src = ../..;
+  # The workspace without build outputs, so a local `target/` never enters
+  # the store.
+  src = lib.cleanSourceWith {
+    src = lib.cleanSource ../..;
+    filter = path: _type:
+      let rel = lib.removePrefix (toString ../.. + "/") (toString path);
+      in !(lib.hasPrefix "target" rel || lib.hasSuffix "-result" rel);
+  };
 
   cargoLock = {
     lockFile = ../../Cargo.lock;
     # One hash per git source in Cargo.lock: the Servo fork and the Stylo fork
-    # (keyed by its `selectors` crate). Every package vendors both, so both must
-    # match the pinned revisions. Recompute them whenever a revision changes.
-    # The Servo hash is not yet known for e5d9a51; a Nix build reports it.
+    # (keyed by its `selectors` crate). Recompute them whenever a revision
+    # changes; a build with a stale hash reports the right one.
     outputHashes = {
-      "servo-0.0.1" = pkgs.lib.fakeHash;
+      "servo-0.0.1" = "sha256-L5XlHf5GOoPtyitRsbb+keXSkTMSJWmYCrWCHzGFI5M=";
       "selectors-0.36.0" = "13y6pa19j4w2zsxfhv6mrl03wsa0frazlsssbqkzpwci8k9gzl4i";
     };
   };
 
-  commonArgs = {
-    inherit src cargoLock;
+  # SpiderMonkey, prebuilt by the mozjs project for the mozjs_sys version in
+  # Cargo.lock. The build has no network, and compiling SpiderMonkey from
+  # source would add hours and gigabytes to every build.
+  mozjsArchive = pkgs.fetchurl {
+    url = "https://github.com/servo/mozjs/releases/download/mozjs-sys-v0.140.8-0/libmozjs-x86_64-unknown-linux-gnu.tar.gz";
+    hash = "sha256-wEDh2VCawPLc7AOlaitkT5yN9pv16oX7UoeHMg+4Aeg=";
+  };
+
+  # Libraries Servo and winit open at run time rather than link against.
+  runtimeLibs = with pkgs; [ libGL wayland libxkbcommon vulkan-loader ];
+
+  packages = [
+    "weft-compositor"
+    "weft-servo-shell"
+    "weft-app-shell"
+    "weft-appd"
+    "weft-runtime"
+    "weft-pack"
+    "weft-file-portal"
+    "weft-mount-helper"
+  ];
+
+  features = [
+    "weft-servo-shell/servo-embed"
+    "weft-app-shell/servo-embed"
+    "weft-runtime/wasmtime-runtime"
+    "weft-runtime/net-fetch"
+  ];
+
+  # Every binary comes from one cargo build, so the dependencies the
+  # programs share, Servo above all, compile once.
+  workspace = rustPlatform.buildRustPackage {
+    pname = "weft";
     version = "0.0.1-alpha.0";
-    nativeBuildInputs = with pkgs; [ pkg-config ];
-  };
+    inherit src cargoLock;
 
-  mkWeftPkg = { pname, extraBuildInputs ? [], extraNativeBuildInputs ? [], cargoFlags ? [], extraEnv ? {}, preBuild ? "", postInstall ? "" }: rustPlatform.buildRustPackage (commonArgs // {
-    inherit pname preBuild postInstall;
-    cargoBuildFlags = [ "--package" pname ] ++ cargoFlags;
-    cargoTestFlags = [ "--package" pname ];
-    buildInputs = extraBuildInputs;
-    nativeBuildInputs = commonArgs.nativeBuildInputs ++ extraNativeBuildInputs;
-    env = extraEnv;
+    cargoBuildFlags = lib.concatMap (p: [ "--package" p ]) packages
+      ++ [ "--features" (lib.concatStringsSep "," features) ];
     doCheck = false;
-  });
 
-in {
-  weft-compositor = mkWeftPkg {
-    pname = "weft-compositor";
-    extraBuildInputs = with pkgs; [
-      libdrm mesa libgbm wayland libxkbcommon seatd udev dbus libGL libdisplay-info libinput
+    nativeBuildInputs = with pkgs; [
+      pkg-config
+      wayland-scanner
+      cmake
+      python3
+      perl
+      m4
+      rustPlatform.bindgenHook
     ];
-    extraNativeBuildInputs = with pkgs; [ wayland-scanner ];
-    extraEnv = {
-      RUSTFLAGS = "-L${pkgs.libgbm}/lib -L${pkgs.libinput}/lib";
-    };
-  };
 
-  weft-servo-shell = mkWeftPkg {
-    pname = "weft-servo-shell";
-    # The system UI page, at the path the shell's units name.
+    buildInputs = with pkgs; [
+      libdrm mesa libgbm wayland libxkbcommon seatd udev dbus libGL
+      libdisplay-info libinput
+      openssl cryptsetup
+      fontconfig freetype libunwind
+    ];
+
+    env = {
+      MOZJS_ARCHIVE = "${mozjsArchive}";
+      RUSTFLAGS = "-L${pkgs.libgbm}/lib -L${pkgs.libinput}/lib";
+      # The helper runs setuid and takes no program from its caller's PATH.
+      WEFT_VERITYSETUP = "${pkgs.cryptsetup}/bin/veritysetup";
+    };
+
+    # The system UI page and the UI kit both shells inject, at the paths the
+    # session's units name.
     postInstall = ''
       install -Dm644 infra/shell/system-ui.html $out/share/weft/shell/system-ui.html
+      install -Dm644 infra/shell/weft-ui-kit.js $out/share/weft/system/weft-ui-kit.js
+    '';
+
+    postFixup = ''
+      for bin in weft-servo-shell weft-app-shell weft-compositor; do
+        patchelf --add-rpath ${lib.makeLibraryPath runtimeLibs} $out/bin/$bin
+      done
     '';
   };
 
-  weft-app-shell = mkWeftPkg {
-    pname = "weft-app-shell";
-  };
-
-  weft-appd = mkWeftPkg {
-    pname = "weft-appd";
-    extraBuildInputs = with pkgs; [ openssl ];
-  };
-
-  weft-runtime = mkWeftPkg {
-    pname = "weft-runtime";
-    extraBuildInputs = with pkgs; [ openssl ];
-    cargoFlags = [ "--features" "wasmtime-runtime,net-fetch" ];
-  };
-
-  weft-pack = mkWeftPkg {
-    pname = "weft-pack";
-  };
-
-  weft-file-portal = mkWeftPkg {
-    pname = "weft-file-portal";
-  };
-
-  weft-mount-helper = mkWeftPkg {
-    pname = "weft-mount-helper";
-    extraBuildInputs = with pkgs; [ cryptsetup ];
-    # The helper runs setuid and takes no program from its caller's PATH.
-    extraEnv = {
-      WEFT_VERITYSETUP = "${pkgs.cryptsetup}/bin/veritysetup";
-    };
-  };
-}
+in
+# Each program keeps its own attribute for the units that name it.
+lib.genAttrs packages (_: workspace) // { weft = workspace; }

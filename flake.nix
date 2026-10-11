@@ -27,7 +27,7 @@
       in
       {
         packages = weftPkgs // {
-          default = weftPkgs.weft-appd;
+          default = weftPkgs.weft;
         };
 
         devShells.default = pkgs.mkShell {

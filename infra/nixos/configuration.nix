@@ -124,6 +124,7 @@
       wantedBy = [ "weft-session.target" ];
       environment = {
         WEFT_SYSTEM_UI_HTML = "${pkgs.weft.weft-servo-shell}/share/weft/shell/system-ui.html";
+        WEFT_UI_KIT_JS = "${pkgs.weft.weft-servo-shell}/share/weft/system/weft-ui-kit.js";
       };
       serviceConfig = {
         Type = "simple";
@@ -149,6 +150,7 @@
           "WEFT_APP_SHELL_BIN=${pkgs.weft.weft-app-shell}/bin/weft-app-shell"
           "WEFT_FILE_PORTAL_BIN=${pkgs.weft.weft-file-portal}/bin/weft-file-portal"
           "WEFT_MOUNT_HELPER=/run/wrappers/bin/weft-mount-helper"
+          "WEFT_UI_KIT_JS=${pkgs.weft.weft-app-shell}/share/weft/system/weft-ui-kit.js"
         ];
       };
     };
