@@ -1,6 +1,6 @@
 """Check that native pointer and keyboard input reaches a page through weft-compositor.
 
-The harness runs weft-servo-shell with `input.html` on a nested desktop (see
+The harness runs a Servo host with `input.html` on a nested desktop (see
 session.py) and injects real X input into the compositor's window with
 xdotool (after giving that window X input focus, since Xvfb runs without a
 window manager), which weft-compositor's winit backend receives and routes to
@@ -12,9 +12,15 @@ defines, as seen in the presented pixels:
 2. Typing `a` turns the right half yellow.
 3. Typing `Shift+a` turns the right half magenta, which checks the modifier.
 4. A click 6 px inside the right half's left edge turns the right half white.
+5. Wheel notches down over the left half scroll it to the cyan block beneath,
+   so no green remains; notches up scroll it back to green.
 
 The two clicks straddle the boundary between the halves, so a pointer
 position that is scaled or offset by more than a few pixels fails.
+
+`--host system` (the default) runs weft-servo-shell with the page as its
+system UI; `--host app` runs weft-app-shell with the page as an
+application's UI document, as check_frame.py does.
 
 Requires Xvfb, xwd, ImageMagick's convert and xdotool.
 """
@@ -27,12 +33,16 @@ import time
 from pathlib import Path
 
 sys.dont_write_bytecode = True
+from check_frame import APP_ID, app_ui  # noqa: E402
 from session import ROOT, Desktop, SessionError, bounding_box, missing_tools, parse_ppm  # noqa: E402
 
 
 HERE = Path(__file__).resolve().parent
 RED, GREEN, BLUE = (255, 0, 0), (0, 255, 0), (0, 0, 255)
 WHITE, YELLOW, MAGENTA = (255, 255, 255), (255, 255, 0), (255, 0, 255)
+CYAN = (0, 255, 255)
+# More notches than the pane needs to reach either end.
+WHEEL_NOTCHES = "30"
 MIN_SIDE = 40
 
 
@@ -73,9 +83,9 @@ class Steps:
         subprocess.run([self.xdotool_path, *arguments], env={"DISPLAY": self.desktop.display},
                        check=True, timeout=20)
 
-    def click(self, x, y):
+    def click(self, x, y, button="1", repeat="1"):
         self.xdotool("mousemove", "--sync", str(x), str(y))
-        self.xdotool("click", "1")
+        self.xdotool("click", "--repeat", repeat, "--delay", "30", button)
 
 
 def run(steps):
@@ -95,19 +105,31 @@ def run(steps):
     steps.click(right[0] + EDGE_INSET, middle)
     steps.expect("click near the left edge of the right half", [GREEN, WHITE],
                  absent=[MAGENTA, RED])
+    # X buttons 5 and 4 are wheel notches down and up.
+    centre = (left[0] + left[2]) // 2
+    steps.click(centre, middle, button="5", repeat=WHEEL_NOTCHES)
+    steps.expect("wheel down over the left half", [CYAN, WHITE], absent=[GREEN])
+    steps.click(centre, middle, button="4", repeat=WHEEL_NOTCHES)
+    steps.expect("wheel up over the left half", [GREEN, WHITE], absent=[CYAN])
 
 
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__,
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--compositor", type=Path, default=ROOT / "target/debug/weft-compositor")
-    parser.add_argument("--shell", type=Path, default=ROOT / "target/debug/weft-servo-shell")
+    parser.add_argument("--host", choices=("system", "app"), default="system")
+    parser.add_argument("--shell", type=Path,
+                        help="host binary (default: target/debug/weft-servo-shell or "
+                             "target/debug/weft-app-shell)")
     parser.add_argument("--page", type=Path, default=HERE / "input.html")
     parser.add_argument("--timeout", type=float, default=30.0,
                         help="seconds to wait for each expected page state")
     parser.add_argument("--output", type=Path, default=ROOT / "target/input-check",
                         help="directory for logs and the last capture")
     args = parser.parse_args(argv)
+    if args.shell is None:
+        name = "weft-servo-shell" if args.host == "system" else "weft-app-shell"
+        args.shell = ROOT / "target/debug" / name
 
     missing = missing_tools() + [tool for tool in ("xdotool",) if shutil.which(tool) is None]
     missing += [str(b) for b in (args.compositor, args.shell) if not b.is_file()]
@@ -117,8 +139,13 @@ def main(argv=None):
 
     try:
         with Desktop(args.compositor, args.output, outputs=["input.ppm"]) as desktop:
-            shell = desktop.launch_client("shell", [args.shell],
-                                          {"WEFT_SYSTEM_UI_HTML": str(args.page.resolve())})
+            if args.host == "system":
+                shell = desktop.launch_client(
+                    "shell", [args.shell], {"WEFT_SYSTEM_UI_HTML": str(args.page.resolve())})
+            else:
+                entry = app_ui(desktop.runtime / APP_ID, args.page)
+                shell = desktop.launch_client(
+                    "shell", [args.shell, APP_ID, "1", "--ui", str(entry)])
             steps = Steps(desktop, shell, args.timeout)
             try:
                 run(steps)

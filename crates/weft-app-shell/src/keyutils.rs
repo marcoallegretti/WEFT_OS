@@ -1,6 +1,25 @@
-use servo::{Code, Key, KeyState, KeyboardEvent, Location, Modifiers};
-use winit::event::ElementState;
+use servo::{Code, Key, KeyState, KeyboardEvent, Location, Modifiers, WheelDelta, WheelMode};
+use winit::event::{ElementState, MouseScrollDelta};
 use winit::keyboard::{Key as WinitKey, KeyLocation, ModifiersState, NamedKey, PhysicalKey};
+
+/// Pixels scrolled per wheel notch, the step servoshell uses.
+const WHEEL_LINE: f64 = 76.0;
+
+/// The wheel delta for Servo from a winit scroll, which Servo turns into a
+/// `wheel` event and, unless the page cancels it, scrolls the content under
+/// the pointer. A notch counts as `WHEEL_LINE` pixels.
+pub fn wheel_delta_from_winit(delta: MouseScrollDelta) -> WheelDelta {
+    let (x, y) = match delta {
+        MouseScrollDelta::LineDelta(x, y) => (f64::from(x) * WHEEL_LINE, f64::from(y) * WHEEL_LINE),
+        MouseScrollDelta::PixelDelta(position) => (position.x, position.y),
+    };
+    WheelDelta {
+        x,
+        y,
+        z: 0.0,
+        mode: WheelMode::DeltaPixel,
+    }
+}
 
 pub fn keyboard_event_from_winit(
     event: &winit::event::KeyEvent,

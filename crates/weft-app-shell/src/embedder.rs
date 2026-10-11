@@ -7,7 +7,7 @@ use servo::{
     DeviceIntRect, DeviceIntSize, DevicePoint, EventLoopWaker, InputEvent, LoadStatus,
     MouseButton as ServoMouseButton, MouseButtonAction, MouseButtonEvent, MouseMoveEvent,
     NavigationRequest, RenderingContext, RgbaImage, ServoBuilder, ServoDelegate, ServoUrl,
-    UserContentManager, UserScript, WebViewBuilder, WebViewDelegate,
+    UserContentManager, UserScript, WebViewBuilder, WebViewDelegate, WheelEvent,
 };
 use winit::{
     application::ApplicationHandler,
@@ -693,6 +693,15 @@ impl ApplicationHandler<ServoWake> for App {
                 if let Some(wv) = &self.webview {
                     let _ = wv
                         .notify_input_event(InputEvent::MouseMove(MouseMoveEvent::new(pt.into())));
+                }
+            }
+            WindowEvent::MouseWheel { delta, .. } => {
+                if let Some(wv) = &self.webview {
+                    let delta = super::keyutils::wheel_delta_from_winit(delta);
+                    let _ = wv.notify_input_event(InputEvent::Wheel(WheelEvent::new(
+                        delta,
+                        self.cursor_pos.into(),
+                    )));
                 }
             }
             WindowEvent::MouseInput { state, button, .. } => {

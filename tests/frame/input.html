@@ -5,13 +5,17 @@
 <title>WEFT input reference</title>
 <style>
   html, body { margin: 0; padding: 0; width: 100%; height: 100%; overflow: hidden; }
-  body { display: grid; grid-template-columns: 1fr 1fr; }
-  #left { background: rgb(255, 0, 0); }
+  body { display: grid; grid-template-columns: 1fr 1fr; grid-template-rows: 100vh; }
+  /* The left half scrolls: its colour fills the half, and a cyan block of
+     the same height lies beneath it, reached with the wheel. */
+  #pane { overflow-y: scroll; }
+  #left { height: 100vh; background: rgb(255, 0, 0); }
+  #below { height: 100vh; background: rgb(0, 255, 255); }
   #right { background: rgb(0, 0, 255); }
 </style>
 </head>
 <body>
-  <div id="left"></div>
+  <div id="pane"><div id="left"></div><div id="below"></div></div>
   <div id="right"></div>
   <script>
     // Each input the harness sends changes one half to a colour it checks for.
