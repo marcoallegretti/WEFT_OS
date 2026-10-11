@@ -6,13 +6,17 @@ let
     rustc = rust193;
   };
 
-  # The workspace without build outputs, so a local `target/` never enters
-  # the store.
-  src = lib.cleanSourceWith {
-    src = lib.cleanSource ../..;
-    filter = path: _type:
-      let rel = lib.removePrefix (toString ../.. + "/") (toString path);
-      in !(lib.hasPrefix "target" rel || lib.hasSuffix "-result" rel);
+  # Only what the build reads, so editing the VM's configuration or the
+  # docs does not rebuild Servo.
+  src = lib.fileset.toSource {
+    root = ../..;
+    fileset = lib.fileset.unions [
+      ../../Cargo.toml
+      ../../Cargo.lock
+      ../../crates
+      ../../protocol
+      ../../infra/shell
+    ];
   };
 
   servoHash = "sha256-L5XlHf5GOoPtyitRsbb+keXSkTMSJWmYCrWCHzGFI5M=";

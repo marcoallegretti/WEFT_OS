@@ -64,6 +64,14 @@
   };
   services.dbus.enable = true;
 
+  # The compositor runs as a user service, outside the tty1 login session,
+  # so logind does not hand it the seat's devices; seatd does, to members of
+  # its group.
+  services.seatd = {
+    enable = true;
+    group = "seat";
+  };
+
   services.udev.packages = [ pkgs.libinput ];
 
   environment.systemPackages = with pkgs; [
@@ -111,6 +119,7 @@
         # units after it; a restarted compositor must not inherit it, or an
         # X11 DISPLAY, or it would pick the nested backend.
         UnsetEnvironment = "WAYLAND_DISPLAY DISPLAY";
+        Environment = "LIBSEAT_BACKEND=seatd";
         Restart = "on-failure";
         RestartSec = "1";
       };
